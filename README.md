@@ -34,8 +34,8 @@ Windows 桌面版的 pi coding agent。界面沿用现有的 pi-web（React 组�
   防火墙和代理软件盯着监听端口；睡眠唤醒、网络抖动时本地连接反而最先出问题。
 - **不重写 agent**。pi 的核心是 Node 库，任何非 Node 外壳（C#/Rust/Python）都得再带一个 Node 进程。
   所以外壳也是 TypeScript，用 Electron 自带的 Node 跑后台（`ELECTRON_RUN_AS_NODE=1`），不需要额外打包运行时。
-- **不手抄界面**。`lib/`、`components/`、`hooks/`、`app/api/` 与上游 pi-web **逐字节一致**（`diff -r` 为空）。
-  搬迁靠的是两端各加一层薄垫片。
+- **不手抄界面**。`lib/`、`components/`、`hooks/`、`app/api/` 与上游 pi-web 逐字节一致（搬迁阶段的要求，`diff -r` 为空）；
+  搬迁已经完成，此后这几个目录允许直接改（现有改动见「上游同步」）。
 
 ## 垫片做了什么
 
@@ -60,6 +60,24 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 传输层每次只拉一块；上游事件生产者仍可能自行排队，不能据此保证内存始终有界。
 浏览器自己发起的资源加载（图片、音视频、下载、`<img src="/api/files/...">`）
 走 `pi-app://` 协议，同样回到同一个路由器。
+
+## 内置自动模式
+
+`builtin/automode/` 是 `@czottmann/pi-automode` 1.14.0 的本地副本，跟着应用一起编译，
+新装的电脑不用再单独装这个插件。来源提交、本地改动和重新搬运的步骤都写在 `builtin/automode/VENDOR.md`。
+
+- 入口文件名由 `extensions/auto-mode.ts` 改成 `extensions/index.ts`。这个插件会拦掉对
+  “文件名里带 auto-mode”的文件的写入（它把这类文件当成自己的安全配置），
+  原名会让以后改这份源码时被它自己的守卫挡住。其余文件与来源一致。
+- **只有一份生效**：磁盘上已装的那份（`~/.pi/agent/extensions/pi-automode`）会被丢掉，
+  免得同时出现两个分类器和两套工具。插件管理器里仍会列出它，因为它还在磁盘上。
+- 设置入口在设置对话框顶部的「自动模式」页；保存后要重新加载会话才生效。
+- 页面上「现在真正生效」读的是文件的值，旁边另有一行「本会话」显示跑着的那个会话实际在用什么
+  （在聊天里发过 `/automode off` 只关掉那一个会话，文件里的值不变），还有它放行和拦住的次数。
+- 配置文件与命令行版共用，装没装插件都是这两个：
+  - 全局：`~/.pi/agent/extensions/pi-automode/config.json`
+  - 本项目：`<项目>/.pi/automode.local.json`（项目未受信任时会被忽略，设置页会标出来）
+- 页面上保存时只写你动过的项，没动过的键不进文件，继续用下层的值。
 
 ## 命令
 
@@ -308,10 +326,22 @@ Tailwind 类。生成的 CSS 缺少 `flex-col`、`min-w-0` 等布局规则，导
 
 ## 上游同步
 
-`lib/`、`components/`、`hooks/`、`app/api/`、`app/*.css`、`public/` 都是从 pi-web 直接复制的，
-同步时先备份，再镜像这些目录，包含删除上游已删除的文件。
-普通覆盖会留下旧路由。还需协调 `package.json` 与锁文件中的新增依赖，
+`lib/`、`components/`、`hooks/`、`app/api/`、`app/*.css`、`public/` 都是从 pi-web 直接复制的。
+搬迁阶段要求它们与上游逐字节一致；**搬迁完成后这条要求就放开了**：现在可以直接改这些文件，
+改完跑 `node <维护skill>/scripts/check-upstream-parity.mjs` 看差异清单，确认差异都是有意为之。
+本次留下的差异（其余文件仍与上游一致）：
+
+```
+lib         i18n/messages/{en,zh-CN,zh-TW}.ts   rpc-manager.ts   settings-navigation.ts   (+ automode-builtin.ts)
+components  SettingsPanel.tsx                                                (+ automode-draft.ts, AutomodeConfig.tsx)
+app/api     (+ automode/route.ts, automode/test/route.ts)
+```
+
+同步上游时仍然先备份，再镜像这些目录，包含删除上游已删除的文件；
+普通覆盖会留下旧路由，`scripts/gen-routes.mjs` 会继续收集它们。还需协调 `package.json` 与锁文件中的新增依赖，
 检查新的 Next API/路由约定，重建并跑回归；不能保证任意上游版本直接覆盖就能用。
+两类改动要分开处理：上面那 5 个被改过的文件在镜像时会冲突，需要把本地那段改动重做一遍
+（都集中在自动模式相关的位置），新增文件不受影响。
 （早期版本改过 `lib/terminal-manager.ts`，后来发现按上游原样即可：终端 shell 就用
 系统环境里的 `ComSpec`，正常 Windows 上一定有；现在这个文件与上游逐字节一致。）
 

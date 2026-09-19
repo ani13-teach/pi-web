@@ -4,6 +4,7 @@ import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@e
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
+import { createBuiltinAutomodeExtension, preferBuiltinAutomode } from "./automode-builtin";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
@@ -2038,6 +2039,14 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
+            // A subagent session that loads extensions has to keep the auto-mode
+            // guardrail it would have received from the plugin on disk.
+            ...(subagentResources.loadExtensions
+              ? {
+                  extensionFactories: [createBuiltinAutomodeExtension()],
+                  extensionsOverride: preferBuiltinAutomode,
+                }
+              : {}),
           }
         : chatOnly
           ? CHAT_ONLY_RESOURCE_LOADER_OPTIONS
@@ -2052,8 +2061,11 @@ export async function startRpcSession(
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
               ),
+              createBuiltinAutomodeExtension(),
             ],
-            extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+            extensionsOverride: (base) => preferBuiltinAutomode(
+              preferUserBashExtension(preferPiWebSubagentExtension(base)),
+            ),
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });

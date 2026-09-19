@@ -4,6 +4,7 @@ export const SETTINGS_SECTION_VALUES = [
   "skills",
   "agents",
   "plugins",
+  "automode",
 ] as const;
 
 export type SettingsSection = (typeof SETTINGS_SECTION_VALUES)[number];

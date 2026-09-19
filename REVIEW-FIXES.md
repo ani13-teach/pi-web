@@ -1,7 +1,8 @@
 # 本轮审阅修复与验收
 
 本轮按「优先修日常会遇到的问题」执行。桌面内部仍用 Electron IPC，不加本地 HTTP 服务。
-`lib/`、`components/`、`hooks/`、`app/api/`、`public/` 和两份上游 CSS 保持逐字节一致。
+`lib/`、`components/`、`hooks/`、`app/api/`、`public/` 和两份上游 CSS 在当时保持逐字节一致
+（后来的自动模式一轮改动了其中 5 个文件，见本文最后一段）。
 
 ## 已修
 
@@ -87,8 +88,9 @@ SHA-256 `cad36d4d895ca7377ad7f5ad8e09a6a1b7cf1a1ffcfa34b01035fe213f54e66f`（07:
   此命令还排除9个含web入口的文件（部分混有桌面检查），未收集app/api的12个文件。
   试收集这些API测试时，7个因直接依赖缺失的Next运行环境而失败，因此没有伪称全套覆盖。
 
-## 最终交付包
+## 最终交付包（已被下文替代）
 
+> 这里的 140,693,367 字节、`cad36d4d…` 是上一轮那个包。最新包见文末「追加一轮：内置自动模式与设置页」里的交付包一节。
 - 安装包：`release/Pi Desktop Setup 0.0.1.exe`
 - 大小：140693367 bytes
 - SHA-256：`cad36d4d895ca7377ad7f5ad8e09a6a1b7cf1a1ffcfa34b01035fe213f54e66f`
@@ -108,3 +110,50 @@ SHA-256 `cad36d4d895ca7377ad7f5ad8e09a6a1b7cf1a1ffcfa34b01035fe213f54e66f`（07:
 主代理已核对日志中的runner退出码、最终安装包哈希和上游目录一致性。
 本轮未运行安装程序，仓库外打包版的结果不冒充“新版本安装后实测”。
 当前运行的已安装应用没有被强关或覆盖。关闭旧实例后可运行上面的新安装包。
+
+## 追加一轮：内置自动模式与设置页
+
+自动模式（`@czottmann/pi-automode`）原先只以全局插件的形式装着，新电脑上要自己装一遍。
+这一轮把它搬进仓库随应用编译，并加了一个设置页。产品行为：新装的电脑开箱就有自动模式，
+要改参数不必去改 JSON。
+
+| 改动 | 内容 |
+|---|---|
+| 内置插件源码 | `builtin/automode/`，来自本机那份插件的工作区（基线提交 `011bd1f`，本地未提交改动也一并搬入），入口由 `extensions/auto-mode.ts` 改名 `extensions/index.ts`；来源与重搬步骤写在 `builtin/automode/VENDOR.md` |
+| 只留一份生效 | `lib/automode-builtin.ts`：会话装配时丢弃路径里带 `pi-automode` 段的那份扩展，避免两个判定模型、两套工具和两条 `/automode` 命令。普通会话、子代理会话（`loadExtensions` 为真时；用户的代理预设都是关扩展开的）都注入内置那份 |
+| 新增依赖 | `unbash@4.0.10`（插件唯一的运行时依赖，随 esbuild 打进去）；`tsconfig.json` 加 `allowImportingTsExtensions`，因为搬来的源码用 `./x.ts` 显式后缀导入 |
+| 设置接口 | `app/api/automode/route.ts`（GET 返回两个文件的原始内容、生效值、每个值来自哪一层、诊断、内置版本；PUT 只接受白名单字段，写入前先过插件自己的校验，坏 JSON 拒绝覆盖，项目未受信任时拒绝写项目文件）、`app/api/automode/test/route.ts`（拿选中的模型试一次判定） |
+| 设置页 | `components/AutomodeConfig.tsx` + `components/automode-draft.ts`（纯逻辑：只改动的字段才写、留空=删键、数字校验、读会话状态行），设置对话框顶栏新增「自动模式」页 |
+| 标签 | `lib/settings-navigation.ts` 与 `components/SettingsPanel.tsx` 加入 `automode`；三种语言各加约 80 条 |
+
+### 追加验收
+
+| 命令/检查 | 结果 |
+|---|---|
+| `acceptance.mjs --fast`（含自带隔离目录） | 7/7 步，退出码 0 |
+| `npm run test:desktop` | 62/62（新增内置插件去重 5 项、草稿规则 16 项、设置页接线与三语文案 5 项） |
+| `npm test` | 33/33（新增：写入落在项目文件、只写改动的字段、不碰文件里其他内容、存完读回来自本项目层、清空后回落到下一层、拒绝未知字段与未知键） |
+| `npm run test:window` | 20/20 + 后置检查通过（新增一项真实窗口检查：打开设置对话框 → 点「自动模式」页 → 页面显示接口报出的超时值与内置版本，随后关掉对话框以免影响后面的布局检查） |
+| `npm run test:web` | 931 项中 920 通过、6 失败（与本轮无关的已知环境失败）、退出码 1 |
+| `npm run test:prompt` | 35/36：唯一失败的一项是本机 Codex 线路当前连不上（`provider_transport_failure`→`fetch failed`）。同一条提示词用 `pi` CLI 在仓库外单独跑也失败，换 `DeepSeek/deepseek-flash` 就正常，因此与本轮改动无关 |
+| `npm run package` | 退出码 0（日志 `.tmp-package-automode.log`） |
+| `npm run test:window:packaged`（仓外副本） | 20/20 + 后置检查通过，退出码 0，日志有 `isolated copy:`（`.tmp-packaged-automode.log`） |
+| `node <skill>/scripts/check-upstream-parity.mjs` | 3 个镜像目录有差异，差异清单都在本轮（见 README「上游同步」），其余目录及两份 CSS 仍一致 |
+
+### 交付包
+
+`release/Pi Desktop Setup 0.0.1.exe`，140,827,384 字节，SHA-256
+`626fef70606fc5b87032979bbc4eb10cd9bef7af34d746509f80210ba9ba41a7`（12:38 生成，晚于最后一批源码改动）。
+它替换了上文「最终交付包」那一节里的旧包（140,693,367 字节）。
+安装前要先关掉正在跑的窗口，否则单实例锁会让新装的版本起不来。
+
+打包时踩到一个坑：直接用默认的网络去下 electron 和 winCodeSign 会卡到 600 秒超时然后失败，
+得把代理环境变量带上（`HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:7890`）才下得动。
+
+### 没覆盖到的
+
+- 保存往返的实测是在临时项目目录里做的，**没有写过真实的全局配置文件**（两个文件走的是同一段写入代码，但只有项目文件被实测过）。
+- 真实模型那一档没跑完：`test:prompt` 跑了 36 项里的 35 项，默认模型（Codex）当前在本机连不上，
+  只验到“提示词能被接受且事件流能跑完”；`test:chat` / `test:resilience`（含打包版那两个）没跑，原因相同。
+- 页面上「本会话」那行依赖插件输出的状态行格式（`AM● a:3 d:0`）；格式变了会显示“还没读到”，不会显示错的值。
+- 没有在新电脑上装过这个包：打包版的检查是对着仓库外的副本跑的，没有真正执行安装程序。

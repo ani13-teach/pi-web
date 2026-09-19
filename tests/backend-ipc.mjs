@@ -7,8 +7,8 @@
  */
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, rmSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -230,6 +230,103 @@ try {
 
     const context = await request(`/api/sessions/${sessionId}/context`);
     check("GET /api/sessions/[id]/context answers", context.status === 200, `${context.text.length} bytes`);
+  }
+
+  // --- built-in auto mode ----------------------------------------------------
+  const automode = await request("/api/automode");
+  check("GET /api/automode reports the built-in copy",
+    automode.status === 200 && typeof automode.json?.builtin?.version === "string",
+    `builtin ${automode.json?.builtin?.version ?? "?"}, in force: ${automode.json?.effective?.enabled ? "on" : "off"}, model=${automode.json?.effective?.classifierModel ?? "none"}`);
+  check("GET /api/automode names both configuration files",
+    typeof automode.json?.paths?.global === "string" && typeof automode.json?.paths?.project === "string",
+    `${automode.json?.paths?.global ?? "?"}`);
+
+  const badPatch = await request("/api/automode", jsonInit({ scope: "global", patch: { classifierTimeoutMs: 1 } }, "PUT"));
+  check("PUT /api/automode refuses an out-of-range value", badPatch.status === 400,
+    (badPatch.json?.error ?? badPatch.text).slice(0, 80));
+
+  // A save has to end up in a file, and only for the fields that were touched.
+  // It goes to a throwaway project so the real configuration is never written:
+  // a project with no trust-requiring resources counts as trusted, so this
+  // needs no trust decision.
+  //
+  // The project file is a pi project-settings file: auto-mode keys live under
+  // "autoMode" and everything else in it was put there by the user, so a save
+  // has to leave it alone.
+  const sandbox = mkdtempSync(join(tmpdir(), "pi-automode-"));
+  const projectConfig = join(sandbox, ".pi", "automode.local.json");
+  const readSandbox = () =>
+    existsSync(projectConfig) ? JSON.parse(readFileSync(projectConfig, "utf8")) : {};
+  const readEffective = async () =>
+    (await request(`/api/automode?cwd=${encodeURIComponent(sandbox)}`)).json;
+  try {
+    mkdirSync(join(sandbox, ".pi"), { recursive: true });
+    writeFileSync(projectConfig, JSON.stringify({
+      autoMode: { enabled: true, log: { enabled: true } },
+      permissions: { deny: ["Bash(rm:*)"] },
+    }, null, 2));
+
+    const saved = await request("/api/automode", jsonInit({
+      scope: "project",
+      cwd: sandbox,
+      patch: { classifierTimeoutMs: 12345, classifierFallbackModels: ["KBQ/check-model"] },
+    }, "PUT"));
+    check("PUT /api/automode writes the project file", saved.status === 200 && existsSync(projectConfig),
+      `${saved.status}, ${projectConfig.replace(sandbox, "<tmp>")}`);
+
+    const written = readSandbox();
+    const autoMode = written.autoMode ?? {};
+    check("the written file holds the touched fields and nothing else",
+      autoMode.classifierTimeoutMs === 12345
+      && JSON.stringify(autoMode.classifierFallbackModels) === JSON.stringify(["KBQ/check-model"])
+      && Object.keys(autoMode).length === 4,
+      JSON.stringify(autoMode));
+    check("a save leaves the rest of the file alone",
+      autoMode.enabled === true && autoMode.log?.enabled === true
+      && JSON.stringify(written.permissions) === JSON.stringify({ deny: ["Bash(rm:*)"] }),
+      JSON.stringify({ enabled: autoMode.enabled, log: autoMode.log, permissions: written.permissions }));
+
+    const reread = await readEffective();
+    check("a saved value comes back as the project's own",
+      reread?.sources?.classifierTimeoutMs === "project" && reread?.effective?.classifierTimeoutMs === 12345,
+      `source=${reread?.sources?.classifierTimeoutMs}, in force=${reread?.effective?.classifierTimeoutMs}`);
+
+    const cleared = await request("/api/automode", jsonInit({
+      scope: "project",
+      cwd: sandbox,
+      patch: { classifierTimeoutMs: null },
+    }, "PUT"));
+    const afterClear = readSandbox().autoMode ?? {};
+    const inherited = await readEffective();
+    check("clearing a field drops the key so the level below applies",
+      cleared.status === 200 && !("classifierTimeoutMs" in afterClear)
+      && inherited?.effective?.classifierTimeoutMs !== 12345
+      && inherited?.sources?.classifierTimeoutMs !== "project",
+      `${JSON.stringify(afterClear)}, now ${inherited?.effective?.classifierTimeoutMs} from ${inherited?.sources?.classifierTimeoutMs}`);
+
+    const broken = await request("/api/automode", jsonInit({
+      scope: "project",
+      cwd: sandbox,
+      patch: { classifierReasoningLevel: "insane", nonsense: true },
+    }, "PUT"));
+    check("PUT /api/automode refuses unknown values and keys",
+      broken.status === 400 && !("classifierReasoningLevel" in (readSandbox().autoMode ?? {}))
+      && !("nonsense" in (readSandbox().autoMode ?? {})),
+      (broken.json?.error ?? broken.text).slice(0, 90));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+
+  if (sessionId) {
+    // The extension sets this status only when it is loaded and bound to a
+    // session, so its presence is what proves the bundled copy is live.
+    const liveState = await request(`/api/sessions/${sessionId}/state`);
+    const statuses = liveState.json?.state?.extensionStatuses ?? [];
+    const automodeStatus = statuses.find((entry) => entry?.key === "pi-automode");
+    check("the bundled auto mode extension is live in a session", Boolean(automodeStatus),
+      automodeStatus
+        ? String(automodeStatus.text).replace(/\u001b\[[0-9;]*m/g, "")
+        : `extension statuses: ${statuses.map((entry) => entry?.key).join(", ") || "none"}`);
   }
 
   if (withPrompt && sessionId) {

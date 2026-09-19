@@ -256,5 +256,41 @@
   await record("no recovery bar while the backend is running", () =>
     document.querySelector('[data-backend-recovery="down"]') === null);
 
+  // The auto-mode page has to render the values the backend reports, not just
+  // appear in the tab bar. The dialog closes again so the layout probe that
+  // runs next still measures the chat pane.
+  await record("the auto-mode settings page shows the values in force", async () => {
+    const response = await fetch("/api/automode");
+    if (!response.ok) throw new Error(`automode status ${response.status}`);
+    const automode = await response.json();
+
+    const settingsLabels = ["设置", "Settings", "設定"];
+    const openButton = [...document.querySelectorAll("button[aria-label]")]
+      .find((button) => settingsLabels.includes(button.getAttribute("aria-label")));
+    if (!openButton) throw new Error("no settings button in the sidebar");
+    openButton.click();
+
+    const dialog = await waitFor(() => document.querySelector(".settings-dialog-surface"));
+    if (!dialog) throw new Error("the settings dialog did not open");
+
+    const tabLabels = ["自动模式", "Auto mode", "自動模式"];
+    const tabs = [...dialog.querySelectorAll("button")];
+    const tab = tabs.find((button) => tabLabels.includes(button.textContent.trim()));
+    if (!tab) throw new Error(`no auto-mode tab; saw: ${tabs.map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8).join(", ")}`);
+    tab.click();
+
+    const rendered = await waitFor(() => document.body.innerText.includes("classifierTimeoutMs"));
+    if (!rendered) throw new Error("the auto-mode page did not render its effective-value table");
+
+    const expected = [String(automode.effective.classifierTimeoutMs), automode.builtin.version];
+    const missing = expected.filter((value) => !document.body.innerText.includes(value));
+    if (missing.length) throw new Error(`the page does not show ${missing.join(", ")}`);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const closed = await waitFor(() => !document.querySelector(".settings-dialog-surface"));
+    if (!closed) throw new Error("the settings dialog stayed open");
+    return `timeout ${automode.effective.classifierTimeoutMs} ms, built-in ${automode.builtin.version}, scope=${automode.paths.project ? "global+project" : "global"}`;
+  });
+
   return results;
 })();
