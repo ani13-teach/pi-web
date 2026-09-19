@@ -1,0 +1,9 @@
+@import "../app/globals.css";
+@import "../app/settings.css";
+
+/* Vite's root is renderer/, while the unchanged pi-web UI lives beside it.
+   Include those sources explicitly so Tailwind emits their layout utilities. */
+@source "../components";
+@source "../hooks";
+@source "../lib";
+@source "./";

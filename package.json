@@ -1,0 +1,121 @@
+{
+  "name": "pi-desktop",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Windows desktop host for the pi coding agent (no local HTTP port)",
+  "type": "module",
+  "main": "dist/main/main.cjs",
+  "scripts": {
+    "build:desktop": "node scripts/build-desktop.mjs",
+    "build:ui": "vite build && node scripts/copy-public.mjs",
+    "build": "npm run build:desktop && npm run build:ui",
+    "start": "npm run build && npm run vendor:npm && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/backend-ipc.mjs",
+    "test:smoke": "node tests/smoke.mjs",
+    "test:navigation": "node --experimental-strip-types --test tests/navigation.test.mjs",
+    "test:prompt": "node tests/backend-ipc.mjs --prompt",
+    "test:desktop": "node --experimental-strip-types --test tests/bridge-lifecycle.test.mjs tests/eventsource.test.mjs tests/navigation.test.mjs tests/vendor-npm.test.mjs",
+    "test:chat": "node scripts/smoke-resilience.mjs chat",
+    "test:gate": "node scripts/smoke-window.mjs --selftest",
+    "test:window": "node scripts/smoke-window.mjs",
+    "test:web": "node scripts/run-web-tests.mjs",
+    "test:resilience": "node scripts/smoke-resilience.mjs",
+    "package": "npm run build && node scripts/vendor-npm.mjs && electron-builder --win --x64",
+    "package:dir": "npm run build && node scripts/vendor-npm.mjs && electron-builder --win --x64 --dir",
+    "vendor:npm": "node scripts/vendor-npm.mjs",
+    "upgrade:pi": "npm install --save-exact --include=dev @earendil-works/pi-coding-agent@latest @earendil-works/pi-agent-core@latest @earendil-works/pi-ai@latest @earendil-works/pi-tui@latest && npm run build",
+    "test:window:packaged": "node scripts/smoke-window.mjs --binary \"release/win-unpacked/Pi Desktop.exe\" --isolate",
+    "test:chat:packaged": "node scripts/smoke-resilience.mjs chat --binary \"release/win-unpacked/Pi Desktop.exe\" --isolate",
+    "test:resilience:packaged": "node scripts/smoke-resilience.mjs all --binary \"release/win-unpacked/Pi Desktop.exe\" --isolate"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
+    "node-pty": "1.2.0-beta.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/semver": "7.8.0",
+    "@types/web-push": "^3.6.4",
+    "@vitejs/plugin-react": "6.1.1",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "ansi_up": "^6.0.6",
+    "electron": "44.4.2",
+    "electron-builder": "^26.15.3",
+    "esbuild": "0.28.2",
+    "js-yaml": "^5.2.3",
+    "katex": "^0.16.47",
+    "mammoth": "^1.12.0",
+    "mermaid": "^11.16.1",
+    "proper-lockfile": "4.1.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^16.1.1",
+    "rehype-katex": "^7.0.1",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-frontmatter": "^5.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "semver": "7.8.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "undici": "8.10.0",
+    "vite": "8.3.0",
+    "web-push": "^3.6.7"
+  },
+  "build": {
+    "appId": "io.pidesktop.app",
+    "productName": "Pi Desktop",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/**/*",
+      "dist/main/backend.mjs"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Pi Desktop"
+    },
+    "npmRebuild": false,
+    "extraFiles": [
+      {
+        "from": "vendor/npm-bundle",
+        "to": "node_modules"
+      }
+    ]
+  },
+  "author": "Pi Desktop"
+}

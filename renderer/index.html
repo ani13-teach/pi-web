@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" translate="no" class="notranslate">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="google" content="notranslate" />
+    <title>Pi Desktop</title>
+    <style>
+      /* The web build loads Noto Sans Mono from Google Fonts. A desktop app has
+         no business fetching fonts, so the stack falls back to what ships with
+         Windows. Everything else about the palette comes from globals.css. */
+      :root {
+        --font-noto-mono: "Cascadia Mono", "Consolas", "Courier New";
+      }
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body translate="no" class="notranslate">
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

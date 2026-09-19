@@ -1,0 +1,176 @@
+<!doctype html>
+<!--
+  Design mockup: what the window looks like when the backend process stops.
+
+  Two constraints shaped this:
+    1. The UI is pi-web's, byte for byte, so the bar is an overlay the desktop
+       entry point renders above <AppShell /> — no upstream component changes.
+    2. Every button here has to work with a dead backend, so they all talk to
+       the main process through the preload bridge (restartBackend), never
+       through /api/*.
+
+  Open in a browser to compare states:  mockups/backend-recovery.html
+-->
+<html lang="zh-CN" data-theme="dark" class="dark">
+<head>
+<meta charset="utf-8">
+<title>后台停止时的界面 — 设计稿</title>
+<style>
+  :root {
+    --bg: #1a1a1a; --bg-panel: #242424; --bg-hover: #2e2e2e; --bg-selected: #383838;
+    --border: #454545; --text: #e8e8e8; --text-muted: #b7b7b7; --text-dim: #a4a4a4;
+    --accent: #a4c2f4; --accent-hover: #c3d8fa; --accent-contrast: #182234;
+    --tool-bg: #222222; --user-bg: #292929;
+    --font-mono: 'JetBrains Mono', Consolas, ui-monospace, monospace;
+    --warn: #d99a2b; --danger: #e06c75;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: #101010; color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+  }
+  h2 { font-size: 13px; font-weight: 600; color: var(--text-dim); margin: 0 0 10px; letter-spacing: .02em; }
+  .frame + h2 { margin-top: 26px; }
+  .frame {
+    position: relative; width: 1240px; height: 300px; overflow: hidden;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  }
+
+  /* ---- the bar itself ---- */
+  .recovery {
+    display: flex; align-items: center; gap: 12px;
+    height: 48px; padding: 0 14px 0 12px;
+    background: var(--bg-panel); border-bottom: 1px solid var(--border);
+    box-shadow: inset 3px 0 0 var(--warn);
+  }
+  .frame.failed .recovery { box-shadow: inset 3px 0 0 var(--danger); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: 0 0 auto; }
+  .frame.failed .dot { background: var(--danger); }
+  .headline { font-weight: 600; flex: 0 0 auto; }
+  .reason {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+  button {
+    font: inherit; font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+  button.ghost { border-color: transparent; color: var(--text-dim); }
+  button[disabled] { opacity: .55; cursor: default; }
+  .spinner {
+    width: 12px; height: 12px; border-radius: 50%; display: inline-block; vertical-align: -1px;
+    border: 2px solid rgba(255,255,255,.25); border-top-color: var(--accent);
+    animation: spin .8s linear infinite; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- everything below stays visible but clearly stale ---- */
+  .body { display: flex; height: calc(100% - 48px); }
+  .sidebar { width: 260px; border-right: 1px solid var(--border); background: var(--bg-panel); padding: 10px; }
+  .row { height: 26px; border-radius: 6px; background: var(--bg-hover); margin-bottom: 6px; }
+  .row.wide { width: 80%; }
+  .chat { flex: 1; padding: 18px 24px; }
+  .line { height: 12px; border-radius: 4px; background: var(--bg-hover); margin-bottom: 10px; }
+  .line.short { width: 45%; }
+  .line.mid { width: 70%; }
+  .stale { opacity: .35; }
+  .note {
+    width: 1240px; margin: 8px 0 0; font-size: 12px; color: var(--text-dim); line-height: 1.7;
+  }
+  .note code { font-family: var(--font-mono); background: var(--tool-bg); padding: 1px 5px; border-radius: 4px; }
+
+  /* ---- collapsed form, for a window that already showed the bar once ---- */
+  .recovery.collapsed { height: 34px; }
+  .recovery.collapsed .headline { font-weight: 500; font-size: 13px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<h2>状态 1 ── 后台停止（这是主状态）</h2>
+<div class="frame">
+  <div class="recovery">
+    <span class="dot"></span>
+    <span class="headline">后台进程已停止</span>
+    <span class="reason">backend exited (code 1) · 12:41:07 · pid 20560</span>
+    <span class="actions">
+      <button class="primary">重启后台</button>
+      <button class="ghost">详情</button>
+    </span>
+  </div>
+  <div class="body">
+    <div class="sidebar stale"><div class="row"></div><div class="row wide"></div><div class="row"></div><div class="row wide"></div><div class="row"></div></div>
+    <div class="chat stale"><div class="line mid"></div><div class="line"></div><div class="line short"></div><div class="line"></div><div class="line mid"></div></div>
+  </div>
+</div>
+<p class="note">
+  下面那片界面变暗到 35%，因为它显示的是停止前的旧数据。<br>
+  按钮直接走 preload（<code>restartBackend()</code>），不经过 <code>/api/*</code>——后台已经没了，走 API 只会再报一次错。
+</p>
+
+<h2>状态 2 ── 正在重启</h2>
+<div class="frame">
+  <div class="recovery">
+    <span class="dot"></span>
+    <span class="headline">后台进程已停止</span>
+    <span class="reason">正在启动新的后台进程…</span>
+    <span class="actions">
+      <button class="primary" disabled><span class="spinner"></span>重启中…</button>
+      <button class="ghost">详情</button>
+    </span>
+  </div>
+  <div class="body">
+    <div class="sidebar stale"><div class="row"></div><div class="row wide"></div><div class="row"></div></div>
+    <div class="chat stale"><div class="line mid"></div><div class="line"></div><div class="line short"></div></div>
+  </div>
+</div>
+<p class="note">
+  重启成功 → 整条消失，界面恢复正常（没有明说“重启成功”的提示，避免多余的确认动作，只在原位置留一行 3 秒的“后台已恢复”淡出）。<br>
+  重启失败 → 进状态 3，<b>不同</b>于状态 2：按钮变成“再试一次”，并给出退出应用的出口。<br>
+  主进程自己最多重启 5 次（代码里已有这个上限），超过就不再自动尝试。
+</p>
+
+<h2>状态 3 ── 重启失败</h2>
+<div class="frame failed">
+  <div class="recovery">
+    <span class="dot"></span>
+    <span class="headline">后台进程启动失败</span>
+    <span class="reason">连续 3 次失败 · 最后一次：backend exited (code 1)</span>
+    <span class="actions">
+      <button class="primary">再试一次</button>
+      <button>复制诊断信息</button>
+      <button class="ghost">退出</button>
+    </span>
+  </div>
+  <div class="body">
+    <div class="sidebar stale"><div class="row"></div><div class="row wide"></div><div class="row"></div></div>
+    <div class="chat stale"><div class="line mid"></div><div class="line"></div><div class="line short"></div></div>
+  </div>
+</div>
+<p class="note">
+  “复制诊断信息”把这条状态 + 应用版本 + 后台最后几行输出放进剪贴板，粘给我就能查。<br>
+  这一条不会自动弹窗、不挡操作，因为后台死了但窗口还活着，用户常常只是看一眼历史。
+</p>
+
+<h2>状态 4 ── 收起后（可选，先不做）</h2>
+<div class="frame">
+  <div class="recovery collapsed">
+    <span class="dot"></span>
+    <span class="headline">后台已停止</span>
+    <span class="reason">12:41:07</span>
+    <span class="actions"><button>重启后台</button></span>
+  </div>
+  <div class="body">
+    <div class="sidebar"><div class="row"></div><div class="row wide"></div><div class="row"></div></div>
+    <div class="chat"><div class="line mid"></div><div class="line"></div><div class="line short"></div></div>
+  </div>
+</div>
+<p class="note">
+  如果 48px 那条挡视线，可以收成 34px 一条细带，保留“重启后台”按钮。<br>
+  我倾向不做收起：这条出现就说明界面里的数据已经不可信，占 48px 换一个明显的出口更值。
+</p>
+
+</body>
+</html>
