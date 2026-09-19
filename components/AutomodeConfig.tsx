@@ -8,42 +8,29 @@ import {
   changedKeys,
   draftFrom,
   numberErrors,
-  parseSessionStatus,
   REASONING_LEVELS,
-  sessionLine,
   type Draft,
   type EffectiveValues,
-  type SessionStatus,
 } from "./automode-draft";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 
 /**
  * The auto-mode settings page.
  *
- * The panel never guesses which file a value comes from: `GET /api/automode`
- * returns the raw contents of both configuration files plus the effective
- * values the vendored extension computes, and every row shows both. Empty
- * number and text fields mean "this layer says nothing", so the inherited value
- * (shown as the placeholder) stays in force. Only fields the user actually
- * changed are sent, so touching one switch never rewrites the whole file.
+ * Empty fields inherit their value; only edited fields are saved.
+ * Runtime diagnostics stay out of the settings form.
  */
 
 interface AutomodeResponse {
-  cwd: string;
-  builtin: { version: string; basedOn: string };
-  plugin: { path: string; installed: boolean; active: boolean };
-  paths: { global: string; project: string };
   trusted: boolean;
   global: { values: Record<string, unknown>; error: string | null };
   project: { values: Record<string, unknown>; error: string | null };
   effective: EffectiveValues;
-  sources: Record<string, SourceKind>;
   defaults: Record<string, number | boolean | object>;
   diagnostics: string[];
 }
 
 type Scope = "global" | "project";
-type SourceKind = "project" | "global" | "default" | "merged";
 type TestKey = "primary" | `fallback-${number}`;
 
 const inputStyle: CSSProperties = {
@@ -75,12 +62,10 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
   const [models, setModels] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [testing, setTesting] = useState<TestKey | null>(null);
   const [results, setResults] = useState<Partial<Record<TestKey, { ok: boolean; text: string }>>>({});
-  const [sessionStatus, setSessionStatus] = useState<SessionStatus | null>(null);
-  const [sessionStatusNonce, setSessionStatusNonce] = useState(0);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -115,34 +100,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
     return () => { cancelled = true; };
   }, [cwd]);
 
-  const applyState = useCallback((next: AutomodeResponse) => {
-    setState(next);
-  }, []);
-
-  // The file values above are what a new session would get. What the session on
-  // screen is doing can differ (it may have been switched off in the chat), so
-  // it is read separately and never presented as if it came from the file.
-  useEffect(() => {
-    if (!sessionId) {
-      setSessionStatus(null);
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/state`);
-        const body = await response.json() as {
-          state?: { extensionStatuses?: { key: string; text: string }[] };
-        };
-        const line = body.state?.extensionStatuses?.find((entry) => entry.key === "pi-automode");
-        if (!cancelled) setSessionStatus(parseSessionStatus(line?.text));
-      } catch {
-        if (!cancelled) setSessionStatus(null);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [sessionId, sessionStatusNonce]);
-
   useEffect(() => {
     if (!state) return;
     const values = scope === "project" ? state.project.values : state.global.values;
@@ -155,7 +112,7 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
   const update = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDraft((current) => (current ? { ...current, [key]: value } : current));
     setSaveError(null);
-    setSavedPath(null);
+    setSaved(false);
   };
 
   const dirty = draft && baseline ? changedKeys(draft, baseline) : [];
@@ -169,7 +126,7 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
     }
     setSaving(true);
     setSaveError(null);
-    setSavedPath(null);
+    setSaved(false);
     try {
       const response = await fetch("/api/automode", {
         method: "PUT",
@@ -178,11 +135,9 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
       });
       const body = await response.json() as {
         error?: string;
-        saved?: { path: string };
         global?: AutomodeResponse["global"];
         project?: AutomodeResponse["project"];
         effective?: EffectiveValues;
-        sources?: Record<string, SourceKind>;
         diagnostics?: string[];
       };
       if (!response.ok || body.error) throw new Error(body.error ?? `HTTP ${response.status}`);
@@ -192,12 +147,11 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
             global: body.global ?? state.global,
             project: body.project ?? state.project,
             effective: body.effective ?? state.effective,
-            sources: body.sources ?? state.sources,
             diagnostics: body.diagnostics ?? state.diagnostics,
           }
         : null;
-      if (next) applyState(next);
-      setSavedPath(body.saved?.path ?? null);
+      if (next) setState(next);
+      setSaved(true);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -211,7 +165,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
     try {
       await sendAgentCommand(sessionId, { type: "reload" });
       onReloaded();
-      setSessionStatusNonce((current) => current + 1);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -265,14 +218,10 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
   };
 
   const effective = state?.effective;
-  const sourceLabel = (key: string): string => {
-    const source = state?.sources[key] ?? "default";
-    return t(`automode.source.${source}`);
-  };
   const placeholder = (value: string | number | null) => value === null || value === "" ? t("automode.inherited") : String(value);
 
   return (
-    <div className="settings-general">
+    <div className="settings-general automode-settings">
       <h2 className="settings-general-title">{t("common.autoMode")}</h2>
       <p className="settings-general-description">{t("automode.description")}</p>
 
@@ -281,71 +230,25 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
 
       {state && effective && draft && baseline && (
         <>
-          <section className="settings-general-section">
-            <h3 className="settings-general-heading">{t("automode.status")}</h3>
-            <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "6px 14px", margin: 0, fontSize: 12 }}>
-              <dt style={{ color: "var(--text-muted)" }}>{t("automode.builtinVersion")}</dt>
-              <dd style={{ margin: 0 }}>{state.builtin.version} <span style={{ color: "var(--text-dim)" }}>({state.builtin.basedOn})</span></dd>
-              <dt style={{ color: "var(--text-muted)" }}>{t("automode.pluginCopy")}</dt>
-              <dd style={{ margin: 0 }}>
-                {state.plugin.installed
-                  ? t("automode.pluginInstalled", { path: state.plugin.path })
-                  : t("automode.pluginAbsent")}
-              </dd>
-              <dt style={{ color: "var(--text-muted)" }}>{t("automode.globalFile")}</dt>
-              <dd style={{ margin: 0, overflowWrap: "anywhere" }}>{state.paths.global}</dd>
-              <dt style={{ color: "var(--text-muted)" }}>{t("automode.projectFile")}</dt>
-              <dd style={{ margin: 0, overflowWrap: "anywhere" }}>
-                {cwd ? state.paths.project : t("automode.noProject")}
-                {cwd && !state.trusted ? ` · ${t("automode.untrusted")}` : ""}
-              </dd>
-              <dt style={{ color: "var(--text-muted)" }}>{t("automode.nowInForce")}</dt>
-              <dd style={{ margin: 0 }}>
-                {effective.enabled ? t("automode.on") : t("automode.off")}
-                {" · "}
-                {effective.classifierModel ?? t("automode.noModel")}
-              </dd>
-              {sessionId && (
-                <>
-                  <dt style={{ color: "var(--text-muted)" }}>{t("automode.session")}</dt>
-                  <dd style={{ margin: 0 }}>{sessionLine(sessionStatus, effective.enabled, t)}</dd>
-                </>
-              )}
-            </dl>
-            {state.diagnostics.length > 0 && (
-              <ul style={{ margin: "10px 0 0", paddingLeft: 18, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6 }}>
-                {state.diagnostics.map((line) => <li key={line}>{line}</li>)}
-              </ul>
-            )}
-          </section>
-
-          <section className="settings-general-section">
-            <h3 className="settings-general-heading">{t("automode.scope")}</h3>
-            <div style={{ display: "flex", gap: 16, fontSize: 12 }}>
-              {(["global", "project"] as const).map((option) => {
-                const disabled = option === "project" && (!cwd || !state.trusted);
-                return (
-                  <label key={option} style={{ display: "flex", alignItems: "center", gap: 6, opacity: disabled ? 0.5 : 1 }}>
-                    <input
-                      type="radio"
-                      name="automode-scope"
-                      checked={scope === option}
-                      disabled={disabled}
-                      onChange={() => setScope(option)}
-                    />
-                    {option === "global" ? t("automode.scopeGlobal") : t("automode.scopeProject")}
-                  </label>
-                );
-              })}
-            </div>
-            <p className="settings-general-description">
-              {scope === "project"
-                ? t("automode.scopeProjectHint", { path: state.paths.project })
-                : t("automode.scopeGlobalHint")}
-              {" "}
-              {t("automode.blankMeansInherited")}
-            </p>
-          </section>
+          <label className="automode-scope">
+            <span>{t("automode.scope")}</span>
+            <select
+              value={scope}
+              onChange={(event) => setScope(event.target.value as Scope)}
+              style={{ ...inputStyle, width: "auto" }}
+            >
+              <option value="global">{t("automode.scopeGlobal")}</option>
+              <option value="project" disabled={!cwd || !state.trusted}>
+                {t("automode.scopeProject")}
+              </option>
+            </select>
+          </label>
+          {cwd && !state.trusted && <p className="settings-general-description">{t("automode.untrusted")}</p>}
+          {state.diagnostics.length > 0 && (
+            <ul className="settings-general-error">
+              {state.diagnostics.map((line) => <li key={line}>{line}</li>)}
+            </ul>
+          )}
 
           <section className="settings-general-section">
             <h3 className="settings-general-heading">{t("automode.switch")}</h3>
@@ -463,7 +366,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                 hint={t("automode.timeoutHint", { value: String(state.defaults.classifierTimeoutMs) })}
                 value={draft.classifierTimeoutMs}
                 inheritedValue={placeholder(effective.classifierTimeoutMs)}
-                inheritedFrom={sourceLabel("classifierTimeoutMs")}
                 onChange={(value) => update("classifierTimeoutMs", value)}
               />
               <NumberField
@@ -471,7 +373,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                 hint={t("automode.maxTokensHint", { value: String(state.defaults.fastClassifierMaxTokens) })}
                 value={draft.fastClassifierMaxTokens}
                 inheritedValue={placeholder(effective.fastClassifierMaxTokens)}
-                inheritedFrom={sourceLabel("fastClassifierMaxTokens")}
                 onChange={(value) => update("fastClassifierMaxTokens", value)}
               />
               <NumberField
@@ -479,7 +380,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                 hint={t("automode.transcriptHint", { value: String(state.defaults.maxUserTranscriptTokens) })}
                 value={draft.maxUserTranscriptTokens}
                 inheritedValue={placeholder(effective.maxUserTranscriptTokens)}
-                inheritedFrom={sourceLabel("maxUserTranscriptTokens")}
                 onChange={(value) => update("maxUserTranscriptTokens", value)}
               />
               <NumberField
@@ -487,7 +387,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                 hint={t("automode.transcriptHint", { value: String(state.defaults.maxToolTranscriptTokens) })}
                 value={draft.maxToolTranscriptTokens}
                 inheritedValue={placeholder(effective.maxToolTranscriptTokens)}
-                inheritedFrom={sourceLabel("maxToolTranscriptTokens")}
                 onChange={(value) => update("maxToolTranscriptTokens", value)}
               />
             </div>
@@ -545,52 +444,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
           </section>
 
           <section className="settings-general-section">
-            <h3 className="settings-general-heading">{t("automode.effective")}</h3>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead>
-                <tr style={{ color: "var(--text-muted)", textAlign: "left" }}>
-                  <th style={{ padding: "4px 8px 4px 0", fontWeight: 500 }}>{t("automode.effectiveField")}</th>
-                  <th style={{ padding: "4px 8px", fontWeight: 500 }}>{t("automode.effectiveValue")}</th>
-                  <th style={{ padding: "4px 0 4px 8px", fontWeight: 500 }}>{t("automode.effectiveSource")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {([
-                  ["enabled", effective.enabled ? t("automode.on") : t("automode.off")],
-                  ["classifierModel", effective.classifierModel ?? t("automode.noModel")],
-                  ["classifierFallbackModels", effective.classifierFallbackModels.length > 0 ? effective.classifierFallbackModels.join(", ") : t("automode.none")],
-                  ["classifierReasoningLevel", effective.classifierReasoningLevel ?? t("automode.reasoningServer")],
-                  ["classifierTimeoutMs", `${effective.classifierTimeoutMs} ms`],
-                  ["fastClassifierMaxTokens", String(effective.fastClassifierMaxTokens)],
-                  ["maxUserTranscriptTokens", String(effective.maxUserTranscriptTokens)],
-                  ["maxToolTranscriptTokens", String(effective.maxToolTranscriptTokens)],
-                  ["classifyReadOnlyTools", effective.classifyReadOnlyTools ? t("automode.yes") : t("automode.no")],
-                  ["allowInsideWorkingDirectory", effective.allowInsideWorkingDirectory ? t("automode.yes") : t("automode.no")],
-                  ["log", effective.log.enabled ? (effective.log.classifierIo ? t("automode.logIoOn") : t("automode.on")) : t("automode.off")],
-                  ["deniedPaths", effective.deniedPaths.length > 0 ? effective.deniedPaths.join(", ") : t("automode.none")],
-                ] as [string, string][]).map(([key, value]) => (
-                  <tr key={key} style={{ borderTop: "1px solid var(--border)" }}>
-                    <td style={{ padding: "5px 8px 5px 0", color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{key}</td>
-                    <td style={{ padding: "5px 8px", overflowWrap: "anywhere" }}>{value}</td>
-                    <td style={{ padding: "5px 0 5px 8px", color: "var(--text-muted)" }}>{sourceLabel(key)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <p className="settings-general-description">
-              {t("automode.ruleCounts", {
-                environment: effective.ruleCounts.environment ?? 0,
-                allow: effective.ruleCounts.allow ?? 0,
-                protectedPaths: effective.ruleCounts.protectedPaths ?? 0,
-                softDeny: effective.ruleCounts.softDeny ?? 0,
-                hardDeny: effective.ruleCounts.hardDeny ?? 0,
-                deny: effective.ruleCounts.permissionDeny ?? 0,
-                ask: effective.ruleCounts.permissionAsk ?? 0,
-              })}
-            </p>
-          </section>
-
-          <section className="settings-general-section">
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <ConfigButton variant="primary" disabled={dirty.length === 0 || saving} onClick={() => void save()}>
                 {saving ? t("automode.saving") : t("i18n.save")}
@@ -598,7 +451,7 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
               <ConfigButton
                 variant="secondary"
                 disabled={dirty.length === 0 || saving}
-                onClick={() => { if (baseline) setDraft(baseline); setSaveError(null); setSavedPath(null); }}
+                onClick={() => { if (baseline) setDraft(baseline); setSaveError(null); setSaved(false); }}
               >
                 {t("automode.discard")}
               </ConfigButton>
@@ -613,9 +466,9 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
               {dirty.length > 0 && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("automode.unsaved", { count: dirty.length })}</span>}
             </div>
             {saveError && <p role="alert" className="settings-general-error" style={{ whiteSpace: "pre-wrap" }}>{saveError}</p>}
-            {savedPath && (
+            {saved && (
               <p className="settings-general-description">
-                {t("automode.saved", { path: savedPath })}
+                {t("automode.saved")}
                 {" "}
                 {t("agents.reloadRequired")}
               </p>
@@ -636,19 +489,17 @@ function ResultLine({ result }: { result?: { ok: boolean; text: string } }) {
   );
 }
 
-function NumberField({ label, hint, value, inheritedValue, inheritedFrom, onChange }: {
+function NumberField({ label, hint, value, inheritedValue, onChange }: {
   label: string;
   hint: string;
   value: string;
   inheritedValue: string;
-  inheritedFrom: string;
   onChange: (value: string) => void;
 }) {
   return (
     <label style={{ display: "grid", gap: 4 }}>
       <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
         {label}
-        <span style={{ color: "var(--text-dim)" }}>{` · ${inheritedFrom}`}</span>
       </span>
       <input
         type="number"

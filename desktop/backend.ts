@@ -7,13 +7,18 @@
  * chunk, so a slow window applies real backpressure instead of buffering.
  */
 import { randomUUID } from "node:crypto";
-import { handleRequest, type RouterRequest } from "../services/http-router";
+import type { RouterRequest } from "../services/http-router";
 import { killTerminal } from "../lib/terminal-manager";
+import { configureOutboundNetworking, handleProxyMessage } from "./system-proxy";
 
-// The web build configured the outbound HTTP dispatcher (proxy support) from
-// Next.js instrumentation.ts. Same job here, without Next.js.
-const { configureHttpDispatcher } = await import("../lib/http-dispatcher");
-configureHttpDispatcher();
+// Outbound networking is configured before the routes are loaded, because a
+// route module may hold settings that were read at import time. Loading them
+// afterwards keeps that order visible instead of relying on it by accident.
+// Proxy environment variables win; otherwise the process asks the main process
+// for the system's proxy decision per request.
+configureOutboundNetworking();
+
+const { handleRequest } = await import("../services/http-router");
 
 const AGENT_DIR = await import("../lib/session-reader").then((m) => m.getAgentDir());
 
@@ -181,6 +186,9 @@ const send = (message: unknown): void => {
 };
 
 process.on("message", (raw: unknown) => {
+  // Proxy answers share this channel; they are not backend methods.
+  if (handleProxyMessage(raw)) return;
+
   const message = raw as { kind?: string; envelope?: { id: string; method: string; params: unknown } };
   if (message?.kind !== "request" || !message.envelope) return;
   const { id, method, params } = message.envelope;

@@ -40,6 +40,13 @@ const child = fork(backendPath, [], {
 
 const pending = new Map();
 let stderr = "";
+/** Proxy lookups the backend made; see the check in the prompt section. */
+let proxyLookups = 0;
+let proxyTargets = [];
+/** Environment proxy variables win over the system settings, as in the app. */
+const hasProxyEnvironment = Boolean(
+  process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy,
+);
 
 child.stderr.on("data", (data) => {
   stderr += String(data);
@@ -47,6 +54,15 @@ child.stderr.on("data", (data) => {
 child.stdout.on("data", () => {});
 
 child.on("message", (message) => {
+  // The backend cannot read the system's proxy itself, so it asks. These checks
+  // run without a proxy, so DIRECT is the honest answer.
+  if (message?.kind === "proxy.query") {
+    proxyLookups += 1;
+    proxyTargets.push(message.url);
+    child.send({ kind: "proxy.result", id: message.id, ok: true, value: "DIRECT" });
+    return;
+  }
+
   if (message?.kind === "response" && message.envelope) {
     const entry = pending.get(message.envelope.id);
     if (!entry) return;
@@ -337,6 +353,16 @@ try {
       jsonInit({ type: "prompt", message: "Reply with exactly: ported routes work" }),
     );
     check("POST /api/agent/[id] accepts a prompt", prompted.status === 200, prompted.text.slice(0, 80));
+
+    // An outbound request has to consult the main process first: that is what
+    // makes the system proxy, its bypass rules and any PAC script apply.
+    if (!hasProxyEnvironment) {
+      check(
+        "the backend asked the main process which proxy to use",
+        proxyLookups > 0,
+        `${proxyLookups} lookups, first: ${proxyTargets[0] ?? "none"}`,
+      );
+    }
     // The ported stream sends data-only frames carrying JSON events, so the
     // checks look at the event types inside the payload.
     const events = await readStream(

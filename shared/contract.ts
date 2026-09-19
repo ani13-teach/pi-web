@@ -93,16 +93,38 @@ export type BackendPush =
   | { type: "backend.log"; level: "info" | "error"; message: string }
   | { type: "backend.down"; reason: string };
 
+/**
+ * Backend -> main: which proxy does the system want for this target?
+ *
+ * The backend cannot read Chromium's proxy configuration (or its bypass rules
+ * and PAC scripts) on its own, so it asks the process that can.
+ */
+export interface ProxyQueryMessage {
+  kind: "proxy.query";
+  id: string;
+  /** Absolute URL, e.g. "https://chatgpt.com/backend-api/codex/responses". */
+  url: string;
+}
+
+/**
+ * Main -> backend: the answer, in Chromium's own spelling ("DIRECT",
+ * "PROXY host:port", ...). A failed lookup is reported as a failure rather
+ * than as DIRECT, so a broken lookup cannot quietly bypass a proxy.
+ */
+export type ProxyResultMessage =
+  | { kind: "proxy.result"; id: string; ok: true; value: string }
+  | { kind: "proxy.result"; id: string; ok: false; error: string };
+
 /** Messages the backend process sends on its IPC channel. */
 export type BackendOutMessage =
   | { kind: "response"; envelope: BackendResponseEnvelope }
-  | { kind: "push"; push: BackendPush };
+  | { kind: "push"; push: BackendPush }
+  | ProxyQueryMessage;
 
 /** Messages the main process sends to the backend process. */
-export interface BackendInMessage {
-  kind: "request";
-  envelope: BackendRequestEnvelope;
-}
+export type BackendInMessage =
+  | { kind: "request"; envelope: BackendRequestEnvelope }
+  | ProxyResultMessage;
 
 /** Shape exposed to the renderer through the preload bridge. */
 export interface DesktopBridge {

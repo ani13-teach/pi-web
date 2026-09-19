@@ -256,10 +256,9 @@
   await record("no recovery bar while the backend is running", () =>
     document.querySelector('[data-backend-recovery="down"]') === null);
 
-  // The auto-mode page has to render the values the backend reports, not just
-  // appear in the tab bar. The dialog closes again so the layout probe that
-  // runs next still measures the chat pane.
-  await record("the auto-mode settings page shows the values in force", async () => {
+  // Inspect editable fields and layout in the real dialog, without saving.
+  // Close it afterwards so the following chat-layout probe stays independent.
+  await record("the auto-mode form is compact and fills its settings pane", async () => {
     const response = await fetch("/api/automode");
     if (!response.ok) throw new Error(`automode status ${response.status}`);
     const automode = await response.json();
@@ -279,17 +278,79 @@
     if (!tab) throw new Error(`no auto-mode tab; saw: ${tabs.map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8).join(", ")}`);
     tab.click();
 
-    const rendered = await waitFor(() => document.body.innerText.includes("classifierTimeoutMs"));
-    if (!rendered) throw new Error("the auto-mode page did not render its effective-value table");
+    const page = await waitFor(() => {
+      const form = dialog.querySelector(".automode-settings");
+      return form?.querySelector('input[type="number"]') ? form : null;
+    });
+    if (!page) throw new Error("the auto-mode form did not load");
 
-    const expected = [String(automode.effective.classifierTimeoutMs), automode.builtin.version];
-    const missing = expected.filter((value) => !document.body.innerText.includes(value));
-    if (missing.length) throw new Error(`the page does not show ${missing.join(", ")}`);
+    // A number field shows the value the global file sets, or the value in force
+    // when that file sets nothing (draftFrom fills the inherited value in).
+    const numbers = [...page.querySelectorAll('input[type="number"]')];
+    if (numbers.length !== 4 || numbers.some((input) => !/^\d+$/.test(input.value) || Number(input.value) <= 0)) {
+      throw new Error(`expected four positive number fields, saw: ${numbers.map((input) => input.value).join(", ") || "none"}`);
+    }
+    const globalTimeout = automode.global.values.classifierTimeoutMs;
+    if (typeof globalTimeout === "number" && numbers[0].value !== String(globalTimeout)) {
+      throw new Error(`the timeout field shows ${numbers[0].value}, the global file says ${globalTimeout}`);
+    }
+    if (page.querySelector("table, dl") || page.innerText.includes(automode.paths.global)) {
+      throw new Error("runtime diagnostics or file paths are still in the form");
+    }
+    const scope = page.querySelector(".automode-scope select");
+    if (scope?.value !== "global" || scope.options.length !== 2) {
+      throw new Error("the scope picker is missing");
+    }
+
+    const host = page.parentElement;
+    const measure = () => {
+      const pane = host.getBoundingClientRect();
+      const form = page.getBoundingClientRect();
+      const style = getComputedStyle(page);
+      if (Math.abs(pane.left - form.left) > 1 || Math.abs(pane.right - form.right) > 1) {
+        throw new Error(`the scroll area does not fill the pane: ${Math.round(form.width)}/${Math.round(pane.width)} px`);
+      }
+      if (style.overflowY !== "auto") throw new Error("the form needs its own scroll area");
+      if (style.paddingLeft !== style.paddingRight) throw new Error("the form insets are not equal");
+      if (page.scrollWidth > page.clientWidth + 1) throw new Error("the form overflows horizontally");
+      // clientWidth excludes the scrollbar, so this is the area a row may fill.
+      const right = form.left + page.clientWidth - parseFloat(style.paddingRight);
+      const content = page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const rows = [...page.querySelectorAll(".settings-chat-options")];
+      if (rows.length === 0) throw new Error("the form has no switch rows");
+      // A row that stops short of the right edge is the empty column the user reported.
+      for (const row of rows) {
+        const width = row.getBoundingClientRect().width;
+        if (Math.abs(width - content) > 1) {
+          throw new Error(`a switch row is ${Math.round(width)} px wide, the content area is ${Math.round(content)} px`);
+        }
+      }
+      for (const control of page.querySelectorAll("input, select, textarea, button")) {
+        const rect = control.getBoundingClientRect();
+        if (rect.width <= 0 || rect.left < form.left || rect.right > right + 1) {
+          throw new Error("a form control extends outside the content area");
+        }
+      }
+      return Math.round(form.width);
+    };
+    const widths = [measure()];
+    const originalStyle = host.getAttribute("style");
+    try {
+      host.style.flex = "none";
+      host.style.width = "min(480px, 100%)";
+      widths.push(measure());
+    } finally {
+      if (originalStyle === null) host.removeAttribute("style");
+      else host.setAttribute("style", originalStyle);
+    }
+    if (!(widths[1] < widths[0])) {
+      throw new Error(`the narrow measurement did not change the width: ${widths.join(" / ")} px`);
+    }
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     const closed = await waitFor(() => !document.querySelector(".settings-dialog-surface"));
     if (!closed) throw new Error("the settings dialog stayed open");
-    return `timeout ${automode.effective.classifierTimeoutMs} ms, built-in ${automode.builtin.version}, scope=${automode.paths.project ? "global+project" : "global"}`;
+    return `form widths ${widths.join(" / ")} px; switch rows reach the right edge; global timeout ${globalTimeout ?? "unset"}`;
   });
 
   return results;

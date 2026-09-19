@@ -4,6 +4,13 @@
 `lib/`、`components/`、`hooks/`、`app/api/`、`public/` 和两份上游 CSS 在当时保持逐字节一致
 （后来的自动模式一轮改动了其中 5 个文件，见本文最后一段）。
 
+## 会话列表刷新按钮
+
+- 在「新建」左侧增加刷新图标按钮，点击调用 `window.location.reload()`。
+- 沿用已有翻译和工具栏样式，提供悬停提示与无障碍名称。
+- `SessionSidebar.tsx` 是新增的有意本地差异。没有新增状态、辅助函数或配置。
+- 开发版检查：`npm run typecheck`、`npm run build`、`npm run test:window` 均退出 0；窗口 20/20，附加检查 3/3。没有单独实测点击刷新，也未更新已安装版本。
+
 ## 已修
 
 | 问题 | 改动 | 证据 |
@@ -157,3 +164,140 @@ SHA-256 `cad36d4d895ca7377ad7f5ad8e09a6a1b7cf1a1ffcfa34b01035fe213f54e66f`（07:
   只验到“提示词能被接受且事件流能跑完”；`test:chat` / `test:resilience`（含打包版那两个）没跑，原因相同。
 - 页面上「本会话」那行依赖插件输出的状态行格式（`AM● a:3 d:0`）；格式变了会显示“还没读到”，不会显示错的值。
 - 没有在新电脑上装过这个包：打包版的检查是对着仓库外的副本跑的，没有真正执行安装程序。
+
+---
+
+## 追加一轮：跟随系统代理（GPT 连不上）
+
+**问题**：桌面版连不上 GPT，直连 `api.openai.com` 十秒超时。默认模型是 DeepSeek，
+直连本来就能通，所以这个毛病一直被盖着。
+
+**根因**：后台的出网分发器用的是 undici 的 `EnvHttpProxyAgent`，它**只读环境变量**，
+不读 Windows 的系统代理设置。网页版没事，是因为它的启动器 `pi-web.vbs` 会去读注册表、
+把代理写进环境变量再启动；桌面版的快捷方式是直接拉起 exe，没有这一层。
+
+实测：系统代理开着（FlClash，`127.0.0.1:7890`）。无代理时 `api.openai.com` 报
+`UND_ERR_CONNECT_TIMEOUT`（约 10.6 秒），加上代理同样的请求 0.63 秒拿到 401。
+
+### 改了什么
+
+| 问题 | 改动 | 证据 |
+|---|---|---|
+| 后台不认系统代理 | 新增 `desktop/system-proxy.ts`：环境变量优先，否则按目标地址查系统代理 | 真实 App 跑聊天时抓到 `dispatch api.deepseek.com` → `main ask => PROXY 127.0.0.1:7890` → `decision => PROXY 127.0.0.1:7890` |
+| 后台拿不到 Chromium 的代理判定 | 新增后台→主进程的反向 IPC（`proxy.query` / `proxy.result`），主进程用 `session.resolveProxy(url)` | 同上；另用 Electron 44 实测返回值：`DIRECT` / `PROXY host:port` / `SOCKS5 host:port` |
+| 万一绕过去直连 | `DIRECT` 直连；`PROXY`/`HTTPS` 走代理；`SOCKS5`、读不懂的写法、查询超时/失败都**明确报错** | 定向测试：不支持的代理类型与失败的查询都不会碰到代理，也不会退回直连 |
+| 一条答案套所有网址 | 每条请求单独查，绕过规则按目标生效 | `127.0.0.1:30141` 与 `*zhihu.com` 实测返回 `DIRECT`，OpenAI/ChatGPT 返回 `PROXY` |
+| 长连接漏掉 | 握手也是走同一条 dispatch，全局 fetch 与 WebSocket 一起被替换 | 定向测试里真实 WebSocket 握手打到代理（记录到 `codex.invalid:443` 隧道） |
+| 加载顺序把改动架空 | `desktop/backend.ts` 先配网络、路由改成动态加载 | 构建产物里确认 `configureOutboundNetworking()` 在 `init_http_router()` 之前 |
+| 畸形的代理地址会让请求永久挂着 | 复核时发现：连接对象构造是同步抛错的，旧写法把错误吞了、`dispatch` 却已经返回 true，于是既不报错也不返回。改成只在一处上报 | 查表返回 `PROXY 127.0.0.1:not-a-port` 时，实测拿到 `TypeError: Invalid URL` 而不是超时 |
+
+### 本轮验收
+
+| 命令 | 结果 |
+|---|---|
+| `npm run typecheck` | 通过 |
+| `npm run build` | 通过；产物内确认加载顺序 |
+| `npm run test:desktop` | 66/66（原 62，加上 system-proxy 的 4 项） |
+| `npm test` | 33/33 |
+| `npm run test:window`（独立用户数据目录） | 20/20，后置 3 项通过，**没有任何监听端口** |
+| `npm run test:chat`（隔离） | 10/10，真实模型回答经代理完成（含流式） |
+
+### 没覆盖到的
+
+- **真实 GPT 账号没验**。验到的是：链路打通、系统代理判定正确、OpenAI/ChatGPT 域名会拿到 `PROXY`，
+  以及真实模型对话能经代理跑完。用 Codex/ChatGPT 账号实际提问、OAuth 刷新没跑过——
+  换模型要动 `~/.pi/agent`，那不在本轮授权范围内。
+- **代理开关/换地址的动态跟随没做实测**（需要改系统代理设置或重启 FlClash）。
+  当前行为是：每条新请求重新查；已有池按地址复用；在途回答跑完；已连上的 WebSocket 等它自然断开。
+  Chromium 何时把新配置传播出来也没测。
+- **SOCKS5 是明确报错，不是支持**。undici 的 `ProxyAgent` 本身认 `socks5:`，真要支持只需改一行，
+  但没有 SOCKS 服务器可以实测，所以先不接。
+- 企业代理需要认证的情况没考虑：Electron 的登录态不会自动传给后台的代理连接。
+- 打包版（`:packaged`）没重打，本轮结论只覆盖 `dist/` 开发版。
+
+### 过程记录
+
+中途为了看清握手，往**构建产物**（`dist/main/*`，已被 gitignore）里插过调试语句，
+有一次手写转义写坏，导致测试实例启动即崩（不影响源码，重建即恢复）。
+后来改成用脚本插桩 + 先 `node --check` 再跑，拿到证据后已重建还原，
+产物内已确认无残留。
+
+### 交付包（本轮）
+
+`release/Pi Desktop Setup 0.0.1.exe`，140,843,463 字节，SHA-256
+`e12d1e79fb26052096db1509b8c8aaf0c2c813d8cdd9ed1f3fa27304eadd6206`（17:56 生成，
+晚于最后一批源码改动；上一版是 140,827,384 字节）。
+
+打包同样必须带上代理环境变量（`HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:7890`），
+否则下载 electron / winCodeSign 会卡到超时。
+
+打包版验收（都在仓库外跑的副本上，输出里有 `isolated copy:` 那一行）：
+
+| 命令 | 结果 |
+|---|---|
+| `test:window:packaged` | 20/20 + 后置 3 项通过，无监听端口 |
+| `test:chat:packaged` | 10/10，真实模型回答在打包版里完成 |
+
+**没有安装到 `%LOCALAPPDATA%`**：用户没要求，而且他正开着旧版窗口。
+
+---
+
+## 追加一轮：自动模式设置页精简
+
+用户反馈：左右留白失衡，运行信息、保存位置和生效值表占据了大量空间。
+
+- `components/AutomodeConfig.tsx` 删除版本、插件路径、会话计数和生效值表；适用范围缩成一行下拉框。
+- `renderer/desktop.css` 让自动模式页占满面板、左右内边距相等，滚动条贴到面板右侧；开关与表单右侧对齐。
+- 三种语言同步精简说明，保存反馈不再显示文件路径。配置读取异常和未信任项目提示保留。
+- 删掉不再需要的会话状态请求、刷新计数和 `applyState` 转发函数；保存成功只记录布尔值。
+- 配置文件、判定规则及保存字段逻辑未改。测试只读取现有配置，没有通过设置页保存真实配置。
+
+检查对象为 `dist/` 开发版：
+
+| 命令 | 结果 |
+|---|---|
+| `npm run typecheck` | 退出码 0 |
+| `npm run build` | 退出码 0，日志 `.tmp-automode-ui-build.log` |
+| `node --experimental-strip-types --test tests/automode-draft.test.mjs tests/automode-panel.test.mjs` | 21/21，退出码 0 |
+| `npm run test:desktop` | 66/66，退出码 0 |
+| `npm run test:window`（独立用户数据目录，跑 5 次） | 4 次 20/20 + 后置 3 项全过、退出码 0；1 次 17/20（见下）；日志 `.tmp-automode-ui-window*.log` |
+
+真实窗口里量的东西：设置面板 1079 像素宽时表单填满滚动区、左右内边距相等、
+开关行尾到内容区右边（不再停在 420 像素），把面板压到 480 像素后重测同样成立。
+
+### 这条检查本身做了反向验证
+
+把旧的 `max-width: 680px` 加回去重建，这条检查确实失败：
+`the scroll area does not fill the pane: 680/1079 px`，退出码 1（日志 `.tmp-falsify-window.log`），
+改回来才恢复。不是一条永远绿的断言。
+
+审查时发现我第一版断言有两个真毛病，已改：
+
+1. 配置里没写 `classifierTimeoutMs` 时，输入框会填生效值而不是空，原断言会误判失败；
+   另外取配置没带项目路径。现在改成：四个数字字段必须都是正整数，
+   并且全局文件确实写了这一项时，输入框必须等于它。
+2. 布局检查只缩小了容器、没验证缩小真的生效，也测不出“开关行右侧又空一片”。
+   现在会断言两次量出的宽度确实不同，并逐个要求开关行宽度等于内容区宽度。
+
+### 顺手修了一个会让端口结论假失败的缺陷
+
+跑检查时出现一次 `FAIL  nothing was listening — listening: 127.0.0.1:30141`。
+查下去发现那不是应用起的进程：是用户自己那份 pi-web 服务
+（`next start -p 30141`，启动于 18:10:42，早于那次检查 35 分钟），
+它的父 PID 已经不在了，而那个 PID 被本次启动的进程复用，
+于是 Windows 保留的旧父子关系让整棵外来进程树被算成了应用的子进程。
+
+`scripts/smoke-window.mjs` 的进程树遍历现在只跟随**创建时间不早于根**的子进程：
+进程不可能由比自己晚启动的东西创建。用一对真实存在的“父比子晚启动”的进程验证过：
+旧走法拿到 5 个（含 4 个外来的），新走法只剩根本身。
+真泄漏仍然看得见（子进程都是应用启动之后才创建的）。
+
+### 一次偶发失败（与本次改动无关）
+
+5 次里有一次掉在侧栏会话列表上：
+`the sidebar lists sessions that exist on disk — none of the 194 sessions on disk is listed`，
+连带“点开会话”和“正文渲染”各失败一条。这三条按顺序在本轮改动的那条**之前**跑，
+我的改动碰不到它们；本机会话库有 194 个，探针自己的夹具会话等不到出现在侧栏就会这样。
+另有 4 次全过，故按偶发处理，没改。（改的是测试等多久，属于另一个题目。）
+
+本轮没有重新打包，也没有替换用户已安装的那份。

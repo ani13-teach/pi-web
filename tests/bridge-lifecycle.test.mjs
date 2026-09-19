@@ -117,6 +117,9 @@ async function backend(route, overrides = {}) {
       builder.onLoad({ filter: /.*/, namespace: "fixtures" }, args => {
         if (args.path.includes("http-router")) return { contents: "export const handleRequest = globalThis.route;" };
         if (args.path.includes("http-dispatcher")) return { contents: "export const configureHttpDispatcher = () => {};" };
+        // Networking is out of scope here; the stub keeps the request lifecycle
+        // checks independent of how the outbound dispatcher is chosen.
+        if (args.path.includes("system-proxy")) return { contents: "export const configureOutboundNetworking = () => {}; export const handleProxyMessage = () => false;" };
         if (args.path.includes("session-reader")) return { contents: 'export const getAgentDir = () => "fixture";' };
         if (args.path.includes("terminal-manager")) return { contents: "export const killTerminal = (id) => globalThis.killed.push(id);" };
         if (args.path === "node:crypto") return { contents: "export const randomUUID = () => crypto.randomUUID();" };

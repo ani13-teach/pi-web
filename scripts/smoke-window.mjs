@@ -142,6 +142,13 @@ const asArray = (value) => (value == null ? [] : Array.isArray(value) ? value : 
  * process is reported too — the pids below are only meaningful for the run this
  * script started. Only the "the query succeeded and matched nothing" error from
  * Get-NetTCPConnection is treated as an empty socket list.
+ *
+ * A child is only followed when it started at or after the root. Windows keeps
+ * the parent id a process was created with, so once that id is recycled, an
+ * unrelated long-running process still names one of our pids as its parent and
+ * its whole subtree would be pulled in — the user's own pi-web server showed up
+ * as "listening" this way. A process cannot have been started by one that began
+ * later, so the creation time rules that case out.
  */
 function sampleAppProcesses(rootPid) {
   const script = `
@@ -150,11 +157,15 @@ $ErrorActionPreference = 'Stop'
 $root = ${rootPid}
 $snapshot = Get-CimInstance Win32_Process
 $tree = @($snapshot | Where-Object { [int]$_.ProcessId -eq $root })
+$rootCreated = if ($tree.Count -gt 0) { $tree[0].CreationDate } else { $null }
 $frontier = @($root)
 while ($frontier.Count -gt 0) {
   $next = @()
   foreach ($p in $snapshot) {
-    if (($frontier -contains [int]$p.ParentProcessId) -and ($tree.ProcessId -notcontains [int]$p.ProcessId)) {
+    if (($frontier -contains [int]$p.ParentProcessId) -and
+        ($tree.ProcessId -notcontains [int]$p.ProcessId) -and
+        ($null -ne $rootCreated) -and
+        ($p.CreationDate -ge $rootCreated)) {
       $tree += $p
       $next += [int]$p.ProcessId
     }

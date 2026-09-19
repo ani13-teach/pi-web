@@ -1038,6 +1038,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <PiWebTitle />
           <div style={{ display: "flex", gap: 6 }}>
             <button
+              type="button"
+              onClick={() => window.location.reload()}
+              title={t("sidebar.refresh")}
+              aria-label={t("sidebar.refresh")}
+              className="flex h-[32px] w-[32px] shrink-0 cursor-pointer items-center justify-center rounded-[7px] border border-border bg-bg-hover text-text-muted hover:bg-bg-selected focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M20 7v5h-5" />
+                <path d="M20 12a8 8 0 1 0-2.3 5.7M20 12l-4-4" />
+              </svg>
+            </button>
+            <button
               onClick={handleNewSession}
               disabled={!selectedCwd}
               style={{

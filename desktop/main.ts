@@ -40,6 +40,8 @@ import {
   type BackendRequestEnvelope,
   type BackendResponseEnvelope,
   type ParamsOf,
+  type ProxyQueryMessage,
+  type ProxyResultMessage,
   type ResultOf,
 } from "../shared/contract";
 
@@ -272,7 +274,45 @@ class BackendHost {
       this.onPush(message.push);
       return;
     }
+    if (message.kind === "proxy.query") {
+      this.answerProxyQuery(message);
+      return;
+    }
     this.settle(message.envelope);
+  }
+
+  /**
+   * Answers the backend's "which proxy for this target?" question.
+   *
+   * Chromium owns the system proxy settings, their bypass rules and any PAC
+   * script, and `resolveProxy` is the only supported way to read a decision for
+   * a specific URL. A failure is answered as a failure: reporting DIRECT would
+   * send the request around a proxy the user switched on.
+   */
+  private answerProxyQuery(query: ProxyQueryMessage): void {
+    const child = this.child;
+    if (!child) return;
+
+    const answer = (message: ProxyResultMessage): void => {
+      // A restart replaces the child, and a late answer must not reach the new one.
+      if (this.child !== child || !child.connected) return;
+      try {
+        child.send(message);
+      } catch {
+        /* the child exited between the check and the send */
+      }
+    };
+
+    session.defaultSession.resolveProxy(query.url).then(
+      (value) => answer({ kind: "proxy.result", id: query.id, ok: true, value }),
+      (error: unknown) =>
+        answer({
+          kind: "proxy.result",
+          id: query.id,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    );
   }
 
   private settle(envelope: BackendResponseEnvelope): void {
