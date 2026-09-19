@@ -1,0 +1,11 @@
+# Line endings are pinned on purpose.
+#
+# lib/, components/, hooks/, app/api/ and public/ are byte-for-byte copies of the
+# upstream pi-web checkout, and the desktop checks verify that with `diff -r`.
+# Git for Windows sets core.autocrlf=true by default, which rewrites every LF to
+# CRLF in the working tree on checkout — a fresh clone would then differ from
+# upstream in every file and the comparison would mean nothing. Normalising to LF
+# in the repository and checking out LF everywhere keeps those copies honest.
+#
+# text=auto still leaves real binaries (icons, fonts) untouched.
+* text=auto eol=lf
