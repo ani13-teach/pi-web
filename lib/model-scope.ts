@@ -58,7 +58,7 @@ function matchesModel(
 }
 
 /** True when the pattern contains minimatch metacharacters (`[` included, as in `KBQ/[0.2]glm`). */
-export function hasGlob(pattern: string): boolean {
+function hasGlob(pattern: string): boolean {
   return pattern.includes("*") || pattern.includes("?") || pattern.includes("[");
 }
 

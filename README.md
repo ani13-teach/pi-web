@@ -189,10 +189,13 @@ PI_WEB_SKIP_VERSION_CHECK: "1"   // desktop/main.ts，没改任何界面代码
   现在保存后对账，范围只限 `models.json` 里声明的 provider：补上没有被任何模式
   覆盖的模型（一律写全限定 `provider/modelId`，避免歧义条目把选择器整个搞挂），
   删掉模型已从 `models.json` 消失的模式；只是暂时不可用（缺凭据）的模型保留条目，
-  裸 modelId、glob 和不在 `models.json` 里的 provider 一律不碰，空数组仍表示不过滤。
+  裸 modelId 和含 `*`/`?` 的 glob 一律不碰（`[0.2]glm-5.3` 这类带方括号的模型名
+  算字面 id，不按通配符处理），空数组仍表示不过滤。在页面上删掉或改名一个 provider
+  时，运行时已经不认这个 provider，指向它的死条目会跟着清掉；内置 provider（`anthropic`
+  等，运行时一直认识）的条目仍完全不动，所以手工维护的内置白名单不会被误删。
   写入复用 `SettingsManager`（单字段 + 文件锁合并，和 pi 命令行并发写不互相覆盖），
   写失败或读不动 `settings.json` 时报 `skipped` 而不是假报成功；响应里附
-  `enabledModelsSync` 说明本次做了什么。`settings.json` 里设 `enabledModelsSync: "off"` 可关闭。
+  `enabledModelsSync` 说明本次做了什么（含 `added`/`removed`）。`settings.json` 里设 `enabledModelsSync: "off"` 可关闭。
 
 - 会话列表顶部「新建」左侧增加刷新按钮，点击重新加载整个界面。
 
@@ -363,7 +366,9 @@ pi-web 服务就这样被误报成“应用在监听 30141”）。
 - 「模型设置」的 `enabledModels` 同步只管全局 `settings.json`，也只认 `models.json`
   里声明的 provider：项目 `.pi/settings.json` 若覆盖了 `enabledModels`，那由项目自己负责；
   provider 还没凭据时它的模型不会被自动加进白名单（有凭据后再保存一次即可）；
-  无法归到唯一模型的模式（glob、裸 id、provider 不在 `models.json`）永不自动删除。
+  含 `*`/`?` 的 glob 和裸 id 无法归到唯一模型，永不自动删除；
+  指向运行时完全不认识的 provider 的死条目会被当成删掉/改名的残留清掉，
+  所以给“还没配置的 provider”预先手写的白名单条目留不住（内置 provider 的条目不受影响）。
   这份对账是为了让保存和 `models.json` 保持一致，不代替在 pi 里手动精挑白名单。
 
 ### 早期上游测试失败记录（不作为本轮通过项）

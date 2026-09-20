@@ -181,6 +181,35 @@ try {
     (warned.json?.modelScopeWarnings ?? []).some((warning) => warning.includes("unkeyed-provider/pending-model")),
     JSON.stringify(warned.json?.modelScopeWarnings));
 
+  // Renaming or deleting a provider on the page leaves patterns naming a provider
+  // the runtime no longer knows. They are leftovers, not user intent, so they must
+  // go and the new name must take their place.
+  const renamed = modelsConfig();
+  delete renamed.providers["e2e-provider"];
+  renamed.providers["renamed-provider"] = {
+    baseUrl: "http://127.0.0.1:9/v1",
+    api: "openai-completions",
+    apiKey: "e2e-placeholder-key",
+    models: [{ id: "kept-model" }],
+  };
+  writeFileSync(modelsPath, JSON.stringify(renamed, null, 2));
+
+  const afterRename = await saveModelsConfig(modelsConfig());
+  const renameOutcome = afterRename.json?.enabledModelsSync ?? {};
+  check("a renamed provider takes its old patterns with it",
+    JSON.stringify(renameOutcome.removed) === JSON.stringify(["e2e-provider/kept-model"]),
+    JSON.stringify(renameOutcome));
+  check("the new provider name joins the whitelist",
+    JSON.stringify(renameOutcome.added) === JSON.stringify(["renamed-provider/kept-model"]),
+    JSON.stringify(renameOutcome));
+  check("the untouched entries survive the rename",
+    JSON.stringify(readSettings().enabledModels) === JSON.stringify([
+      "anthropic/not-a-real-model",
+      "unkeyed-provider/pending-model",
+      "renamed-provider/kept-model",
+    ]),
+    JSON.stringify(readSettings().enabledModels));
+
   await call("backend.shutdown");
 } catch (error) {
   check("the backend answered every request", false, error.message);

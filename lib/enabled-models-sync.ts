@@ -8,7 +8,6 @@ import {
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModelsConfigPath, readModelsConfig } from "./models-config-store";
 import { invalidateModelsCache } from "./models-cache";
-import { hasGlob } from "./model-scope";
 
 /**
  * Keep `settings.json`'s `enabledModels` in step with `models.json`.
@@ -23,21 +22,29 @@ import { hasGlob } from "./model-scope";
  * The reconciliation is deliberately narrow:
  * - only providers declared in `models.json` are touched, so a hand-curated list
  *   of built-in providers (anthropic, openai-codex, …) keeps the user's intent;
+ * - a provider deleted or renamed on the model settings page takes its patterns
+ *   with it, while a provider the runtime still knows (built-in, or registered by
+ *   an extension) keeps them;
  * - a pattern is only dropped when the very model it names is gone from
  *   `models.json`; a model that is merely unavailable right now (missing
  *   credentials, provider error) keeps its pattern;
  * - patterns that cannot be attributed to one `provider/modelId` — bare model
- *   ids, globs, or a provider missing from `models.json` — are never dropped;
+ *   ids and `*`/`?` globs — are never dropped;
  * - an empty `enabledModels` stays empty: it means "no filter", so filling it in
  *   would change what the user sees;
  * - a failing reconciliation never invalidates the saved `models.json` and never
  *   reports success it did not achieve.
  *
- * Two limits are worth knowing:
+ * Three limits are worth knowing:
  * - entries are only added for models that are available (i.e. their provider has
  *   credentials), because pi resolves the whitelist against available models too.
  *   A provider declared here without credentials joins the whitelist on a later
  *   save, once the key exists.
+ * - a dead pattern naming a provider the runtime knows nothing about is treated as
+ *   the leftover of a provider that was deleted or renamed on this page, and is
+ *   dropped. A hand-written pattern for a provider that is not configured yet does
+ *   not survive; patterns for built-in providers always do, because the runtime
+ *   knows those.
  * - this page owns the global list. A project's `.pi/settings.json` may override
  *   `enabledModels` for its own cwd; that override is the project's business, and
  *   writing the merged value back into the global file would be wrong.
@@ -77,6 +84,13 @@ export interface PlanEnabledModelsSyncOptions {
   availableModels: readonly Model<Api>[];
   /** Providers declared by `models.json` and the model ids each one lists. */
   definedModels: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Providers the runtime knows about: built-ins, everything `models.json`
+   * declares, and providers registered by extensions. A dead pattern pointing at
+   * none of them names a provider that was deleted or renamed in the model
+   * settings page.
+   */
+  knownProviderIds: readonly string[];
 }
 
 export interface SyncEnabledModelsOptions {
@@ -105,6 +119,16 @@ export function collectDefinedModels(config: Record<string, unknown>): Record<st
 }
 
 /**
+ * True for patterns that stand for more than one model because they range over
+ * characters. `[` alone does not: custom providers name models `[0.2]glm-5.3` or
+ * `[自部署]deepseek-v4.1`, so `provider/[0.2]model` is a literal reference, and a
+ * character class that really matches something is never dead in the first place.
+ */
+function hasWildcard(pattern: string): boolean {
+  return pattern.includes("*") || pattern.includes("?");
+}
+
+/**
  * Split `provider/modelId` into a reference, or `undefined` when the pattern is
  * too globby (or too bare) to stand for exactly one model. Everything after the
  * first slash is the model id, because ids may contain slashes themselves.
@@ -114,7 +138,7 @@ function patternReference(pattern: string): { provider: string; modelId: string 
   if (slashIndex === -1) return undefined;
   const provider = pattern.slice(0, slashIndex).trim();
   const modelId = pattern.slice(slashIndex + 1).trim();
-  if (!provider || !modelId || hasGlob(provider) || hasGlob(modelId)) return undefined;
+  if (!provider || !modelId || hasWildcard(provider) || hasWildcard(modelId)) return undefined;
   return { provider, modelId };
 }
 
@@ -141,11 +165,12 @@ function referenceCandidates(modelId: string): string[] {
 export async function planEnabledModelsSync(
   options: PlanEnabledModelsSyncOptions,
 ): Promise<EnabledModelsSyncPlan> {
-  const { patterns, availableModels, definedModels } = options;
+  const { patterns, availableModels, definedModels, knownProviderIds } = options;
   const plan: EnabledModelsSyncPlan = { patterns: [...patterns], added: [], removed: [] };
   const defined = new Map(
     Object.entries(definedModels).map(([providerId, ids]) => [providerId, new Set(ids)]),
   );
+  const known = new Set(knownProviderIds);
   if (patterns.length === 0 || defined.size === 0) return plan;
 
   const snapshotRuntime = {
@@ -165,7 +190,10 @@ export async function planEnabledModelsSync(
     const reference = patternReference(pattern);
     if (reference === undefined) return false;
     const declared = defined.get(reference.provider);
-    if (declared === undefined) return false;
+    // Not declared any more. A provider the runtime still knows is a built-in (or
+    // an extension's) that the user curated by hand, so leave it alone; a
+    // provider nobody knows was deleted or renamed on the model settings page.
+    if (declared === undefined) return !known.has(reference.provider);
     return !referenceCandidates(reference.modelId).some((modelId) => declared.has(modelId));
   };
 
@@ -254,7 +282,12 @@ async function reconcileEnabledModels(
   const availableModels = await modelRuntime.getAvailable(undefined, {
     signal: AbortSignal.timeout(MODEL_AVAILABILITY_TIMEOUT_MS),
   });
-  const plan = await planEnabledModelsSync({ patterns: current, availableModels, definedModels });
+  const plan = await planEnabledModelsSync({
+    patterns: current,
+    availableModels,
+    definedModels,
+    knownProviderIds: modelRuntime.getProviders().map((provider) => provider.id),
+  });
   if (plan.added.length === 0 && plan.removed.length === 0) {
     return { status: "unchanged", added: [], removed: [] };
   }
