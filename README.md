@@ -91,6 +91,7 @@ npm start                        # 直接运行（开发态）
 npm run typecheck                # 类型检查
 
 npm test                         # 后台路由端到端（走真实 IPC）
+npm run test:models-config       # 模型设置保存后同步 enabledModels（用临时 agent 目录，不碰真实配置）
 npm run test:prompt              # 再加一次真实模型对话
 npm run test:desktop             # 桌面桥接、取消、重连、导航和npm复制的定向回归
 npm run test:gate                # 测试统计门槛的反例检查
@@ -180,6 +181,18 @@ PI_WEB_SKIP_VERSION_CHECK: "1"   // desktop/main.ts，没改任何界面代码
 实测 `GET /api/app-update` 返回 `{"updateAvailable":false}`，界面不再出现那个提示。
 
 ## 本轮修复范围
+
+- 「模型设置」保存后同步 `enabledModels`。这个页面原来只写 `models.json`，
+  而 `settings.json` 里的 `enabledModels` 一旦非空就是硬白名单（pi 的 Ctrl+P 和
+  本应用的选择器都只看命中项），于是页面上新加的 provider/模型在 pi 里看不到，
+  从 `models.json` 删掉的模型又在白名单里留下永远匹配不到的死条目。
+  现在保存后对账，范围只限 `models.json` 里声明的 provider：补上没有被任何模式
+  覆盖的模型（一律写全限定 `provider/modelId`，避免歧义条目把选择器整个搞挂），
+  删掉模型已从 `models.json` 消失的模式；只是暂时不可用（缺凭据）的模型保留条目，
+  裸 modelId、glob 和不在 `models.json` 里的 provider 一律不碰，空数组仍表示不过滤。
+  写入复用 `SettingsManager`（单字段 + 文件锁合并，和 pi 命令行并发写不互相覆盖），
+  写失败或读不动 `settings.json` 时报 `skipped` 而不是假报成功；响应里附
+  `enabledModelsSync` 说明本次做了什么。`settings.json` 里设 `enabledModelsSync: "off"` 可关闭。
 
 - 会话列表顶部「新建」左侧增加刷新按钮，点击重新加载整个界面。
 
@@ -347,6 +360,11 @@ pi-web 服务就这样被误报成“应用在监听 30141”）。
   IPC仍一次发送整份正文，进度只报告开始和成功完成，不伪造中间百分比。
   下载与媒体Range响应仍在各自响应体读完后返回，完整分块传输暂缓。
 - 桌面端和网页版共用 `~/.pi/agent`。同时写同一个会话会互相踩，别两边同时开着同一个会话。
+- 「模型设置」的 `enabledModels` 同步只管全局 `settings.json`，也只认 `models.json`
+  里声明的 provider：项目 `.pi/settings.json` 若覆盖了 `enabledModels`，那由项目自己负责；
+  provider 还没凭据时它的模型不会被自动加进白名单（有凭据后再保存一次即可）；
+  无法归到唯一模型的模式（glob、裸 id、provider 不在 `models.json`）永不自动删除。
+  这份对账是为了让保存和 `models.json` 保持一致，不代替在 pi 里手动精挑白名单。
 
 ### 早期上游测试失败记录（不作为本轮通过项）
 
