@@ -342,6 +342,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(Boolean(opts.deferInitialScroll));
+  const historyPrependPendingRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
   const isNearBottomRef = useRef(true);
@@ -564,7 +565,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return { ...prev, context };
       });
       if (before) {
-        // Older page: prepend so scroll position stays anchored.
+        // Older pages grow `messages` too, but they must not trigger the
+        // new-message auto-scroll-to-bottom effect below.
+        historyPrependPendingRef.current = true;
         setMessages((prev) => [...d.context.messages, ...prev]);
         setEntryIds((prev) => [...d.context.entryIds, ...prev]);
       } else {
@@ -2080,6 +2083,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         pendingScrollToUserRef.current = false;
         initialScrollDoneRef.current = true;
         scrollUserMsgToTop();
+      } else if (historyPrependPendingRef.current) {
+        historyPrependPendingRef.current = false;
       } else if (!initialScrollDoneRef.current) {
         initialScrollDoneRef.current = true;
         scrollToBottom("instant");

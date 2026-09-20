@@ -12,6 +12,13 @@ import {
   type Draft,
   type EffectiveValues,
 } from "./automode-draft";
+import {
+  collectModelOptions,
+  modelSpecOf,
+  splitModelSpec,
+  type ModelOption,
+} from "./automode-model-options";
+import { ModelSelector } from "./ModelSelector";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 
 /**
@@ -59,7 +66,8 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
   const [scope, setScope] = useState<Scope>("global");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [baseline, setBaseline] = useState<Draft | null>(null);
-  const [models, setModels] = useState<string[]>([]);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -87,15 +95,18 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    setModelsLoading(true);
     void (async () => {
-      try {
-        const response = await fetch(`/api/models?cwd=${encodeURIComponent(cwd ?? "")}`);
-        const body = await response.json() as { modelList?: { id: string; provider: string }[] };
-        if (cancelled || !Array.isArray(body.modelList)) return;
-        setModels(body.modelList.map((model) => `${model.provider}/${model.id}`).sort());
-      } catch {
-        // The picker is a convenience; a free-text field still works.
-      }
+      // `models.json` holds the custom gateways, `/api/models` is where built-in
+      // providers (openai-codex and friends) come from. Either one failing still
+      // leaves a usable picker.
+      const [modelsConfig, registry] = await Promise.all([
+        getJson("/api/models-config"),
+        getJson(`/api/models?cwd=${encodeURIComponent(cwd ?? "")}`),
+      ]);
+      if (cancelled) return;
+      setModelOptions(collectModelOptions(modelsConfig, registry));
+      setModelsLoading(false);
     })();
     return () => { cancelled = true; };
   }, [cwd]);
@@ -270,14 +281,14 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
             <div style={{ display: "grid", gap: 10 }}>
               <div style={{ display: "grid", gap: 5 }}>
                 <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("automode.primaryModel")}</span>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    aria-label={t("automode.primaryModel")}
-                    list="automode-model-options"
+                <div style={{ display: "flex", gap: 8, minWidth: 0 }}>
+                  <ModelSpecField
+                    label={t("automode.primaryModel")}
                     value={draft.classifierModel}
-                    placeholder={placeholder(effective.classifierModel)}
-                    onChange={(event) => update("classifierModel", event.target.value)}
-                    style={inputStyle}
+                    options={modelOptions}
+                    loading={modelsLoading}
+                    emptyLabel={t("automode.inherited")}
+                    onChange={(spec) => update("classifierModel", spec)}
                   />
                   <ConfigButton
                     variant="secondary"
@@ -288,6 +299,11 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                     {testing === "primary" ? t("automode.testing") : t("automode.test")}
                   </ConfigButton>
                 </div>
+                {!draft.classifierModel.trim() && effective.classifierModel && (
+                  <p className="settings-general-description">
+                    {t("automode.inheritedModel", { model: effective.classifierModel })}
+                  </p>
+                )}
                 <ResultLine result={results.primary} />
               </div>
 
@@ -297,12 +313,13 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                   <div key={`fallback-${index}`} style={{ display: "grid", gap: 3 }}>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                       <span style={{ width: 18, color: "var(--text-dim)", fontSize: 11 }}>{index + 1}</span>
-                      <input
-                        aria-label={t("automode.fallbackModel", { index: index + 1 })}
-                        list="automode-model-options"
+                      <ModelSpecField
+                        label={t("automode.fallbackModel", { index: index + 1 })}
                         value={spec}
-                        onChange={(event) => setFallback(index, event.target.value)}
-                        style={inputStyle}
+                        options={modelOptions}
+                        loading={modelsLoading}
+                        emptyLabel={t("automode.emptyFallback")}
+                        onChange={(next) => setFallback(index, next)}
                       />
                       <ConfigButton variant="ghost" size="small" title={t("automode.moveUp")} aria-label={t("automode.moveUp")} disabled={index === 0} onClick={() => moveFallback(index, -1)}>↑</ConfigButton>
                       <ConfigButton variant="ghost" size="small" title={t("automode.moveDown")} aria-label={t("automode.moveDown")} disabled={index === draft.classifierFallbackModels.length - 1} onClick={() => moveFallback(index, 1)}>↓</ConfigButton>
@@ -341,9 +358,6 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                 <p className="settings-general-description">{t("automode.fallbackHint")}</p>
               </div>
             </div>
-            <datalist id="automode-model-options">
-              {models.map((spec) => <option key={spec} value={spec} />)}
-            </datalist>
           </section>
 
           <section className="settings-general-section">
@@ -478,6 +492,68 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
       )}
     </div>
   );
+}
+
+/**
+ * One model field: a picker over everything the classifier can resolve, with a
+ * plain text input as the fallback for the case where neither model source
+ * answered. A spec that is no longer offered (a model deleted from
+ * `models.json`) still shows as the current value — otherwise an untouched
+ * setting would read as "nothing chosen".
+ */
+function ModelSpecField({ label, value, options, loading, emptyLabel, onChange }: {
+  label: string;
+  value: string;
+  options: ModelOption[];
+  loading: boolean;
+  emptyLabel: string;
+  onChange: (spec: string) => void;
+}) {
+  const { t } = useI18n();
+  const current = value.trim();
+  const selectedLabel = !loading && current && !options.some(
+    (option) => modelSpecOf(option.provider, option.modelId) === current,
+  )
+    ? t("automode.modelUnavailable", { model: current })
+    : undefined;
+
+  if (!loading && options.length === 0) {
+    return (
+      <input
+        aria-label={label}
+        value={value}
+        placeholder={emptyLabel}
+        onChange={(event) => onChange(event.target.value)}
+        style={inputStyle}
+      />
+    );
+  }
+
+  return (
+    <ModelSelector
+      options={options}
+      value={splitModelSpec(value)}
+      onChange={(provider, modelId) => onChange(modelSpecOf(provider, modelId))}
+      onClear={() => onChange("")}
+      emptyLabel={loading ? t("i18n.loading") : emptyLabel}
+      selectedLabel={selectedLabel}
+      disabled={loading}
+      ariaLabel={label}
+      titleText={t("automode.pickModel")}
+      variant="field"
+      placement="auto"
+    />
+  );
+}
+
+/** A failed lookup is not an error here: the picker falls back to a text field. */
+async function getJson(url: string): Promise<unknown> {
+  try {
+    const response = await fetch(url);
+    return response.ok ? await response.json() : null;
+  } catch {
+    return null;
+  }
 }
 
 function ResultLine({ result }: { result?: { ok: boolean; text: string } }) {

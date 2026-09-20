@@ -12,7 +12,7 @@ import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
-import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { ChatMinimap, type MinimapQuestion } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
@@ -86,6 +86,9 @@ function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, 
 }
 
 const CHAT_MINIMAP_WIDTH = 36;
+// The question directory is refetched after this quiet period: a running turn
+// appends messages, and each append would otherwise be its own session file read.
+const QUESTION_DIRECTORY_DEBOUNCE_MS = 250;
 const CHAT_COLUMN_PADDING = 16;
 
 function NewSessionUpdateLink({
@@ -672,6 +675,116 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
     prevScrollDistanceRef.current = null;
   }, [visibleCount, scrollContainerRef]);
+
+  // --- Question directory (the list on the right) ---
+  // One row per user message on the active branch, straight from the session
+  // file. Deriving the list from `messages` meant it emptied out whenever a
+  // single long turn filled the loaded window — exactly when navigating matters.
+  const [questionDirectory, setQuestionDirectory] = useState<{ key: string; questions: MinimapQuestion[] } | null>(null);
+  const [pendingQuestionJump, setPendingQuestionJump] = useState<{ entryId: string; key: string } | null>(null);
+  const [questionJumpReady, setQuestionJumpReady] = useState(false);
+  const jumpSearchRef = useRef<string | null>(null);
+  const directoryKey = `${session?.id ?? sessionIdRef.current ?? ""}|${activeLeafId ?? ""}`;
+
+  useEffect(() => {
+    const sid = session?.id ?? sessionIdRef.current;
+    if (!sid || isMobile) return;
+    const controller = new AbortController();
+    // Debounced: a running turn appends messages, and every append would
+    // otherwise be one more read of the session file.
+    const timer = setTimeout(() => {
+      void (async () => {
+        const query = activeLeafId ? `?leafId=${encodeURIComponent(activeLeafId)}` : "";
+        try {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/questions${query}`, { cache: "no-store", signal: controller.signal });
+          const data = response.ok ? await response.json() as { questions?: MinimapQuestion[] } : null;
+          if (controller.signal.aborted) return;
+          setQuestionDirectory({ key: directoryKey, questions: data?.questions ?? [] });
+        } catch {
+          // A failed read is not worth an error banner: the list just stays empty
+          // instead of showing another session's questions.
+          if (!controller.signal.aborted) setQuestionDirectory({ key: directoryKey, questions: [] });
+        }
+      })();
+    }, QUESTION_DIRECTORY_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [activeLeafId, directoryKey, isMobile, messages.length, session?.id, sessionIdRef]);
+
+  const questions = questionDirectory?.key === directoryKey ? questionDirectory.questions : [];
+
+  const handleJumpToQuestion = useCallback((entryId: string) => {
+    jumpSearchRef.current = null;
+    setQuestionJumpReady(false);
+    // Remember which directory the row came from: a branch or session switch has
+    // to invalidate the jump instead of walking an unrelated history.
+    setPendingQuestionJump({ entryId, key: directoryKey });
+  }, [directoryKey]);
+
+  // The clicked row is already loaded: nothing to fetch, just reveal the whole
+  // window so the message is rendered and the scroll below can find it.
+  useEffect(() => {
+    const entryId = pendingQuestionJump?.entryId;
+    if (!entryId || !entryIds.includes(entryId)) return;
+    setVisibleCount((current) => Math.max(current, messages.length * 2));
+    setQuestionJumpReady(true);
+  }, [entryIds, messages.length, pendingQuestionJump]);
+
+  // Otherwise the row is a question the chat has not loaded yet. Walk back one
+  // page at a time until it shows up, then let the effect above take over.
+  useEffect(() => {
+    const pending = pendingQuestionJump;
+    const sid = session?.id ?? sessionIdRef.current;
+    if (!pending || !sid || loading) return;
+    if (pending.key !== directoryKey) {
+      setPendingQuestionJump(null);
+      return;
+    }
+    const history = searchHistoryRef.current;
+    if (history.entryIds.includes(pending.entryId)) return;
+    if (jumpSearchRef.current === pending.entryId) return;
+    jumpSearchRef.current = pending.entryId;
+
+    const controller = new AbortController();
+    void (async () => {
+      loadingOlderRef.current = true;
+      let before = history.historyCursor;
+      let hasMore = history.hasEarlierMessages;
+      try {
+        while (hasMore && before && !controller.signal.aborted) {
+          const context = await loadContext(sid, activeLeafId, before, { signal: controller.signal });
+          if (controller.signal.aborted || !context) return;
+          if (context.entryIds.includes(pending.entryId)) return;
+          if (context.oldestEntryId === before) return;
+          before = context.oldestEntryId;
+          hasMore = context.hasMore;
+        }
+        // Not on this branch after all — drop the jump silently.
+        if (!controller.signal.aborted) setPendingQuestionJump(null);
+      } finally {
+        loadingOlderRef.current = false;
+      }
+    })();
+    return () => controller.abort();
+  }, [activeLeafId, directoryKey, loadContext, loading, pendingQuestionJump, session?.id, sessionIdRef]);
+
+  // Put the message at the top of the viewport, once it is really in the DOM:
+  // the effects above may only just have revealed it.
+  useLayoutEffect(() => {
+    const entryId = pendingQuestionJump?.entryId;
+    const content = messageContentRef.current;
+    if (!entryId || !questionJumpReady || !content) return;
+    const element = Array.from(content.children).find((child) => (
+      child instanceof HTMLElement && child.dataset.entryId === entryId
+    ));
+    if (!(element instanceof HTMLElement)) return;
+    scrollToMessage(element);
+    setPendingQuestionJump(null);
+    setQuestionJumpReady(false);
+  }, [entryIds, messages.length, pendingQuestionJump, questionJumpReady, scrollToMessage, visibleCount]);
+
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -717,7 +830,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
-  const visibleMessages = messages.filter((m) => isMessageGroupAnchor(m) || m.role === "assistant");
   // Stable Map identity: `messages` doesn't change during streaming updates
   // (the streaming message lives in streamState), so memoized MessageViews
   // skip re-rendering on every message_update event. An inline `new Map()`
@@ -743,11 +855,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     }
     return history.reverse();
   }, [messages]);
-  const messageRefs = useMessageRefs(visibleMessages.length);
-  const revealHistoryForMinimap = useCallback(() => {
-    setVisibleCount((current) => Math.max(current, messages.length * 2));
-  }, [messages.length]);
-
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const hasStreamingContent = Boolean(streamState.streamingMessage?.content.length);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
@@ -1005,23 +1112,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 if (isMessageGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
               }
 
-              const visibleRefIndexByMessage = new Map<number, number>();
-              let refIdx = 0;
-              messages.forEach((msg, idx) => {
-                if (isMessageGroupAnchor(msg) || msg.role === "assistant") {
-                  visibleRefIndexByMessage.set(idx, refIdx++);
-                }
-              });
-
-              const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
-                messageRefs.current[refIndex] = el;
-                if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
-              };
-
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[] } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[] } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
-                const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
                 const messageKey = entryIds[idx] ?? idx;
                 let showTimestamp = false;
@@ -1059,9 +1152,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     writtenFiles={options.writtenFiles}
                   />
                 );
-                if (!isVisible || currentRefIdx === undefined) return view;
+                if (!isVisible) return view;
+                // The entry id is what the question list and the scroll restore
+                // look messages up by; the last prompt additionally anchors the
+                // “keep the prompt in view while the agent works” spacer.
                 return (
-                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={options.attachRef === false ? undefined : attachVisibleRef(idx, currentRefIdx)}>
+                  <div
+                    key={`${keyPrefix}-${messageKey}`}
+                    data-entry-id={entryIds[idx]}
+                    ref={idx === lastUserIdx ? (el) => { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; } : undefined}
+                  >
                     {view}
                   </div>
                 );
@@ -1113,14 +1213,13 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
                 const processViews: ReactNode[] = [];
                 let processToolCount = 0;
-                let processRefIdx: number | undefined;
                 let revealProcess = false;
 
                 for (let processIdx = userIdx + 1; processIdx <= finalAssistantIdx; processIdx++) {
                   const processMessage = messages[processIdx];
                   if (processMessage.role === "custom") {
                     revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
-                    processViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }));
+                    processViews.push(renderMessage(processIdx, { keyPrefix: "process" }));
                     continue;
                   }
                   if (processMessage.role !== "assistant") continue;
@@ -1129,11 +1228,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     : processMessage;
                   const blocks = getDisplayableAssistantBlocks(message);
                   if (blocks.length === 0) continue;
-                  processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
                   processToolCount += countToolCallBlocks(blocks);
                   revealProcess ||= Boolean(pendingSearchScroll && entryIds[processIdx] === pendingSearchScroll.entryId && (!searchBlock || blocks.includes(searchBlock)));
                   processViews.push(renderMessage(processIdx, {
-                    attachRef: false,
                     keyPrefix: "process",
                     messageOverride: message,
                     showTimestamp: false,
@@ -1142,10 +1239,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
                 if (processViews.length > 0) {
                   rendered.push(
-                    <div
-                      key={`process-group-${entryIds[userIdx] ?? userIdx}`}
-                      ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
-                    >
+                    <div key={`process-group-${entryIds[userIdx] ?? userIdx}`}>
                       <ProcessDetailsGroup messageCount={processViews.length} toolCallCount={processToolCount} defaultExpanded={!finalAnswerMessage} reveal={revealProcess} t={t}>
                         {processViews}
                       </ProcessDetailsGroup>
@@ -1224,11 +1318,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         </div>
         {isMobile || pendingScrollRestore ? null : (
           <ChatMinimap
-            messages={messages}
-            streamingMessage={streamState.streamingMessage}
+            questions={questions}
             scrollContainer={scrollContainerRef}
-            messageRefs={messageRefs}
-            onRevealHistory={revealHistoryForMinimap}
+            messageList={messageContentRef}
+            onJumpToQuestion={handleJumpToQuestion}
           />
         )}
         </>}

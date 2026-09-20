@@ -51,6 +51,26 @@ test("the page reads the effective values, saves to one scope, and can reload th
   assert.match(config, /moveFallback\(index, 1\)/);
 });
 
+test("the model fields are a picker fed by models.json and the registry, not a free-text box", () => {
+  assert.match(config, /import \{ ModelSelector \} from "\.\/ModelSelector"/);
+  assert.match(config, /const \[modelsConfig, registry\] = await Promise\.all\(\[/);
+  assert.match(config, /getJson\("\/api\/models-config"\)/);
+  assert.match(config, /getJson\(`\/api\/models\?cwd=\$\{encodeURIComponent\(cwd \?\? ""\)\}`\)/);
+  assert.match(config, /setModelOptions\(collectModelOptions\(modelsConfig, registry\)\)/);
+  // Both fields go through the shared component instead of a <datalist> hint list.
+  assert.doesNotMatch(config, /datalist/);
+  const fields = [...config.matchAll(/<ModelSpecField\s([\s\S]*?)\/>/g)].map((match) => match[1]);
+  assert.equal(fields.length, 2, "expected the primary model and the fallback rows to use ModelSpecField");
+  for (const field of fields) {
+    assert.match(field, /options=\{modelOptions\}/);
+    assert.match(field, /loading=\{modelsLoading\}/);
+    assert.match(field, /onChange=\{/);
+  }
+  assert.match(config, /onClear=\{\(\) => onChange\(""\)\}/);
+  assert.match(config, /variant="field"/);
+  assert.match(config, /placement="auto"/);
+});
+
 test("saving sends only the fields the user touched", () => {
   assert.match(draft, /export function buildPatch\(current: Draft, base: Draft\)/);
   assert.match(draft, /const dirty = new Set\(changedKeys\(current, base\)\)/);

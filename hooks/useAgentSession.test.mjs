@@ -312,6 +312,8 @@ test("uses server pagination state instead of guessing from rendered rows", () =
   assert.match(source, /const \[hasEarlierMessages, setHasEarlierMessages\] = useState\(false\)/);
   assert.match(source, /setHasEarlierMessages\(d\.context\.hasMore\)/);
   assert.match(source, /setHistoryCursor\(d\.context\.oldestEntryId\)/);
+  assert.match(loadContextSource, /if \(before\) \{[\s\S]*historyPrependPendingRef\.current = true;[\s\S]*setMessages\(\(prev\) => \[\.\.\.d\.context\.messages, \.\.\.prev\]\)/);
+  assert.match(source, /else if \(historyPrependPendingRef\.current\) \{\s*historyPrependPendingRef\.current = false;\s*\} else if \(!initialScrollDoneRef\.current\)/);
   assert.match(loadContextSource, /setData\(\(prev\) => \{[\s\S]*messages: \[\.\.\.d\.context\.messages, \.\.\.prev\.context\.messages\]/);
   assert.match(chatWindowSource, /const oldestId = historyCursor/);
   assert.doesNotMatch(chatWindowSource, /const oldestId = entryIds\[0\]/);

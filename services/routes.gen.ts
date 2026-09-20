@@ -39,24 +39,25 @@ import * as route33 from "../app/api/sessions/[id]/context/route";
 import * as route34 from "../app/api/sessions/[id]/entries/[entryId]/thinking/route";
 import * as route35 from "../app/api/sessions/[id]/entries/[entryId]/tool-result-image/route";
 import * as route36 from "../app/api/sessions/[id]/export/route";
-import * as route37 from "../app/api/sessions/[id]/route";
-import * as route38 from "../app/api/sessions/[id]/state/route";
-import * as route39 from "../app/api/sessions/route";
-import * as route40 from "../app/api/sessions/search/route";
-import * as route41 from "../app/api/skills/check/route";
-import * as route42 from "../app/api/skills/install/route";
-import * as route43 from "../app/api/skills/route";
-import * as route44 from "../app/api/skills/search/route";
-import * as route45 from "../app/api/skills/update/route";
-import * as route46 from "../app/api/subagents/[id]/route";
-import * as route47 from "../app/api/subagents/profiles/route";
-import * as route48 from "../app/api/subagents/settings/route";
-import * as route49 from "../app/api/terminal/[id]/events/route";
-import * as route50 from "../app/api/terminal/[id]/route";
-import * as route51 from "../app/api/terminal/route";
-import * as route52 from "../app/api/tools/settings/route";
-import * as route53 from "../app/api/web-auth/route";
-import * as route54 from "../app/api/worktrees/route";
+import * as route37 from "../app/api/sessions/[id]/questions/route";
+import * as route38 from "../app/api/sessions/[id]/route";
+import * as route39 from "../app/api/sessions/[id]/state/route";
+import * as route40 from "../app/api/sessions/route";
+import * as route41 from "../app/api/sessions/search/route";
+import * as route42 from "../app/api/skills/check/route";
+import * as route43 from "../app/api/skills/install/route";
+import * as route44 from "../app/api/skills/route";
+import * as route45 from "../app/api/skills/search/route";
+import * as route46 from "../app/api/skills/update/route";
+import * as route47 from "../app/api/subagents/[id]/route";
+import * as route48 from "../app/api/subagents/profiles/route";
+import * as route49 from "../app/api/subagents/settings/route";
+import * as route50 from "../app/api/terminal/[id]/events/route";
+import * as route51 from "../app/api/terminal/[id]/route";
+import * as route52 from "../app/api/terminal/route";
+import * as route53 from "../app/api/tools/settings/route";
+import * as route54 from "../app/api/web-auth/route";
+import * as route55 from "../app/api/worktrees/route";
 
 export const ROUTES: { path: string; module: RouteModule }[] = [
   { path: "/api/agent/[id]/bash-output", module: route0 as RouteModule },
@@ -96,22 +97,23 @@ export const ROUTES: { path: string; module: RouteModule }[] = [
   { path: "/api/sessions/[id]/entries/[entryId]/thinking", module: route34 as RouteModule },
   { path: "/api/sessions/[id]/entries/[entryId]/tool-result-image", module: route35 as RouteModule },
   { path: "/api/sessions/[id]/export", module: route36 as RouteModule },
-  { path: "/api/sessions/[id]", module: route37 as RouteModule },
-  { path: "/api/sessions/[id]/state", module: route38 as RouteModule },
-  { path: "/api/sessions", module: route39 as RouteModule },
-  { path: "/api/sessions/search", module: route40 as RouteModule },
-  { path: "/api/skills/check", module: route41 as RouteModule },
-  { path: "/api/skills/install", module: route42 as RouteModule },
-  { path: "/api/skills", module: route43 as RouteModule },
-  { path: "/api/skills/search", module: route44 as RouteModule },
-  { path: "/api/skills/update", module: route45 as RouteModule },
-  { path: "/api/subagents/[id]", module: route46 as RouteModule },
-  { path: "/api/subagents/profiles", module: route47 as RouteModule },
-  { path: "/api/subagents/settings", module: route48 as RouteModule },
-  { path: "/api/terminal/[id]/events", module: route49 as RouteModule },
-  { path: "/api/terminal/[id]", module: route50 as RouteModule },
-  { path: "/api/terminal", module: route51 as RouteModule },
-  { path: "/api/tools/settings", module: route52 as RouteModule },
-  { path: "/api/web-auth", module: route53 as RouteModule },
-  { path: "/api/worktrees", module: route54 as RouteModule },
+  { path: "/api/sessions/[id]/questions", module: route37 as RouteModule },
+  { path: "/api/sessions/[id]", module: route38 as RouteModule },
+  { path: "/api/sessions/[id]/state", module: route39 as RouteModule },
+  { path: "/api/sessions", module: route40 as RouteModule },
+  { path: "/api/sessions/search", module: route41 as RouteModule },
+  { path: "/api/skills/check", module: route42 as RouteModule },
+  { path: "/api/skills/install", module: route43 as RouteModule },
+  { path: "/api/skills", module: route44 as RouteModule },
+  { path: "/api/skills/search", module: route45 as RouteModule },
+  { path: "/api/skills/update", module: route46 as RouteModule },
+  { path: "/api/subagents/[id]", module: route47 as RouteModule },
+  { path: "/api/subagents/profiles", module: route48 as RouteModule },
+  { path: "/api/subagents/settings", module: route49 as RouteModule },
+  { path: "/api/terminal/[id]/events", module: route50 as RouteModule },
+  { path: "/api/terminal/[id]", module: route51 as RouteModule },
+  { path: "/api/terminal", module: route52 as RouteModule },
+  { path: "/api/tools/settings", module: route53 as RouteModule },
+  { path: "/api/web-auth", module: route54 as RouteModule },
+  { path: "/api/worktrees", module: route55 as RouteModule },
 ];

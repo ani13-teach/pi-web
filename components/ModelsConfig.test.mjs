@@ -178,6 +178,8 @@ test("thinking level overrides keep explicit default, disabled, and custom contr
     source.indexOf("// ── Model detail"),
   );
 
+  assert.match(editor, /const map = withDefaultThinkingLevelMap\(value\)/);
+  assert.match(source, /const effectiveThinkingLevelMap = model\.reasoning[\s\S]*?withDefaultThinkingLevelMap\(model\.thinkingLevelMap\)/);
   assert.match(editor, /THINKING_LEVELS\.map/);
   assert.match(editor, />\s*Default\s*</);
   assert.match(editor, />\s*Disabled\s*</);

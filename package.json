@@ -16,7 +16,7 @@
     "test:navigation": "node --experimental-strip-types --test tests/navigation.test.mjs",
     "test:prompt": "node tests/backend-ipc.mjs --prompt",
     "test:models-config": "node tests/models-config-sync.mjs",
-    "test:desktop": "node --experimental-strip-types --test tests/automode-builtin.test.mjs tests/automode-draft.test.mjs tests/automode-panel.test.mjs tests/bridge-lifecycle.test.mjs tests/eventsource.test.mjs tests/navigation.test.mjs tests/system-proxy.test.mjs tests/vendor-npm.test.mjs",
+    "test:desktop": "node --experimental-strip-types --test tests/automode-builtin.test.mjs tests/automode-draft.test.mjs tests/automode-model-options.test.mjs tests/automode-panel.test.mjs tests/bridge-lifecycle.test.mjs tests/eventsource.test.mjs tests/navigation.test.mjs tests/system-proxy.test.mjs tests/vendor-npm.test.mjs",
     "test:chat": "node scripts/smoke-resilience.mjs chat",
     "test:gate": "node scripts/smoke-window.mjs --selftest",
     "test:window": "node scripts/smoke-window.mjs",

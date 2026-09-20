@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
 import type { DiscoveredModel } from "@/lib/model-discovery";
+import { withDefaultThinkingLevelMap } from "@/lib/thinking-level-map";
 import {
   getLastSettingsSelection,
   setLastSettingsSelection,
@@ -559,7 +560,7 @@ function ThinkingLevelMapEditor({
   value: Record<string, string | null> | undefined;
   onChange: (v: Record<string, string | null> | undefined) => void;
 }) {
-  const map = value ?? {};
+  const map = withDefaultThinkingLevelMap(value);
 
   const setLevel = (level: ThinkingLevel, entry: string | null | "omit") => {
     const next = { ...map };
@@ -1003,6 +1004,9 @@ function ModelDetail({
     remainingCompatKeys.delete("supportsDeveloperRole");
   }
   compatibilityOverrideCount += remainingCompatKeys.size;
+  const effectiveThinkingLevelMap = model.reasoning
+    ? withDefaultThinkingLevelMap(model.thinkingLevelMap)
+    : model.thinkingLevelMap;
   const advancedSummaryParts = [
     model.api ? `API: ${model.api}` : null,
     Object.keys(model.headers ?? {}).length
@@ -1011,8 +1015,8 @@ function ModelDetail({
     compatibilityOverrideCount
       ? t("models.compatSummary", { count: compatibilityOverrideCount })
       : null,
-    Object.keys(model.thinkingLevelMap ?? {}).length
-      ? t("models.thinkingSummary", { count: Object.keys(model.thinkingLevelMap ?? {}).length })
+    Object.keys(effectiveThinkingLevelMap ?? {}).length
+      ? t("models.thinkingSummary", { count: Object.keys(effectiveThinkingLevelMap ?? {}).length })
       : null,
   ].filter((part): part is string => Boolean(part));
   const advancedSummary = advancedSummaryParts.length

@@ -1,23 +1,23 @@
 "use client";
 
-import { memo, useEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
-import ReactMarkdown, { type Options as ReactMarkdownOptions } from "react-markdown";
-import rehypeKatex from "rehype-katex";
-import {
-  markdownPreviewRemarkPlugins,
-  normalizeDisplayMath,
-} from "@/lib/markdown";
-import { isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
-import type { AgentMessage, AssistantMessage, CustomMessage, TextContent, UserMessage } from "@/lib/types";
-import { useI18n } from "@/hooks/useI18n";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import styles from "./ChatMinimap.module.css";
 
+/** One row of the question directory: a user message on the active branch. */
+export interface MinimapQuestion {
+  entryId: string;
+  preview: string;
+}
+
 interface Props {
-  messages: AgentMessage[];
-  streamingMessage: Partial<AgentMessage> | null;
+  /** Every question on the active branch, oldest first. Comes from the session,
+   *  not from the loaded chat window, so it stays complete. */
+  questions: MinimapQuestion[];
+  /** The chat scroller: the rail spans its height and follows its scroll position. */
   scrollContainer: RefObject<HTMLDivElement | null>;
-  messageRefs: RefObject<(HTMLDivElement | null)[]>;
-  onRevealHistory: () => void;
+  /** The rendered message list inside the scroller, read through `data-entry-id`. */
+  messageList: RefObject<HTMLDivElement | null>;
+  onJumpToQuestion: (entryId: string) => void;
 }
 
 const MINIMAP_WIDTH = 36;
@@ -26,295 +26,127 @@ const MINIMAP_PADDING = 12;
 const PREVIEW_HIDE_DELAY = 250;
 const NAVIGATION_ACTIVE_LOCK_MS = 1600;
 
-interface AssistantPreview {
-  markdown: string;
-  element: HTMLDivElement | null;
-}
-
-interface TurnInfo {
-  userMessage: UserMessage | CustomMessage;
-  assistantPreviews: AssistantPreview[];
+interface NodeInfo {
+  index: number;
+  entryId: string;
+  preview: string;
+  /** Absolute offset inside the scroller, or null while the message is not rendered. */
   scrollTop: number | null;
 }
 
-interface NodeInfo {
+interface PositionedNode extends NodeInfo {
   topRatio: number;
-  targetTurn: TurnInfo;
-  index: number;
-}
-
-function getUserPreview(message: UserMessage | CustomMessage): string {
-  if (typeof message.content === "string") return message.content.trim();
-  return message.content
-    .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
-}
-
-function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage>): string {
-  if (message.role !== "assistant") return "";
-  const { answerBlocks } = splitFinalAssistantBlocks(message as AssistantMessage);
-  return answerBlocks
-    .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text)
-    .join("\n\n")
-    .trim();
-}
-
-function PreviewHeading({
-  level,
-  children,
-  headingIndex,
-  onClick,
-}: {
-  level: 1 | 2 | 3;
-  children: React.ReactNode;
-  headingIndex: number | null;
-  onClick?: (headingIndex: number) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={styles.heading}
-      data-level={level}
-      data-preview-heading-index={headingIndex ?? undefined}
-      disabled={headingIndex === null || !onClick}
-      onClick={(event) => {
-        event.stopPropagation();
-        if (headingIndex !== null) onClick?.(headingIndex);
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-interface PreviewAstNode {
-  type?: string;
-  depth?: number;
-  data?: {
-    hProperties?: Record<string, unknown>;
-  };
-}
-
-function remarkPreviewOutline() {
-  return (tree: { children?: PreviewAstNode[] }) => {
-    if (!Array.isArray(tree.children)) return;
-    const headings = tree.children.filter((node) => (
-      node.type === "heading" && typeof node.depth === "number" && node.depth <= 3
-    ));
-    if (headings.length > 0) {
-      headings.forEach((node, headingIndex) => {
-        node.data = {
-          ...node.data,
-          hProperties: {
-            ...node.data?.hProperties,
-            "data-preview-heading-index": headingIndex,
-          },
-        };
-      });
-      tree.children = headings;
-      return;
-    }
-    const firstParagraph = tree.children.find((node) => node.type === "paragraph");
-    tree.children = firstParagraph ? [firstParagraph] : [];
-  };
-}
-
-const previewRemarkPlugins = [
-  ...(markdownPreviewRemarkPlugins ?? []),
-  remarkPreviewOutline,
-];
-const previewRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
-  [rehypeKatex, { throwOnError: false, strict: false }],
-];
-
-function getPreviewHeadingIndex(node: unknown): number | null {
-  const properties = (node as { properties?: Record<string, unknown> } | undefined)?.properties;
-  const value = properties?.dataPreviewHeadingIndex ?? properties?.["data-preview-heading-index"];
-  if (typeof value === "number") return value;
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
-  return null;
-}
-
-export const AssistantOutline = memo(function AssistantOutline({
-  markdown,
-  onHeadingClick,
-  onAnswerClick,
-}: {
-  markdown: string;
-  onHeadingClick?: (headingIndex: number) => void;
-  onAnswerClick?: () => void;
-}) {
-  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(markdown), [markdown]);
-  if (!markdown) return null;
-  return (
-    <div className={styles.outline}>
-      <ReactMarkdown
-        remarkPlugins={previewRemarkPlugins}
-        rehypePlugins={previewRehypePlugins}
-        components={{
-          h1: ({ children, node }) => <PreviewHeading level={1} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h2: ({ children, node }) => <PreviewHeading level={2} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h3: ({ children, node }) => <PreviewHeading level={3} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h4: () => null,
-          h5: () => null,
-          h6: () => null,
-          p: ({ children }) => (
-            <button
-              type="button"
-              className={styles.paragraph}
-              onClick={onAnswerClick}
-            >
-              {children}
-            </button>
-          ),
-          blockquote: () => null,
-          ul: () => null,
-          ol: () => null,
-          pre: () => null,
-          table: () => null,
-          hr: () => null,
-          a: ({ children }) => <>{children}</>,
-          code: ({ children }) => <>{children}</>,
-        }}
-      >
-        {normalizedMarkdown}
-      </ReactMarkdown>
-    </div>
-  );
-});
-
-function createTurnNodes(turns: TurnInfo[]): NodeInfo[] {
-  return turns.map((turn, index) => ({
-    topRatio: 0,
-    targetTurn: turn,
-    index,
-  }));
 }
 
 interface NodeLayout {
-  nodes: NodeInfo[];
+  nodes: PositionedNode[];
   gap: number;
-  fillsHeight: boolean;
 }
 
-function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
-  if (allNodes.length === 0) {
-    return { nodes: [], gap: MAX_NODE_GAP, fillsHeight: false };
-  }
+export function layoutNodes(nodes: NodeInfo[], minimapHeight: number): NodeLayout {
+  if (nodes.length === 0) return { nodes: [], gap: MAX_NODE_GAP };
 
   const height = Math.max(1, minimapHeight);
-  const usableHeight = Math.max(0, height - MINIMAP_PADDING * 2);
-  if (allNodes.length === 1) {
-    return {
-      nodes: [{ ...allNodes[0], topRatio: MINIMAP_PADDING / height }],
-      gap: MAX_NODE_GAP,
-      fillsHeight: false,
-    };
+  if (nodes.length === 1) {
+    return { nodes: [{ ...nodes[0], topRatio: MINIMAP_PADDING / height }], gap: MAX_NODE_GAP };
   }
 
-  const naturalGap = usableHeight / (allNodes.length - 1);
-  const gap = Math.min(MAX_NODE_GAP, naturalGap);
+  const gap = Math.min(MAX_NODE_GAP, Math.max(0, height - MINIMAP_PADDING * 2) / (nodes.length - 1));
   return {
-    nodes: allNodes.map((node, index) => ({
-      ...node,
-      topRatio: (MINIMAP_PADDING + index * gap) / height,
-    })),
+    nodes: nodes.map((node, index) => ({ ...node, topRatio: (MINIMAP_PADDING + index * gap) / height })),
     gap,
-    fillsHeight: naturalGap <= MAX_NODE_GAP,
   };
 }
 
+/**
+ * Which node a pointer position on the rail refers to.
+ *
+ * Always answers with the nearest node. With only a few questions the nodes sit
+ * close together near the top, and the rest of the rail used to be dead space:
+ * hovering there did nothing, so the rail stopped following the pointer exactly
+ * where the user was pointing.
+ */
+export function nearestQuestionIndex(
+  nodes: PositionedNode[],
+  gap: number,
+  minimapHeight: number,
+  pointerRatio: number,
+): number | null {
+  if (nodes.length === 0 || minimapHeight <= 0) return null;
+  if (nodes.length === 1) return 0;
+
+  const pointerY = Math.max(0, Math.min(minimapHeight, pointerRatio * minimapHeight));
+  const rawIndex = gap > 0 ? Math.round((pointerY - MINIMAP_PADDING) / gap) : 0;
+  return Math.max(0, Math.min(nodes.length - 1, rawIndex));
+}
+
+/** Where on the rail a pointer is, as 0..1 from the top. */
+export function pointerRatioOf(clientY: number, element: HTMLElement): number {
+  const rect = element.getBoundingClientRect();
+  if (rect.height <= 0) return 0;
+  return Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+}
+
 export function ChatMinimap({
-  messages,
-  streamingMessage,
+  questions,
   scrollContainer,
-  messageRefs,
-  onRevealHistory,
+  messageList,
+  onJumpToQuestion,
 }: Props) {
-  const { t } = useI18n();
   const [visible, setVisible] = useState(false);
-  const [allNodes, setAllNodes] = useState<NodeInfo[]>([]);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [minimapHeight, setMinimapHeight] = useState(600);
-  const [minimapHovered, setMinimapHovered] = useState(false);
-  const [mouseYRatio, setMouseYRatio] = useState<number | null>(null);
-  const draggingRef = useRef(false);
+  const [hovered, setHovered] = useState(false);
+  const [pointerRatio, setPointerRatio] = useState<number | null>(null);
+  const pressedRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const allNodesRef = useRef<NodeInfo[]>([]);
-  const nodeLayoutRef = useRef<NodeLayout>({
-    nodes: [],
-    gap: MAX_NODE_GAP,
-    fillsHeight: false,
-  });
   const previewBoxRef = useRef<HTMLDivElement>(null);
   const previewItemRefs = useRef(new Map<number, HTMLDivElement>());
   const previewHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeNodeLockRef = useRef<{ index: number; until: number } | null>(null);
-  const pendingNavigationRef = useRef<{
-    nodeIndex: number;
-    target: "user" | "assistant" | "heading";
-    assistantIndex?: number;
-    headingIndex?: number;
-  } | null>(null);
+  const measureThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeLockRef = useRef<{ index: number; until: number } | null>(null);
+  const questionsRef = useRef(questions);
+  questionsRef.current = questions;
 
-  const allMessages = useMemo(
-    () => (streamingMessage ? [...messages, streamingMessage] : messages) as (AgentMessage | Partial<AgentMessage>)[],
-    [messages, streamingMessage],
-  );
-  const allMessagesRef = useRef(allMessages);
-  allMessagesRef.current = allMessages;
-
-  const nodeLayout = useMemo(
-    () => layoutNodes(allNodes, minimapHeight),
-    [allNodes, minimapHeight],
-  );
-  const { nodes: positionedNodes, gap: nodeGap } = nodeLayout;
-  nodeLayoutRef.current = nodeLayout;
+  const layout = useMemo(() => layoutNodes(nodes, minimapHeight), [nodes, minimapHeight]);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
 
   const lockActiveNode = useCallback((index: number) => {
-    activeNodeLockRef.current = {
-      index,
-      until: Date.now() + NAVIGATION_ACTIVE_LOCK_MS,
-    };
+    activeLockRef.current = { index, until: Date.now() + NAVIGATION_ACTIVE_LOCK_MS };
     setActiveIndex(index);
   }, []);
 
   const syncActiveNode = useCallback((scrollEl: HTMLDivElement, nextNodes: NodeInfo[]) => {
-    const activeLock = activeNodeLockRef.current;
+    const activeLock = activeLockRef.current;
     if (activeLock && Date.now() < activeLock.until) {
       setActiveIndex(activeLock.index);
       return;
     }
-    activeNodeLockRef.current = null;
+    activeLockRef.current = null;
 
-    const measuredNodes = nextNodes.filter((node) => node.targetTurn.scrollTop !== null);
-    if (measuredNodes.length === 0) {
+    const measured = nextNodes.filter((node) => node.scrollTop !== null);
+    if (measured.length === 0) {
       setActiveIndex(null);
       return;
     }
     const focusTop = scrollEl.scrollTop + scrollEl.clientHeight * 0.3;
-    const nextActiveNode = measuredNodes.reduce((bestNode, node) => (
-      Math.abs((node.targetTurn.scrollTop ?? 0) - focusTop)
-        < Math.abs((bestNode.targetTurn.scrollTop ?? 0) - focusTop)
-        ? node
-        : bestNode
-    ), measuredNodes[0]);
-    setActiveIndex(nextActiveNode.index);
+    const nearest = measured.reduce((best, node) => (
+      Math.abs((node.scrollTop ?? 0) - focusTop) < Math.abs((best.scrollTop ?? 0) - focusTop) ? node : best
+    ), measured[0]);
+    setActiveIndex(nearest.index);
   }, []);
 
-  const updateScroll = useCallback(() => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const scrollable = scrollEl.scrollHeight - scrollEl.clientHeight;
-    const currentNodes = allNodesRef.current;
-    setVisible(scrollable > 20);
-    syncActiveNode(scrollEl, currentNodes);
-  }, [scrollContainer, syncActiveNode]);
-
-  const measureThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Read each question's position out of the rendered message list.
+   *
+   * The list is keyed by `data-entry-id`, so a question that is not loaded — or
+   * not rendered because the visible window is capped — has no offset, instead of
+   * shifting every other position the way positional refs did.
+   */
   const measureNodes = useCallback(() => {
     if (measureThrottleRef.current) return;
     measureThrottleRef.current = setTimeout(() => {
@@ -323,211 +155,96 @@ export function ChatMinimap({
       const minimapEl = containerRef.current;
       if (!scrollEl || !minimapEl) return;
 
-      const refs = messageRefs.current;
+      const renderedByEntryId = new Map<string, HTMLElement>();
+      for (const child of messageList.current?.children ?? []) {
+        if (child instanceof HTMLElement && child.dataset.entryId) {
+          renderedByEntryId.set(child.dataset.entryId, child);
+        }
+      }
+
       const containerRect = scrollEl.getBoundingClientRect();
-      const turns: TurnInfo[] = [];
-      let refIndex = 0;
-      let currentTurn: TurnInfo | null = null;
+      const nextNodes: NodeInfo[] = questionsRef.current.map((question, index) => {
+        const rect = renderedByEntryId.get(question.entryId)?.getBoundingClientRect();
+        return {
+          index,
+          entryId: question.entryId,
+          preview: question.preview,
+          scrollTop: rect ? rect.top - containerRect.top + scrollEl.scrollTop : null,
+        };
+      });
 
-      for (const message of allMessagesRef.current) {
-        const isAnchor = isMessageGroupAnchor(message);
-        if (!isAnchor && message.role !== "assistant") continue;
-        const element = refs?.[refIndex];
-        refIndex++;
-
-        if (isAnchor) {
-          currentTurn = null;
-          const elementRect = element?.getBoundingClientRect();
-          currentTurn = {
-            userMessage: message as UserMessage | CustomMessage,
-            assistantPreviews: [],
-            scrollTop: elementRect
-              ? elementRect.top - containerRect.top + scrollEl.scrollTop
-              : null,
-          };
-          turns.push(currentTurn);
-          continue;
-        }
-
-        if (!currentTurn) continue;
-        const answerMarkdown = getAssistantAnswerMarkdown(message);
-        if (answerMarkdown) {
-          currentTurn.assistantPreviews.push({
-            markdown: answerMarkdown,
-            element,
-          });
-        }
-      }
-
-      const nextNodes = createTurnNodes(turns);
       setMinimapHeight(minimapEl.clientHeight);
-      allNodesRef.current = nextNodes;
-      setAllNodes(nextNodes);
-      setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20);
+      setNodes(nextNodes);
       syncActiveNode(scrollEl, nextNodes);
-
-      const pendingNavigation = pendingNavigationRef.current;
-      const pendingNode = pendingNavigation
-        ? nextNodes[pendingNavigation.nodeIndex]
-        : null;
-      if (pendingNavigation && pendingNode) {
-        const assistant = pendingNavigation.assistantIndex === undefined
-          ? null
-          : pendingNode.targetTurn.assistantPreviews[pendingNavigation.assistantIndex];
-        let targetTop: number | null = pendingNode.targetTurn.scrollTop;
-        if (pendingNavigation.target === "assistant") {
-          const assistantRect = assistant?.element?.getBoundingClientRect();
-          targetTop = assistantRect
-            ? assistantRect.top - containerRect.top + scrollEl.scrollTop
-            : null;
-        } else if (pendingNavigation.target === "heading") {
-          const heading = (
-            pendingNavigation.headingIndex === undefined
-              ? null
-              : assistant?.element
-                ?.querySelectorAll<HTMLElement>("h1, h2, h3")
-                .item(pendingNavigation.headingIndex)
-          );
-          const headingRect = heading?.getBoundingClientRect();
-          targetTop = headingRect
-            ? headingRect.top - containerRect.top + scrollEl.scrollTop
-            : null;
-        }
-        if (targetTop === null) return;
-        pendingNavigationRef.current = null;
-        lockActiveNode(pendingNode.index);
-        const targetOffset = scrollEl.clientHeight * 0.3;
-        scrollEl.scrollTo({ top: Math.max(0, targetTop - targetOffset), behavior: "smooth" });
-      }
     }, 150);
-  }, [lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
+  }, [messageList, scrollContainer, syncActiveNode]);
+
+  /** Whether the rail has anything to indicate: it needs a scrollable chat, and
+   *  its presence must not depend on measuring, because the rail is what gets
+   *  measured — it is not in the DOM until this says so. */
+  const syncVisible = useCallback((scrollEl: HTMLDivElement | null = scrollContainer.current) => {
+    if (!scrollEl) return;
+    setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20);
+  }, [scrollContainer]);
 
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
-    el.addEventListener("scroll", updateScroll, { passive: true });
-    return () => el.removeEventListener("scroll", updateScroll);
-  }, [scrollContainer, updateScroll]);
-
-  useEffect(() => {
-    const el = scrollContainer.current;
-    if (!el) return;
-    const syncLayout = () => {
-      measureNodes();
-      updateScroll();
+    const onScroll = () => {
+      syncVisible(el);
+      syncActiveNode(el, nodesRef.current);
     };
-    const ro = new ResizeObserver(syncLayout);
-    ro.observe(el);
-    if (el.firstElementChild) ro.observe(el.firstElementChild);
-    syncLayout();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [scrollContainer, syncActiveNode, syncVisible]);
+
+  useEffect(() => {
+    const el = scrollContainer.current;
+    if (!el) return;
+    const sync = () => {
+      syncVisible(el);
+      measureNodes();
+    };
+    const observer = new ResizeObserver(sync);
+    observer.observe(el);
+    if (el.firstElementChild) observer.observe(el.firstElementChild);
+    sync();
     return () => {
-      ro.disconnect();
+      observer.disconnect();
       if (measureThrottleRef.current) {
         clearTimeout(measureThrottleRef.current);
         measureThrottleRef.current = null;
       }
     };
-  }, [measureNodes, scrollContainer, updateScroll]);
+  }, [measureNodes, scrollContainer, syncVisible]);
 
+  // A new directory — another branch, a new question, more of the chat rendered —
+  // has to be measured before the rail can show it. `visible` is in here because
+  // the rail only exists after it turns true.
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      measureNodes();
-      updateScroll();
-    }, 50);
-    return () => clearTimeout(timeout);
-  }, [messages.length, measureNodes, updateScroll]);
+    if (visible) measureNodes();
+  }, [measureNodes, questions, visible]);
 
-  const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior) => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    lockActiveNode(node.index);
-    if (node.targetTurn.scrollTop === null) {
-      pendingNavigationRef.current = { nodeIndex: node.index, target: "user" };
-      onRevealHistory();
-      return;
-    }
-    const targetTop = Math.max(
-      0,
-      node.targetTurn.scrollTop - scrollEl.clientHeight * 0.3,
-    );
-    scrollEl.scrollTo({ top: targetTop, behavior });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
+  const nearestIndex = pointerRatio === null
+    ? null
+    : nearestQuestionIndex(layout.nodes, layout.gap, minimapHeight, pointerRatio);
+  const nearestNode = nearestIndex === null ? null : layout.nodes[nearestIndex];
 
-  const scrollToAssistant = useCallback((node: NodeInfo, assistantIndex: number) => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const assistantElement = node.targetTurn.assistantPreviews[assistantIndex]?.element;
-    if (!assistantElement) {
-      pendingNavigationRef.current = {
-        nodeIndex: node.index,
-        target: "assistant",
-        assistantIndex,
-      };
-      onRevealHistory();
-      return;
-    }
-    const containerRect = scrollEl.getBoundingClientRect();
-    const assistantRect = assistantElement.getBoundingClientRect();
-    const targetTop = (
-      assistantRect.top
-      - containerRect.top
-      + scrollEl.scrollTop
-      - scrollEl.clientHeight * 0.3
-    );
-    lockActiveNode(node.index);
-    scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
-
-  const findNearestNode = useCallback((ratio: number): NodeInfo | null => {
-    const { nodes, gap, fillsHeight } = nodeLayoutRef.current;
+  const jumpToNearest = useCallback((clientY: number, rail: HTMLElement) => {
+    const rect = rail.getBoundingClientRect();
+    if (rect.height <= 0) return;
     const height = containerRef.current?.clientHeight ?? 0;
-    if (nodes.length === 0 || height <= 0) return null;
-
-    const pointerY = Math.max(0, Math.min(height, ratio * height));
-    const firstNodeY = nodes[0].topRatio * height;
-    const rawIndex = gap > 0 ? Math.round((pointerY - firstNodeY) / gap) : 0;
-    const nodeIndex = Math.max(0, Math.min(nodes.length - 1, rawIndex));
-    const nearestNode = nodes[nodeIndex];
-
-    if (!fillsHeight) {
-      const nodeY = nearestNode.topRatio * height;
-      const hitRadius = Math.max(10, gap / 2);
-      if (Math.abs(pointerY - nodeY) > hitRadius) return null;
-    }
-    return nearestNode;
-  }, []);
-
-  const scrollToHeading = useCallback((
-    node: NodeInfo,
-    assistantIndex: number,
-    headingIndex: number,
-  ) => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const answerElement = node.targetTurn.assistantPreviews[assistantIndex]?.element;
-    if (!answerElement) {
-      pendingNavigationRef.current = {
-        nodeIndex: node.index,
-        target: "heading",
-        assistantIndex,
-        headingIndex,
-      };
-      onRevealHistory();
-      return;
-    }
-    const heading = answerElement.querySelectorAll<HTMLElement>("h1, h2, h3").item(headingIndex);
-    if (!heading) return;
-    const containerRect = scrollEl.getBoundingClientRect();
-    const headingRect = heading.getBoundingClientRect();
-    const targetTop = (
-      headingRect.top
-      - containerRect.top
-      + scrollEl.scrollTop
-      - scrollEl.clientHeight * 0.3
+    const index = nearestQuestionIndex(
+      layoutRef.current.nodes,
+      layoutRef.current.gap,
+      height,
+      (clientY - rect.top) / rect.height,
     );
+    if (index === null) return;
+    const node = layoutRef.current.nodes[index];
     lockActiveNode(node.index);
-    scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
+    onJumpToQuestion(node.entryId);
+  }, [lockActiveNode, onJumpToQuestion]);
 
   const cancelPreviewHide = useCallback(() => {
     if (!previewHideTimerRef.current) return;
@@ -537,15 +254,15 @@ export function ChatMinimap({
 
   const showPreview = useCallback(() => {
     cancelPreviewHide();
-    setMinimapHovered(true);
+    setHovered(true);
   }, [cancelPreviewHide]);
 
   const schedulePreviewHide = useCallback(() => {
     cancelPreviewHide();
     previewHideTimerRef.current = setTimeout(() => {
       previewHideTimerRef.current = null;
-      setMinimapHovered(false);
-      setMouseYRatio(null);
+      setHovered(false);
+      setPointerRatio(null);
     }, PREVIEW_HIDE_DELAY);
   }, [cancelPreviewHide]);
 
@@ -553,64 +270,52 @@ export function ChatMinimap({
 
   const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     if (!visible) return;
-
-    draggingRef.current = true;
+    pressedRef.current = true;
     showPreview();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const pointerRatio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-    setMouseYRatio(pointerRatio);
-    const jumpToPointer = (clientY: number, behavior: ScrollBehavior) => {
-      const ratio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-      const node = findNearestNode(ratio);
-      if (node) {
-        scrollToNode(node, behavior);
-      }
-    };
+    setPointerRatio(pointerRatioOf(event.clientY, event.currentTarget));
+  }, [showPreview, visible]);
 
-    jumpToPointer(event.clientY, "smooth");
-    const onMove = (moveEvent: MouseEvent) => {
-      if (!draggingRef.current) return;
-      jumpToPointer(moveEvent.clientY, "auto");
-    };
-    const onUp = () => {
-      draggingRef.current = false;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [findNearestNode, scrollToNode, showPreview, visible]);
+  // The jump happens on release rather than on press so that dragging along the
+  // rail only moves the highlight: every jump may have to load history, and a
+  // drag across a directory of 40 questions would otherwise fire 40 loads.
+  const handleMouseUp = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!pressedRef.current) return;
+    pressedRef.current = false;
+    jumpToNearest(event.clientY, event.currentTarget);
+  }, [jumpToNearest]);
 
-  const nearestNode = mouseYRatio === null ? null : findNearestNode(mouseYRatio);
-  const nearestNodeIndex = nearestNode?.index ?? null;
-
+  // Keep the row the pointer refers to inside the visible part of the list.
   useEffect(() => {
-    if (!minimapHovered || nearestNodeIndex === null) return;
+    if (!hovered || nearestIndex === null) return;
     const previewBox = previewBoxRef.current;
-    const previewItem = previewItemRefs.current.get(nearestNodeIndex);
+    const previewItem = previewItemRefs.current.get(nearestIndex);
     if (!previewBox || !previewItem) return;
-    const targetTop = previewItem.offsetTop
-      - (previewBox.clientHeight - previewItem.offsetHeight) / 2;
+    const targetTop = previewItem.offsetTop - (previewBox.clientHeight - previewItem.offsetHeight) / 2;
     previewBox.scrollTop = Math.max(0, targetTop);
-  }, [allNodes, minimapHovered, nearestNodeIndex]);
+  }, [hovered, nearestIndex, nodes]);
 
-  if (!visible) return null;
+  if (!visible || questions.length === 0) return null;
 
-  const lastNodeTop = positionedNodes.length > 0
-    ? positionedNodes[positionedNodes.length - 1].topRatio * minimapHeight
+  const lastNodeTop = layout.nodes.length > 0
+    ? layout.nodes[layout.nodes.length - 1].topRatio * minimapHeight
     : MINIMAP_PADDING;
   const railHeight = Math.max(1, lastNodeTop - MINIMAP_PADDING);
+  const jumpToRow = (node: NodeInfo) => {
+    lockActiveNode(node.index);
+    onJumpToQuestion(node.entryId);
+  };
 
   return (
     <div
       ref={containerRef}
       onMouseDown={handleMouseDown}
+      onMouseUp={handleMouseUp}
       onMouseEnter={showPreview}
-      onMouseLeave={schedulePreviewHide}
-      onMouseMove={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        setMouseYRatio((event.clientY - rect.top) / rect.height);
+      onMouseLeave={() => {
+        pressedRef.current = false;
+        schedulePreviewHide();
       }}
+      onMouseMove={(event) => setPointerRatio(pointerRatioOf(event.clientY, event.currentTarget))}
       style={{
         width: MINIMAP_WIDTH,
         flexShrink: 0,
@@ -635,13 +340,13 @@ export function ChatMinimap({
         }}
       />
 
-      {positionedNodes.map((node) => {
-        const isNearest = minimapHovered && nearestNode?.index === node.index;
+      {layout.nodes.map((node) => {
+        const isNearest = hovered && nearestNode === node;
         const isActive = activeIndex === node.index;
 
         return (
           <div
-            key={node.index}
+            key={node.entryId}
             data-minimap-node-index={node.index}
             data-minimap-node-active={isActive ? "" : undefined}
             style={{
@@ -650,7 +355,7 @@ export function ChatMinimap({
               transform: "translateY(-50%)",
               left: 0,
               right: 0,
-              height: Math.max(1, nodeGap),
+              height: Math.max(1, layout.gap),
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -674,82 +379,42 @@ export function ChatMinimap({
         );
       })}
 
-      {minimapHovered && allNodes.length > 0 && (
+      {hovered && layout.nodes.length > 0 && (
         <div
           ref={previewBoxRef}
           className={styles.preview}
           data-minimap-preview-box=""
           onMouseEnter={showPreview}
           onMouseDown={(event) => event.stopPropagation()}
+          onMouseUp={(event) => event.stopPropagation()}
           onMouseMove={(event) => event.stopPropagation()}
         >
-          {allNodes.map((node) => {
-            const isLocated = nearestNodeIndex === node.index;
-            return (
-              <div
-                key={node.index}
-                ref={(element) => {
-                  if (element) previewItemRefs.current.set(node.index, element);
-                  else previewItemRefs.current.delete(node.index);
-                }}
-                className={styles.turn}
-                data-minimap-preview-index={node.index}
-                data-located={isLocated ? "true" : undefined}
+          {layout.nodes.map((node) => (
+            <div
+              key={node.entryId}
+              ref={(element) => {
+                if (element) previewItemRefs.current.set(node.index, element);
+                else previewItemRefs.current.delete(node.index);
+              }}
+              className={styles.turn}
+              data-minimap-preview-index={node.index}
+              data-located={nearestNode === node ? "true" : undefined}
+            >
+              <span className={styles.number} aria-hidden="true">
+                {String(node.index + 1).padStart(2, "0")}
+              </span>
+              <button
+                type="button"
+                className={styles.user}
+                data-minimap-preview-user={node.index}
+                onClick={() => jumpToRow(node)}
               >
-                <span className={styles.number} aria-hidden="true">
-                  {String(node.index + 1).padStart(2, "0")}
-                </span>
-                <div className={styles.content}>
-                  <button
-                    type="button"
-                    className={styles.user}
-                    data-minimap-preview-user={node.index}
-                    onClick={() => {
-                      scrollToNode(node, "smooth");
-                    }}
-                  >
-                    <span className={styles.userText}>
-                      {getUserPreview(node.targetTurn.userMessage)}
-                    </span>
-                  </button>
-
-                  {node.targetTurn.assistantPreviews.map((assistant, assistantIndex) => (
-                    <div
-                      key={assistantIndex}
-                      className={styles.assistant}
-                    >
-                      <button
-                        type="button"
-                        className={styles.assistantJump}
-                        data-minimap-preview-assistant={`${node.index}-${assistantIndex}`}
-                        onClick={() => scrollToAssistant(node, assistantIndex)}
-                        aria-label={t("chatMinimap.locateAssistant")}
-                        title={t("chatMinimap.locateAssistant")}
-                      >
-                        A
-                      </button>
-                      <AssistantOutline
-                        markdown={assistant.markdown}
-                        onAnswerClick={() => scrollToAssistant(node, assistantIndex)}
-                        onHeadingClick={(headingIndex) => (
-                          scrollToHeading(node, assistantIndex, headingIndex)
-                        )}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
+                <span className={styles.userText}>{node.preview}</span>
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
-}
-
-// Hook to create a stable array of refs for messages
-export function useMessageRefs(count: number): RefObject<(HTMLDivElement | null)[]> {
-  const refs = useRef<(HTMLDivElement | null)[]>([]);
-  refs.current = Array(count).fill(null).map((_, i) => refs.current[i] ?? null);
-  return refs;
 }

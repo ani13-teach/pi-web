@@ -518,6 +518,72 @@ export function sliceActiveBranch(
   chain.reverse();
   return chain;
 }
+/** One row of the question directory: a user message on the active branch. */
+export interface BranchQuestion {
+  entryId: string;
+  preview: string;
+}
+
+/** Long enough for the four clamped lines the directory shows, short enough that
+ *  a session full of pasted logs stays a small response. */
+export const QUESTION_PREVIEW_CHARS = 160;
+
+/**
+ * Text-only preview of a user message.
+ *
+ * Images are dropped rather than truncated: a pasted screenshot is a base64 blob
+ * of hundreds of kilobytes, and the directory lists labels, not transcripts.
+ */
+export function previewUserContent(content: unknown, limit = QUESTION_PREVIEW_CHARS): string {
+  if (typeof content === "string") {
+    const trimmed = content.slice(0, limit * 2).trim();
+    return trimmed.length > limit ? `${trimmed.slice(0, limit)}…` : trimmed;
+  }
+  if (!Array.isArray(content)) return "";
+
+  // Accumulated block by block and cut off at the limit: a pasted log can be
+  // hundreds of kilobytes, and joining it first would allocate all of it.
+  let preview = "";
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    const text = block.text.trim();
+    if (!text) continue;
+    preview = preview ? `${preview}\n${text}` : text;
+    if (preview.length > limit) break;
+  }
+  return preview.length > limit ? `${preview.slice(0, limit)}…` : preview;
+}
+
+/**
+ * Every question on the active branch, oldest first.
+ *
+ * The chat window only holds the newest `tail` entries, so a long turn can leave
+ * it with no user message at all — and a directory built from that window then
+ * has nothing to show. This walks the whole branch instead, which is why the
+ * list stays complete no matter how little of the conversation is loaded.
+ */
+export function buildBranchQuestions(
+  entries: SessionEntry[],
+  leafId?: string | null,
+): BranchQuestion[] {
+  const byId = new Map<string, SessionEntry>();
+  for (const entry of entries) byId.set(entry.id, entry);
+
+  let current = leafId ? byId.get(leafId) : entries[entries.length - 1];
+  const questions: BranchQuestion[] = [];
+  while (current) {
+    if (current.type === "message" && current.message.role === "user") {
+      questions.push({
+        entryId: current.id,
+        preview: previewUserContent(current.message.content),
+      });
+    }
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  questions.reverse();
+  return questions;
+}
+
 function parseEntryTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
   return Number.isNaN(parsed) ? undefined : parsed;

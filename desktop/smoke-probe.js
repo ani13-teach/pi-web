@@ -36,6 +36,69 @@
     }
   };
 
+  /**
+   * The auto-mode model fields are pickers fed by `models.json` plus the registry,
+   * and every model of every configured provider has to be on that list — those
+   * gateways are not in pi's built-in catalog, which is the point of reading the
+   * file. Choosing an entry has to reach the draft. The caller closes the dialog
+   * without saving, so nothing is written to the real configuration.
+   */
+  const checkModelPickers = async (page) => {
+    if (page.querySelector("datalist")) throw new Error("the model fields still offer a <datalist> hint list");
+    const fields = [...page.querySelectorAll(".model-selector.is-field")];
+    if (fields.length < 1) throw new Error("the form has no model picker");
+    // While the two model sources are still being read the picker is disabled, so
+    // wait for it instead of clicking into a button that ignores the click.
+    const picker = await waitFor(() => {
+      const button = page.querySelector(".model-selector.is-field button");
+      return button && !button.disabled ? button : null;
+    });
+    if (!picker) throw new Error("the model picker stayed disabled");
+
+    picker.click();
+    const listbox = await waitFor(() => document.querySelector('[role="listbox"]'));
+    if (!listbox) throw new Error("clicking the model field opened no list");
+    const labels = [...listbox.querySelectorAll('[role="option"]')].map((option) => option.innerText.trim());
+    if (labels.length < 2) throw new Error(`the picker offers ${labels.length} entries`);
+
+    // Every model of every provider in models.json has to be on that list, which
+    // is the point of reading that file: those gateways are not in pi's own
+    // catalog, and the whitelist that filters /api/models can hide them.
+    const configured = await fetch("/api/models-config");
+    const providers = configured.ok ? (await configured.json()).providers ?? {} : {};
+    const missing = [];
+    for (const [providerId, provider] of Object.entries(providers)) {
+      for (const model of Array.isArray(provider?.models) ? provider.models : []) {
+        if (typeof model?.id !== "string" || !model.id.trim()) continue;
+        const name = typeof model.name === "string" && model.name.trim() ? model.name.trim() : model.id.trim();
+        if (!labels.includes(name)) missing.push(`${providerId}/${model.id}`);
+      }
+    }
+    if (missing.length > 0) throw new Error(`models.json entries missing from the picker: ${missing.join(", ")}`);
+
+    // Choosing an entry has to reach the draft. The entry that reads as the
+    // current value is skipped — clicking it is a no-op by design — so take the
+    // first one that says something else.
+    const saveLabels = ["保存", "Save", "儲存"];
+    const before = picker.innerText.trim();
+    const choices = [...listbox.querySelectorAll('[role="option"]')]
+      .filter((option) => option.innerText.trim() !== before);
+    if (choices.length === 0) throw new Error(`the picker only offers the current value (${before || "empty"})`);
+    choices[0].click();
+    const after = await waitFor(() => {
+      const shown = picker.innerText.trim();
+      if (shown !== before) return shown;
+      // A renamed model can leave the label alone, so the unsaved-changes marker
+      // is the second signal. Re-queried, because React may have replaced the node.
+      const save = [...page.querySelectorAll("button")].find((button) => saveLabels.includes(button.textContent.trim()) && !button.disabled);
+      return save ? shown : null;
+    }, 5000);
+    if (after === null) {
+      throw new Error(`choosing "${choices[0].innerText.trim()}" left the draft untouched (the field stayed ${JSON.stringify(before)})`);
+    }
+    return { labels, before, after, fields: fields.length };
+  };
+
   await record("renderer loads from the pi-app scheme", () => location.protocol === "pi-app:" && location.host === "app");
   await record("React mounted a UI", () => document.querySelector("#root")?.childElementCount > 0);
   await record("preload bridge is exposed", () => typeof window.piDesktop?.invoke === "function");
@@ -347,10 +410,20 @@
       throw new Error(`the narrow measurement did not change the width: ${widths.join(" / ")} px`);
     }
 
+    // The model fields are pickers fed by `models.json` plus the registry, not
+    // free-text boxes with a hint list. The dialog is closed without saving, so
+    // nothing is written to the real configuration.
+    const pickerOutcome = await Promise.race([
+      checkModelPickers(page),
+      sleep(30_000).then(() => "the model picker checks did not settle within 30s"),
+    ]);
+    if (typeof pickerOutcome === "string") throw new Error(pickerOutcome);
+    const { labels, before, after, fields } = pickerOutcome;
+
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     const closed = await waitFor(() => !document.querySelector(".settings-dialog-surface"));
     if (!closed) throw new Error("the settings dialog stayed open");
-    return `form widths ${widths.join(" / ")} px; switch rows reach the right edge; global timeout ${globalTimeout ?? "unset"}`;
+    return `form widths ${widths.join(" / ")} px; switch rows reach the right edge; global timeout ${globalTimeout ?? "unset"}; ${fields} model pickers, ${labels.length} entries covering models.json; choosing one turned "${before || "empty"}" into "${after || "empty"}"`;
   });
 
   return results;

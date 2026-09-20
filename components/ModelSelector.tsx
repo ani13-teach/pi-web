@@ -21,6 +21,8 @@ interface ModelSelectorProps {
   busy?: boolean;
   isAutoSelection?: boolean;
   ariaLabel?: string;
+  /** Tooltip for the closed button. Pass a translated string; the default is English. */
+  titleText?: string;
   variant?: "toolbar" | "field";
   placement?: "up" | "auto";
 }
@@ -56,6 +58,7 @@ export function ModelSelector({
   busy = false,
   isAutoSelection = false,
   ariaLabel,
+  titleText,
   variant = "toolbar",
   placement = "up",
 }: ModelSelectorProps) {
@@ -167,7 +170,7 @@ export function ModelSelector({
         aria-expanded={open}
         aria-busy={busy || undefined}
         disabled={locked}
-        title={busy ? "Switching model" : locked ? currentName : sortedOptions.length > 0 || onClear ? "Change model" : "No available models"}
+        title={busy ? "Switching model" : locked ? currentName : sortedOptions.length > 0 || onClear ? titleText ?? "Change model" : "No available models"}
         style={buttonStyle}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -206,7 +209,19 @@ export function ModelSelector({
             <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
           </svg>
         )}
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentName}</span>
+        <span style={{
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          // A `field` button fills its container, so the name must not decide how
+          // wide that container's minimum content is: a long model id, or the
+          // "no longer offered" note, otherwise pushes a scrolling settings pane
+          // wider than the pane itself, because its rows size to their minimum
+          // content. The toolbar keeps its own width, clamped by maxWidth instead.
+          ...(variant === "field" ? { width: 0 } : {}),
+        }}>{currentName}</span>
         {variant === "field" && (
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }}>
             <polyline points="6 9 12 15 18 9" />

@@ -9,6 +9,7 @@ import {
   type ModelsData,
 } from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { resolveThinkingLevelMap } from "@/lib/thinking-level-map";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 
@@ -59,9 +60,10 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   })).sort(compareModelEntries);
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
+    const thinkingLevelMap = resolveThinkingLevelMap(m.reasoning, m.thinkingLevelMap);
     nameMap.set(key, m.name);
-    thinkingLevels[key] = getSupportedThinkingLevels(m);
-    if (m.thinkingLevelMap) thinkingLevelMaps[key] = m.thinkingLevelMap;
+    thinkingLevels[key] = getSupportedThinkingLevels({ ...m, thinkingLevelMap });
+    if (thinkingLevelMap) thinkingLevelMaps[key] = thinkingLevelMap;
   }
 
   const defaultProvider = settings.getDefaultProvider();
