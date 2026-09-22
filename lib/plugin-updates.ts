@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { gt, maxSatisfying, rcompare, valid, validRange } from "semver";
 import type { PluginScope, PluginUpdateResult } from "@/lib/api-types";
+import { resolvePackageManagerCommand } from "./npx";
 import { getProjectTrustStatus } from "./project-trust";
 
 const execFileAsync = promisify(execFile);
@@ -97,7 +98,10 @@ async function runCommand(
   args: string[],
   options: { cwd: string; env?: NodeJS.ProcessEnv },
 ): Promise<string> {
-  const { stdout } = await execFileAsync(command, args, {
+  // A bare `npm` has to be routed through the CLI entry point: the `npm.cmd`
+  // shim on Windows cannot be spawned without a shell (see lib/npx.ts).
+  const { command: executable, args: executableArgs } = resolvePackageManagerCommand(command, args);
+  const { stdout } = await execFileAsync(executable, executableArgs, {
     cwd: options.cwd,
     env: options.env ? { ...process.env, ...options.env } : process.env,
     encoding: "utf8",

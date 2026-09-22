@@ -7,22 +7,24 @@ import { execPath } from "process";
 const execFileAsync = promisify(execFile);
 
 /**
- * Locate `npx-cli.js` shipped with the running Node.js installation.
+ * Locate the `npm-cli.js` / `npx-cli.js` shipped with the running runtime.
  *
- * On Windows the `npx` on PATH is actually `npx.cmd`, which Node.js (since
- * 20.12 due to CVE-2024-27980) refuses to spawn from `execFile`/`spawn`
- * without `shell: true`. Going through a shell reintroduces quoting bugs for
- * user-supplied args. Instead we find the real `npx-cli.js` and invoke it
- * directly via the current `node` binary, which works identically on every
- * platform and needs no shell.
+ * On Windows the `npm` and `npx` on PATH are `npm.cmd` / `npx.cmd`, which
+ * Node.js (since 20.12 due to CVE-2024-27980) refuses to spawn from
+ * `execFile`/`spawn` without `shell: true`. Going through a shell reintroduces
+ * quoting bugs for user-supplied args. Instead we find the real JS entry point
+ * and invoke it directly via the current runtime (Electron running as Node in
+ * the packaged app, plain Node when running from source), which works
+ * identically on every platform and needs no shell.
  */
-function findNpxCli(): string | null {
+function findNpmCli(name: "npm" | "npx"): string | null {
   const nodeDir = dirname(execPath);
   const candidates = [
-    // Windows MSI installer layout: node.exe and node_modules share a dir
-    join(nodeDir, "node_modules", "npm", "bin", "npx-cli.js"),
-    // Unix layout: .../bin/node + .../lib/node_modules/npm/bin/npx-cli.js
-    join(nodeDir, "..", "lib", "node_modules", "npm", "bin", "npx-cli.js"),
+    // Windows MSI installer layout, and the copy `scripts/vendor-npm.mjs`
+    // stages next to the app binary: the runtime and node_modules share a dir
+    join(nodeDir, "node_modules", "npm", "bin", `${name}-cli.js`),
+    // Unix layout: .../bin/node + .../lib/node_modules/npm/bin/npm-cli.js
+    join(nodeDir, "..", "lib", "node_modules", "npm", "bin", `${name}-cli.js`),
   ];
   for (const p of candidates) {
     try {
@@ -32,6 +34,22 @@ function findNpxCli(): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Rewrite a bare `npm` / `npx` invocation into `<runtime> <…>-cli.js …` when
+ * that entry point is available, so it can be spawned without a shell. An
+ * explicit path or another package manager is returned unchanged.
+ */
+export function resolvePackageManagerCommand(
+  command: string,
+  args: string[],
+): { command: string; args: string[] } {
+  if (command.includes("/") || command.includes("\\")) return { command, args };
+  const name = command.replace(/\.(cmd|ps1|exe)$/i, "").toLowerCase();
+  if (name !== "npm" && name !== "npx") return { command, args };
+  const cli = findNpmCli(name);
+  return cli ? { command: execPath, args: [cli, ...args] } : { command, args };
 }
 
 export interface RunNpxOptions {
@@ -49,11 +67,8 @@ export interface RunNpxResult {
  * Cross-platform wrapper for invoking `npx <args>` without ever using a
  * shell, so user-controlled arguments are never interpreted as shell syntax.
  */
-export async function runNpx(args: string[], opts: RunNpxOptions = {}): Promise<RunNpxResult> {
-  const npxCli = findNpxCli();
-  const { command, commandArgs } = npxCli
-    ? { command: execPath, commandArgs: [npxCli, ...args] }
-    : { command: "npx", commandArgs: args };
+export function runNpx(args: string[], opts: RunNpxOptions = {}): Promise<RunNpxResult> {
+  const { command, args: commandArgs } = resolvePackageManagerCommand("npx", args);
   return execFileAsync(command, commandArgs, {
     timeout: opts.timeout,
     cwd: opts.cwd,
