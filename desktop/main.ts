@@ -16,8 +16,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, dialog, ipcMain, protocol, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, protocol, screen, session, shell, Tray } from "electron";
 
 import {
   APP_ORIGIN,
@@ -429,6 +430,121 @@ class BackendHost {
 
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
+// Test modes must retain their original close-to-quit behavior.
+const trayEnabled = process.platform === "win32"
+  && process.env.PI_DESKTOP_SMOKE !== "1" && !process.env.PI_DESKTOP_SCENARIO;
+let tray: Tray | null = null;
+let trayWindow: BrowserWindow | null = null;
+const trayPage = join(rendererDir, "tray.html");
+const trayPageUrl = pathToFileURL(trayPage).href;
+const trayChannel = "pi-desktop:tray-action";
+
+function showMainWindow(): void {
+  if (quitting) return;
+  trayWindow?.hide();
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  else {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+function positionTrayWindow(window: BrowserWindow): void {
+  if (!tray) return;
+  const trayBounds = tray.getBounds();
+  const bounds = trayBounds.width && trayBounds.height
+    ? trayBounds : { ...screen.getCursorScreenPoint(), width: 0, height: 0 };
+  const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  const area = screen.getDisplayNearestPoint(point).workArea;
+  const width = Math.min(300, area.width);
+  const height = Math.min(156, area.height);
+  const x = Math.max(area.x, Math.min(Math.round(point.x - width / 2), area.x + area.width - width));
+  const below = bounds.y + bounds.height + height <= area.y + area.height;
+  const desiredY = below ? bounds.y + bounds.height : bounds.y - height;
+  const y = Math.max(area.y, Math.min(desiredY, area.y + area.height - height));
+  window.setBounds({ x, y, width, height });
+}
+
+function createTrayWindow(): BrowserWindow {
+  const window = new BrowserWindow({
+    width: 300,
+    height: 156,
+    show: false,
+    frame: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    backgroundColor: "#1a1a1a",
+    webPreferences: {
+      preload: join(here, "tray-preload.cjs"),
+      partition: "pi-desktop-tray",
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      webviewTag: false,
+    },
+  });
+  window.removeMenu();
+  window.on("close", (event) => {
+    if (!quitting) {
+      event.preventDefault();
+      window.hide();
+    }
+  });
+  // A tray click can blur the popup *before* the tray's click event arrives.
+  // Defer the blur hide so that click can still toggle a visible popup off.
+  window.on("blur", () => {
+    setTimeout(() => {
+      if (!window.isDestroyed() && !window.isFocused()) window.hide();
+    }, 150);
+  });
+  window.on("closed", () => {
+    if (trayWindow === window) trayWindow = null;
+  });
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event) => event.preventDefault());
+  window.webContents.on("will-redirect", (event) => event.preventDefault());
+  window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+  trayWindow = window;
+  void window.loadFile(trayPage);
+  return window;
+}
+
+function installTray(): void {
+  if (!trayEnabled) return;
+  const traySession = session.fromPartition("pi-desktop-tray");
+  traySession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  traySession.setPermissionCheckHandler(() => false);
+  traySession.on("will-download", (event) => event.preventDefault());
+  const icon = nativeImage.createFromPath(join(rendererDir, "icons", "icon-192.png"));
+  if (icon.isEmpty()) {
+    console.error("Tray icon is missing; closing the main window will quit instead.");
+    return;
+  }
+  tray = new Tray(icon.resize({ width: 32, height: 32 }));
+  tray.setToolTip("Pi Desktop — 点击打开后台菜单");
+  const toggleTrayWindow = () => {
+    if (quitting) return;
+    const window = trayWindow && !trayWindow.isDestroyed() ? trayWindow : createTrayWindow();
+    if (window.isVisible()) window.hide();
+    else {
+      positionTrayWindow(window);
+      window.show();
+      window.focus();
+    }
+  };
+  tray.on("click", toggleTrayWindow);
+  tray.on("right-click", toggleTrayWindow);
+}
+
+ipcMain.on(trayChannel, (event, action: unknown) => {
+  if (quitting || event.sender !== trayWindow?.webContents
+    || event.senderFrame !== event.sender.mainFrame || event.senderFrame.url !== trayPageUrl) return;
+  if (action === "open") showMainWindow();
+  else if (action === "quit") app.quit();
+});
 
 function broadcast(push: BackendPush): void {
   mainWindow?.webContents.send(DESKTOP_CHANNEL.push, push);
@@ -456,11 +572,20 @@ function createWindow(): void {
   });
 
   window.removeMenu();
-  window.once("ready-to-show", () => window.show());
+  window.once("ready-to-show", () => {
+    if (!quitting) window.show();
+  });
+  window.on("close", (event) => {
+    if (tray && !quitting) {
+      event.preventDefault();
+      trayWindow?.hide();
+      window.hide();
+    }
+  });
   window.on("closed", () => {
     if (mainWindow === window) {
       mainWindow = null;
-      app.quit();
+      if (!tray && !quitting) app.quit();
     }
   });
 
@@ -1270,14 +1395,13 @@ if (!singleInstance) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+    if (!quitting && app.isReady()) showMainWindow();
   });
 
   void app.whenReady().then(() => {
     protocol.handle(APP_SCHEME, (request) => serveRequest(request));
     backend.start();
+    installTray();
     createWindow();
 
     if (process.env.PI_DESKTOP_SMOKE === "1" && mainWindow) {
@@ -1295,21 +1419,21 @@ if (!singleInstance) {
       });
     }
 
-    app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    });
+    app.on("activate", () => showMainWindow());
   });
 
   app.on("window-all-closed", () => {
-    app.quit();
+    if (!tray || quitting) app.quit();
   });
 
-  // Shut the backend down explicitly: closing the window must not leave agent
-  // sessions or PTYs behind.
+  // Explicit exit from the tray shuts the backend down; closing the main
+  // window only hides it while the tray is available.
   app.on("before-quit", (event) => {
     event.preventDefault();
     if (quitting) return;
     quitting = true;
+    tray?.destroy();
+    tray = null;
     // Stop the renderer's timers and subscriptions before shutting down the
     // service they use. Re-entrant quit events remain prevented until exit().
     for (const window of BrowserWindow.getAllWindows()) window.destroy();

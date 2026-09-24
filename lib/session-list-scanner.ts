@@ -20,6 +20,8 @@ export interface ScannedSessionInfo {
 	messageCount: number;
 	firstMessage: string;
 	parentSessionPath?: string;
+	initialAgentName?: string;
+	agentRunIds?: string[];
 }
 
 interface Fingerprint {
@@ -38,7 +40,7 @@ function isRecord(value: unknown): value is RawEntry {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-const INDEX_FORMAT_VERSION = 1;
+const INDEX_FORMAT_VERSION = 2;
 
 declare global {
 	var __piWebScanIndex: Map<string, IndexEntry> | undefined;
@@ -98,6 +100,9 @@ export async function scanSessionFileInfo(
 		let messageCount = 0;
 		let firstMessage = "";
 		let lastActivityTime: number | undefined;
+		let initialAgentName: string | undefined;
+		let firstNameSeen = false;
+		const agentRunIds: string[] = [];
 
 		const rl = createInterface({
 			input: createReadStream(filePath, { encoding: "utf8" }),
@@ -115,10 +120,20 @@ export async function scanSessionFileInfo(
 			}
 
 			if (entry.type === "session_info") {
+				if (!firstNameSeen) {
+					firstNameSeen = true;
+					if (typeof entry.name === "string" && /^[a-z][a-z0-9-]*#[0-9a-f]{8}$/.test(entry.name)) {
+						initialAgentName = entry.name;
+					}
+				}
 				name =
 					typeof entry.name === "string" && entry.name.trim()
 						? entry.name.trim()
 						: undefined;
+			}
+			if (entry.type === "custom" && entry.customType === "subagents:record" && isRecord(entry.data) &&
+				typeof entry.data.id === "string" && /^[0-9a-f]{8}-/.test(entry.data.id)) {
+				agentRunIds.push(entry.data.id);
 			}
 			if (entry.type !== "message") continue;
 			messageCount++;
@@ -166,6 +181,8 @@ export async function scanSessionFileInfo(
 			cwd,
 			name,
 			parentSessionPath,
+			...(parentSessionPath && initialAgentName ? { initialAgentName } : {}),
+			...(agentRunIds.length ? { agentRunIds } : {}),
 			created: new Date(header.timestamp as string),
 			modified,
 			messageCount,
@@ -246,6 +263,8 @@ function loadPersistedIndex(): void {
 				typeof info.firstMessage !== "string" ||
 				(info.name !== undefined && typeof info.name !== "string") ||
 				(info.parentSessionPath !== undefined && typeof info.parentSessionPath !== "string") ||
+				(info.initialAgentName !== undefined && typeof info.initialAgentName !== "string") ||
+				(info.agentRunIds !== undefined && (!Array.isArray(info.agentRunIds) || !info.agentRunIds.every((id) => typeof id === "string"))) ||
 				typeof info.messageCount !== "number" || !Number.isSafeInteger(info.messageCount) || info.messageCount < 0 ||
 				typeof info.created !== "string" || typeof info.modified !== "string"
 			) continue;
@@ -260,6 +279,8 @@ function loadPersistedIndex(): void {
 					cwd: info.cwd,
 					name: info.name,
 					parentSessionPath: info.parentSessionPath,
+					...(info.initialAgentName ? { initialAgentName: info.initialAgentName } : {}),
+					...(info.agentRunIds ? { agentRunIds: info.agentRunIds } : {}),
 					firstMessage: info.firstMessage,
 					messageCount: info.messageCount,
 					created,

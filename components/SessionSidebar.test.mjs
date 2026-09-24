@@ -113,6 +113,7 @@ test("lifecycle refreshes bypass the cache while cross-window polling reuses it"
   assert.match(source, /cache: "no-store"/);
   assert.match(source, /loadSessions\(isFirst, !isFirst\)/);
   assert.match(source, /data\.sessionListVersion !== sessionListVersionRef\.current[\s\S]*?await loadSessions\(\)/);
+  assert.match(source, /Date\.now\(\) - lastCatalogRefresh >= EXTERNAL_SESSIONS_REFRESH_MS[\s\S]*?await loadSessions\(false, true\)/);
   assert.doesNotMatch(source, /sessionRefreshDone|sessionRefreshTimerRef|title=\{t\("sidebar\.refresh"\)\}/);
   assert.match(source, /loadSessions\(false, true\);[\s\S]*?onBackgroundTaskDone/);
 });
@@ -122,9 +123,21 @@ test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
 });
 
-test("hides subagent rows and aggregates their state into the main session row", () => {
+test("renders collapsible subagent rows while keeping family activity on the root", () => {
   assert.match(source, /const sessionFamilies = listSessionFamilies\(filteredSessions\)/);
-  assert.match(source, /familySessions\.some\(\(session\) => session\.id === selectedSessionId\)/);
-  assert.match(source, /familySessions\.some\(\(session\) => runningSessionIds\.has\(session\.id\)\)/);
-  assert.doesNotMatch(source, /function SessionTreeItem/);
+  assert.match(source, /const visibleRows = listVisibleSessionRows\(sessionFamilies, expandedSessionIds\)/);
+  assert.match(source, /useState<Set<string>>\(\(\) => new Set\(\)\)/);
+  assert.match(source, /height: visibleRows\.length \* SESSION_LIST_ITEM_HEIGHT/);
+  assert.match(source, /visibleRows\.findIndex\(\(row\) => row\.session\.id === focusedSessionId\)/);
+  assert.match(source, /const selectedAncestors = includeSubagentAncestors\(filteredSessions/);
+  assert.match(source, /const runningAncestors = includeSubagentAncestors\(filteredSessions, runningSessionIds\)/);
+  assert.match(source, /const unreadAncestors = includeSubagentAncestors\(filteredSessions, unreadSessionIds\)/);
+  assert.match(source, /collapsed && selectedAncestors\.has\(session\.id\)/);
+  assert.match(source, /isRunning=\{runningAncestors\.has\(session\.id\)\}/);
+  assert.match(source, /isUnread=\{unreadAncestors\.has\(session\.id\)\}/);
+  assert.match(source, /onClick=\{\(\) => handleSelectSessionFromList\(session\)\}/);
+  assert.match(source, /depth=\{depth\}[\s\S]*?hasChildren=\{hasChildren\}[\s\S]*?collapsed=\{collapsed\}[\s\S]*?onToggleCollapse=\{\(\) => toggleSession\(session\.id\)\}/);
+  assert.match(sessionItemSource, /e\.stopPropagation\(\); onToggleCollapse\?\.\(\)/);
+  assert.match(sessionItemSource, /aria-label=\{t\(collapsed \? "sidebar\.expandSubagents" : "sidebar\.collapseSubagents"\)\}/);
+  assert.match(sessionItemSource, /aria-expanded=\{!collapsed\}/);
 });

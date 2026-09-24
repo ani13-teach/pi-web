@@ -14,6 +14,7 @@ import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-res
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import { listSessionsIncremental } from "./session-list-scanner";
+import { nativeSubagentRelation } from "./native-subagent-relation";
 
 export { getAgentDir };
 
@@ -144,6 +145,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
   const scanned = await listSessionsIncremental();
   const pathToId = new Map<string, string>();
   for (const s of scanned) pathToId.set(sessionPathKey(s.path), s.id);
+  const byPath = new Map(scanned.map((s) => [sessionPathKey(s.path), s]));
 
   const sessions = scanned.map((s) => {
     cacheSessionPath(s.id, s.path);
@@ -154,6 +156,9 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
         subagent = readSubagentRun(readSessionRelationEntries(s.path), s.id, s.path);
       } catch { /* malformed or concurrently removed session */ }
     }
+    const nativeRelation = !subagent && s.parentSessionPath
+      ? nativeSubagentRelation(s.initialAgentName, originSessionId, byPath.get(sessionPathKey(s.parentSessionPath))?.agentRunIds)
+      : undefined;
     return {
       path: s.path,
       id: s.id,
@@ -166,6 +171,8 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       parentSessionId: originSessionId,
       ...(subagent
         ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
+        : nativeRelation
+          ? { relation: nativeRelation }
         : s.parentSessionPath
           ? { relation: { kind: "fork" as const, ...(originSessionId ? { originSessionId } : {}) } }
           : {}),

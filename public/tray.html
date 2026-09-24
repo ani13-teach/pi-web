@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>Pi Desktop</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, 'Microsoft YaHei', sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: #1a1a1a; color: #f0f0f0; }
+    h1 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+    p { margin: 0 0 16px; font-size: 12px; color: #b7b7b7; }
+    .actions { display: flex; gap: 9px; }
+    button { flex: 1; min-height: 36px; border: 1px solid #565656; border-radius: 7px; background: #303030; color: #fff; cursor: pointer; font: inherit; font-size: 12px; }
+    button:hover, button:focus-visible { background: #444; }
+    #open-main { background: #315db7; border-color: #315db7; }
+    #open-main:hover, #open-main:focus-visible { background: #4070d1; }
+  </style>
+</head>
+<body>
+  <h1>Pi Desktop</h1>
+  <p>Pi Desktop 正在后台运行</p>
+  <div class="actions">
+    <button id="open-main" type="button">打开主窗口</button>
+    <button id="quit-app" type="button">完全退出</button>
+  </div>
+</body>
+</html>

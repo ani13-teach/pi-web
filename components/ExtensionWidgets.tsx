@@ -32,8 +32,17 @@ export function getUpdatedExtensionWidgetKeys(
   }).filter((key): key is string => key !== null);
 }
 
-function getDefaultExpandedWidgetKey(widgets: ExtensionWidgetItem[]): string | null {
+export function getDefaultExpandedWidgetKey(
+  widgets: ExtensionWidgetItem[],
+  expandTodo = false,
+): string | null {
+  // Only a todo tool call in the currently displayed session opens the list.
+  // Replayed widgets on session return keep their compact status-bar chip.
+  if (expandTodo && widgets.some((widget) => widget.key === "rpiv-todos" && widget.lines.length > 0)) {
+    return "rpiv-todos";
+  }
   return widgets.find((widget) => {
+    if (widget.key === "rpiv-todos") return false;
     const lineCount = widget.lines.length;
     return lineCount > 1 && lineCount <= DEFAULT_EXPANDED_WIDGET_LINES;
   })?.key ?? null;
@@ -46,14 +55,35 @@ export function getNextExpandedWidgetKey(
   return currentKey === requestedKey ? null : requestedKey;
 }
 
-export function ExtensionWidgets({ widgets }: { widgets: ExtensionWidgetItem[] }) {
+export function resolveExpandedWidgetKey(
+  widgets: ExtensionWidgetItem[],
+  userSelection: string | null | undefined,
+  expandTodo = false,
+): string | null {
+  if (userSelection === null) return null; // A manual collapse wins over updates.
+  if (userSelection && widgets.some((widget) => widget.key === userSelection)) return userSelection;
+  return getDefaultExpandedWidgetKey(widgets, expandTodo);
+}
+
+export function ExtensionWidgets({ widgets, expandTodo = false }: {
+  widgets: ExtensionWidgetItem[];
+  expandTodo?: boolean;
+}) {
   const { t } = useI18n();
   const idPrefix = useId();
   const previousContentsRef = useRef<Map<string, string[]> | null>(null);
   const updateClearTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const [expandedWidgetKey, setExpandedWidgetKey] = useState<string | null>(
-    () => getDefaultExpandedWidgetKey(widgets),
-  );
+  // Derive the default from the current widgets, not just the first render:
+  // statuses can mount this component before the todo widget arrives.
+  const [userExpandedWidgetKey, setUserExpandedWidgetKey] = useState<string | null | undefined>(undefined);
+  const expandedWidgetKey = resolveExpandedWidgetKey(widgets, userExpandedWidgetKey, expandTodo);
+
+  useEffect(() => {
+    if (widgets.length === 0 || (userExpandedWidgetKey
+      && !widgets.some((widget) => widget.key === userExpandedWidgetKey))) {
+      setUserExpandedWidgetKey(undefined);
+    }
+  }, [widgets, userExpandedWidgetKey]);
   const [updatingWidgetKeys, setUpdatingWidgetKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -110,7 +140,7 @@ export function ExtensionWidgets({ widgets }: { widgets: ExtensionWidgetItem[] }
   ));
 
   const toggleWidget = (widget: ExtensionWidgetItem) => {
-    setExpandedWidgetKey((current) => getNextExpandedWidgetKey(current, widget.key));
+    setUserExpandedWidgetKey(getNextExpandedWidgetKey(expandedWidgetKey, widget.key));
   };
 
   return (

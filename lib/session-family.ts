@@ -6,6 +6,14 @@ export interface SessionFamily {
   latestModified: string;
 }
 
+export interface VisibleSessionRow {
+  session: SessionInfo;
+  family: SessionFamily;
+  depth: number;
+  hasChildren: boolean;
+  collapsed: boolean;
+}
+
 function resolveFamilyRoots(sessions: readonly SessionInfo[]): Map<string, string | null> {
   const byId = new Map(sessions.map((session) => [session.id, session]));
   const roots = new Map<string, string | null>();
@@ -66,6 +74,64 @@ export function listSessionFamilies(sessions: readonly SessionInfo[]): SessionFa
   }
 
   return [...families.values()].sort((a, b) => b.latestModified.localeCompare(a.latestModified));
+}
+
+/** Flattens expanded families in parent-before-child order for the virtualized list. */
+export function listVisibleSessionRows(
+  families: readonly SessionFamily[],
+  expandedSessionIds: ReadonlySet<string>,
+): VisibleSessionRow[] {
+  const rows: VisibleSessionRow[] = [];
+
+  for (const family of families) {
+    const children = new Map<string, SessionInfo[]>();
+    for (const subagent of family.subagents) {
+      const parentId = subagent.relation?.kind === "subagent" ? subagent.relation.parentSessionId : null;
+      if (!parentId) continue;
+      const siblings = children.get(parentId) ?? [];
+      siblings.push(subagent);
+      children.set(parentId, siblings);
+    }
+    for (const siblings of children.values()) {
+      siblings.sort((a, b) => b.modified.localeCompare(a.modified));
+    }
+
+    const stack = [{ session: family.root, depth: 0 }];
+    while (stack.length > 0) {
+      const { session, depth } = stack.pop()!;
+      const descendants = children.get(session.id) ?? [];
+      const hasChildren = descendants.length > 0;
+      const expanded = hasChildren && expandedSessionIds.has(session.id);
+      rows.push({ session, family, depth, hasChildren, collapsed: hasChildren && !expanded });
+      if (expanded) {
+        for (let i = descendants.length - 1; i >= 0; i--) {
+          stack.push({ session: descendants[i], depth: depth + 1 });
+        }
+      }
+    }
+  }
+
+  return rows;
+}
+
+/** Include every visible subagent ancestor of the given session IDs. */
+export function includeSubagentAncestors(
+  sessions: readonly SessionInfo[],
+  ids: ReadonlySet<string>,
+): Set<string> {
+  const parents = new Map(sessions.map((session) => [
+    session.id,
+    session.relation?.kind === "subagent" ? session.relation.parentSessionId : null,
+  ]));
+  const result = new Set<string>();
+  for (const id of ids) {
+    let current: string | null = id;
+    while (current && parents.has(current) && !result.has(current)) {
+      result.add(current);
+      current = parents.get(current) ?? null;
+    }
+  }
+  return result;
 }
 
 export function getSessionFamily(

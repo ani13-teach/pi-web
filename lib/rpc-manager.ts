@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { createBuiltinAutomodeExtension, preferBuiltinAutomode } from "./automode-builtin";
+import { createBuiltinRpivTodoExtension, preferBuiltinRpivTodo } from "./rpiv-todo-builtin";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
@@ -507,6 +508,16 @@ export class AgentSessionWrapper {
 
   onEvent(listener: EventListener): () => void {
     this.listeners.push(listener);
+    // Widgets and statuses may be registered during session startup, before
+    // the SSE listener attaches. Replay their current values on every attach.
+    for (const { key, text } of this.getExtensionStatuses()) listener({
+      type: "extension_ui_request", id: randomUUID(), method: "setStatus",
+      statusKey: key, statusText: text,
+    } as ExtensionUiRequest as AgentEvent);
+    for (const { key, lines, placement } of this.getExtensionWidgets()) listener({
+      type: "extension_ui_request", id: randomUUID(), method: "setWidget",
+      widgetKey: key, widgetLines: lines, widgetPlacement: placement,
+    } as ExtensionUiRequest as AgentEvent);
     for (const event of this.pendingUiRequests.values()) listener(event);
     for (const event of this.activeToolEvents.values()) listener(event);
     return () => {
@@ -2043,8 +2054,8 @@ export async function startRpcSession(
             // guardrail it would have received from the plugin on disk.
             ...(subagentResources.loadExtensions
               ? {
-                  extensionFactories: [createBuiltinAutomodeExtension()],
-                  extensionsOverride: preferBuiltinAutomode,
+                  extensionFactories: [createBuiltinAutomodeExtension(), createBuiltinRpivTodoExtension()],
+                  extensionsOverride: (base) => preferBuiltinRpivTodo(preferBuiltinAutomode(base)),
                 }
               : {}),
           }
@@ -2062,10 +2073,11 @@ export async function startRpcSession(
                 isBuiltInSubagentsEnabled,
               ),
               createBuiltinAutomodeExtension(),
+              createBuiltinRpivTodoExtension(),
             ],
-            extensionsOverride: (base) => preferBuiltinAutomode(
+            extensionsOverride: (base) => preferBuiltinRpivTodo(preferBuiltinAutomode(
               preferUserBashExtension(preferPiWebSubagentExtension(base)),
-            ),
+            )),
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });

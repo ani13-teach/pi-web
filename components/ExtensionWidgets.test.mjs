@@ -12,7 +12,9 @@ const {
   DEFAULT_EXPANDED_WIDGET_LINES,
   ExtensionWidgets,
   formatExtensionWidgetContent,
+  getDefaultExpandedWidgetKey,
   getNextExpandedWidgetKey,
+  resolveExpandedWidgetKey,
   getUpdatedExtensionWidgetKeys,
   snapshotExtensionWidgetContents,
 } = await jiti.import("./ExtensionWidgets.tsx");
@@ -81,6 +83,52 @@ test("keeps compact widgets expanded by default", () => {
 
   assert.match(html, /aria-expanded="true"/);
   assert.match(html, /<pre/);
+});
+
+test("restored long todo stays on the status bar without opening its panel", () => {
+  const widgets = [
+    { key: "rpiv-todos", lines: ["Todos", "task 1", "task 2", "task 3", ""], placement: "aboveEditor" },
+  ];
+  const html = renderWidgets({ widgets });
+
+  assert.equal(getDefaultExpandedWidgetKey([]), null);
+  assert.equal(getDefaultExpandedWidgetKey(widgets), null);
+  assert.match(html, /extension-widget-key">rpiv-todos/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /<section/);
+  assert.doesNotMatch(html, /task 3/);
+});
+
+test("a live todo update expands the panel in the current session", () => {
+  const widgets = [{ key: "rpiv-todos", lines: ["Todos", "task 1", "task 2", "task 3", ""], placement: "aboveEditor" }];
+  const html = renderWidgets({ widgets, expandTodo: true });
+  assert.equal(getDefaultExpandedWidgetKey(widgets, true), "rpiv-todos");
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /task 3/);
+  assert.equal(resolveExpandedWidgetKey(widgets, null, true), null);
+});
+
+test("restoring a compact todo also leaves its panel closed", () => {
+  const html = renderWidgets({
+    widgets: [{ key: "rpiv-todos", lines: ["Todos", "task 1", ""], placement: "aboveEditor" }],
+  });
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /<section/);
+  assert.doesNotMatch(html, /task 1/);
+});
+
+test("a returning long todo does not override manual widget choices", () => {
+  const first = [{ key: "short", lines: ["one", "two"], placement: "aboveEditor" }];
+  const withTodo = [
+    ...first,
+    { key: "rpiv-todos", lines: ["Todos", "one", "two", "three", ""], placement: "aboveEditor" },
+  ];
+  assert.equal(resolveExpandedWidgetKey(first, undefined), "short");
+  assert.equal(resolveExpandedWidgetKey(withTodo, undefined), "short");
+  assert.equal(resolveExpandedWidgetKey(withTodo, "short"), "short");
+  assert.equal(resolveExpandedWidgetKey(withTodo, null), null);
+  assert.equal(resolveExpandedWidgetKey(withTodo.slice(1), "short"), null);
+  assert.equal(resolveExpandedWidgetKey(withTodo.slice(1), "rpiv-todos"), "rpiv-todos");
 });
 
 test("expands at most one compact widget", () => {

@@ -7,6 +7,19 @@ const chatWindowSource = await readFile(new URL("../components/ChatWindow.tsx", 
 const chatInputSource = await readFile(new URL("../components/ChatInput.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
 
+test("only a live todo tool completion opens its panel, not restored widgets", () => {
+  const end = source.slice(source.indexOf('case "tool_execution_end"'), source.indexOf('case "queue_update"'));
+  const mount = source.slice(source.indexOf('  // Load session on mount'), source.indexOf('  // Load session on mount') + 2200);
+  assert.match(end, /event\.toolName === "todo" && event\.isError !== true/);
+  assert.match(end, /setTodoUpdatedInThisView\(true\)/);
+  assert.doesNotMatch(mount, /setTodoUpdatedInThisView\(true\)/);
+  assert.match(chatWindowSource, /expandTodo=\{todoUpdatedInThisView\}/);
+  const preset = source.slice(source.indexOf('  const handleToolPresetChange = useCallback'), source.indexOf('  const scrollUserMsgToTop'));
+  assert.match(preset, /setTodoUpdatedInThisView\(false\)/);
+  const widget = source.slice(source.indexOf('case "setWidget"'), source.indexOf('case "setTitle"'));
+  assert.match(widget, /request\.widgetKey === "rpiv-todos" && !request\.widgetLines[\s\S]*?setTodoUpdatedInThisView\(false\)/);
+});
+
 test("keeps the session event stream open through the idle grace window", () => {
   const finishSource = source.slice(
     source.indexOf("const finishPromptWithoutStream"),
@@ -141,6 +154,12 @@ test("fresh sessions use the preference while persisted and live sessions restor
   assert.match(changeSource, /activeSessionId !== sid \|\| result\?\.recreated/);
   assert.match(changeSource, /result\?\.recreated[\s\S]*?maintainEventsConnected\(activeSessionId\)/);
   assert.match(changeSource, /sessionIdRef\.current = activeSessionId/);
+  assert.match(changeSource, /setExtensionStatuses\(state\.extensionStatuses \?\? \[\]\)/);
+  assert.match(changeSource, /setExtensionWidgets\(state\.extensionWidgets \?\? \[\]\)/);
+  assert.match(changeSource, /if \(result\?\.recreated \|\| activeSessionId !== sid\) \{\s*setExtensionStatuses\(\[\]\);\s*setExtensionWidgets\(\[\]\)/);
+  assert.match(changeSource, /extensionStatusRevisionRef\.current === statusRevision/);
+  assert.match(changeSource, /extensionWidgetRevisionRef\.current === widgetRevision/);
+  assert.match(changeSource, /toolPresetChangeRef\.current === changeId/);
   assert.doesNotMatch(loadToolsSource, /setPreferredToolPreset/);
 });
 

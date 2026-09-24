@@ -328,7 +328,7 @@ export interface SessionInfo {
         parentSessionId: string;
         profile: string;
         description: string;
-        status: SubagentSessionStatus;
+        status?: SubagentSessionStatus; // native Pi Agent sessions do not expose this in their child file
       };
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient

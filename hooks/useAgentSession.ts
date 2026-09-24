@@ -326,6 +326,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
+  const [todoUpdatedInThisView, setTodoUpdatedInThisView] = useState(false);
+  const extensionStatusRevisionRef = useRef(0);
+  const extensionWidgetRevisionRef = useRef(0);
+  const toolPresetChangeRef = useRef(0);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
 
   const eventConnectionRef = useRef<AgentEventConnection | null>(null);
@@ -850,6 +854,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "setStatus":
+        extensionStatusRevisionRef.current += 1;
         setExtensionStatuses((prev) => {
           const rest = prev.filter((item) => item.key !== request.statusKey);
           return request.statusText !== undefined
@@ -858,6 +863,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       case "setWidget":
+        extensionWidgetRevisionRef.current += 1;
+        if (request.widgetKey === "rpiv-todos" && !request.widgetLines) {
+          setTodoUpdatedInThisView(false);
+        }
         setExtensionWidgets((prev) => {
           const rest = prev.filter((item) => item.key !== request.widgetKey);
           return request.widgetLines
@@ -1315,6 +1324,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "tool_execution_end": {
+        if (event.toolName === "todo" && event.isError !== true) {
+          setTodoUpdatedInThisView(true);
+        }
         const id = event.toolCallId as string;
         setActiveToolResults((prev) => {
           if (!prev.has(id)) return prev;
@@ -1895,6 +1907,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isNew]);
 
   const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
+    setTodoUpdatedInThisView(false);
+    const changeId = ++toolPresetChangeRef.current;
     const toolNames = getToolNamesForPreset(preset);
     setPreferredToolPreset(preset);
     setToolPresetState(preset);
@@ -1912,16 +1926,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
       setSlashCommands([]);
-      setExtensionStatuses([]);
-      setExtensionWidgets([]);
-      const [state] = await Promise.all([
-        sendAgentCommand<AgentStateResponse>(activeSessionId, { type: "get_state" }),
-        loadTools(activeSessionId),
-      ]);
-      if (sessionHookMountedRef.current && sessionIdRef.current === activeSessionId) {
+      if (result?.recreated || activeSessionId !== sid) {
+        setExtensionStatuses([]);
+        setExtensionWidgets([]);
+      }
+      const statusRevision = extensionStatusRevisionRef.current;
+      const widgetRevision = extensionWidgetRevisionRef.current;
+      const state = await sendAgentCommand<AgentStateResponse>(activeSessionId, { type: "get_state" });
+      if (sessionHookMountedRef.current && sessionIdRef.current === activeSessionId
+        && toolPresetChangeRef.current === changeId) {
         setSystemPrompt(state.systemPrompt ?? "");
+        // A newer SSE update wins over a snapshot captured while get_state ran.
+        if (extensionStatusRevisionRef.current === statusRevision) {
+          setExtensionStatuses(state.extensionStatuses ?? []);
+        }
+        if (extensionWidgetRevisionRef.current === widgetRevision) {
+          setExtensionWidgets(state.extensionWidgets ?? []);
+        }
         syncLiveModel(state);
       }
+      await loadTools(activeSessionId);
     } catch (e) {
       console.error("Failed to set tools:", e);
     }
@@ -2175,7 +2199,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
+    notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, todoUpdatedInThisView, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,

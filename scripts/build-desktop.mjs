@@ -10,7 +10,7 @@
  *   redirected to the desktop shim.
  */
 import { build } from "esbuild";
-import { copyFile, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -73,6 +73,13 @@ await build({
 
 await build({
   ...common,
+  entryPoints: [join(root, "desktop", "tray-preload.ts")],
+  outfile: join(root, "dist", "main", "tray-preload.cjs"),
+  format: "cjs",
+});
+
+await build({
+  ...common,
   entryPoints: [join(root, "desktop", "backend.ts")],
   outfile: join(root, "dist", "main", "backend.mjs"),
   format: "esm",
@@ -85,6 +92,11 @@ await build({
     ].join("\n"),
   },
 });
+
+// Retain the MIT notice for the embedded todo implementation in packaged apps.
+const todoOutput = join(root, "dist", "main", "rpiv-todo");
+await mkdir(todoOutput, { recursive: true });
+await copyFile(join(root, "builtin", "rpiv-todo", "LICENSE"), join(todoOutput, "LICENSE"));
 
 // The renderer smoke probe is executed as-is inside the window, so it is copied
 // rather than bundled.

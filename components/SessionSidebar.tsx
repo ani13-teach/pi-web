@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { listSessionFamilies } from "@/lib/session-family";
+import { includeSubagentAncestors, listSessionFamilies, listVisibleSessionRows } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -160,6 +160,7 @@ interface ValidatedProject {
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 const RUNNING_SESSIONS_POLL_MS = 2500;
+const EXTERNAL_SESSIONS_REFRESH_MS = 15_000;
 
 function loadLastCustomCwd(): string {
   if (typeof window === "undefined") return "";
@@ -425,6 +426,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [listViewportH, setListViewportH] = useState(0);
   const [listScrollTop, setListScrollTop] = useState(0);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
   const listScrollRafRef = useRef<number | null>(null);
   const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const top = e.currentTarget.scrollTop;
@@ -515,6 +517,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let controller: AbortController | null = null;
+    let lastCatalogRefresh = Date.now();
 
     const clearTimer = () => {
       if (timer) clearTimeout(timer);
@@ -552,6 +555,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         if (data.sessionListVersion !== sessionListVersionRef.current) {
           // Reuse the invalidated cache; forcing a scan would change the version again.
           await loadSessions();
+          lastCatalogRefresh = Date.now();
+        } else if (Date.now() - lastCatalogRefresh >= EXTERNAL_SESSIONS_REFRESH_MS) {
+          // Other Pi processes write sessions without bumping our in-process version.
+          await loadSessions(false, true);
+          lastCatalogRefresh = Date.now();
         }
       } catch {
         // Keep the last known state; the next visible-tab poll retries.
@@ -1004,12 +1012,24 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       : null);
 
   const sessionFamilies = listSessionFamilies(filteredSessions);
+  const visibleRows = listVisibleSessionRows(sessionFamilies, expandedSessionIds);
+  const selectedAncestors = includeSubagentAncestors(filteredSessions, new Set(selectedSessionId ? [selectedSessionId] : []));
+  const runningAncestors = includeSubagentAncestors(filteredSessions, runningSessionIds);
+  const unreadAncestors = includeSubagentAncestors(filteredSessions, unreadSessionIds);
+  const toggleSession = (id: string) => {
+    setExpandedSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const virtualIndices = getSessionListIndices(
-    sessionFamilies.length,
+    visibleRows.length,
     listScrollTop,
     listViewportH,
-    sessionFamilies.findIndex((family) => family.root.id === focusedSessionId),
+    visibleRows.findIndex((row) => row.session.id === focusedSessionId),
   );
 
   return (
@@ -1708,33 +1728,36 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {t("sidebar.noSessions")}
           </div>
         )}
-        {sessionFamilies.length > 0 && (
+        {visibleRows.length > 0 && (
           <div
             style={{
               position: "relative",
-              height: sessionFamilies.length * SESSION_LIST_ITEM_HEIGHT,
+              height: visibleRows.length * SESSION_LIST_ITEM_HEIGHT,
             }}
           >
             {virtualIndices.map((index) => {
-              const family = sessionFamilies[index];
-              const familySessions = [family.root, ...family.subagents];
-              const displaySession = family.latestModified === family.root.modified
-                ? family.root
-                : { ...family.root, modified: family.latestModified };
+              const { session, family, depth, hasChildren, collapsed } = visibleRows[index];
+              const displaySession = depth === 0 && family.latestModified !== session.modified
+                ? { ...session, modified: family.latestModified }
+                : session;
               // Bubble blur after the input's save handler before unpinning the row.
               return (
                 <div
-                  key={family.root.id}
-                  onFocus={() => setFocusedSessionId(family.root.id)}
+                  key={session.id}
+                  onFocus={() => setFocusedSessionId(session.id)}
                   onBlur={() => setFocusedSessionId(null)}
                   style={{ position: "absolute", top: index * SESSION_LIST_ITEM_HEIGHT, left: 0, right: 0 }}
                 >
                   <SessionItem
                     session={displaySession}
-                    isSelected={familySessions.some((session) => session.id === selectedSessionId)}
-                    isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
-                    isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
-                    onClick={() => handleSelectSessionFromList(family.root)}
+                    isSelected={session.id === selectedSessionId || (collapsed && selectedAncestors.has(session.id))}
+                    isRunning={runningAncestors.has(session.id)}
+                    isUnread={unreadAncestors.has(session.id)}
+                    depth={depth}
+                    hasChildren={hasChildren}
+                    collapsed={collapsed}
+                    onToggleCollapse={() => toggleSession(session.id)}
+                    onClick={() => handleSelectSessionFromList(session)}
                     onRenamed={loadSessions}
                     onDeleted={(id) => {
                       onSessionDeleted?.(id);
@@ -2276,6 +2299,8 @@ function SessionItem({
             <button
               onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
               title={t(collapsed ? "sidebar.expandSubagents" : "sidebar.collapseSubagents")}
+              aria-label={t(collapsed ? "sidebar.expandSubagents" : "sidebar.collapseSubagents")}
+              aria-expanded={!collapsed}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
                 width: 20, height: 20, padding: 0, flexShrink: 0,

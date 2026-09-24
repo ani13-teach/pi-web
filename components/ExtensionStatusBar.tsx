@@ -24,9 +24,11 @@ export function formatExtensionStatusLine(statuses: ExtensionStatusItem[]): stri
 export function ExtensionStatusBar({
   statuses,
   widgets = [],
+  expandTodo = false,
 }: {
   statuses: ExtensionStatusItem[];
   widgets?: ExtensionWidgetItem[];
+  expandTodo?: boolean;
 }) {
   if (statuses.length === 0 && widgets.length === 0) return null;
 
@@ -37,7 +39,7 @@ export function ExtensionStatusBar({
     <div
       className={`extension-status-shelf${widgets.length > 0 ? " has-widgets" : ""}${statuses.length > 0 ? " has-status" : ""}`}
     >
-      {widgets.length > 0 && <ExtensionWidgets widgets={widgets} />}
+      {widgets.length > 0 && <ExtensionWidgets widgets={widgets} expandTodo={expandTodo} />}
       {statuses.length > 0 && (
         <div
           role="status"
