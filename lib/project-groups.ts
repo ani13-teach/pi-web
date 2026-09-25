@@ -45,6 +45,20 @@ export function getProjectActivity(
   return counts;
 }
 
+/** Collapsed selector: completed unread work takes priority over running activity. */
+export function otherWorkspaceActivityIndicator(
+  activity: ReadonlyMap<string, { running: number; unread: number }>,
+  selectedProjectKey: string | undefined,
+): "unread" | "running" | null {
+  let hasRunning = false;
+  for (const [key, counts] of activity) {
+    if (key === selectedProjectKey) continue;
+    if (counts.unread > 0) return "unread";
+    if (counts.running > 0) hasRunning = true;
+  }
+  return hasRunning ? "running" : null;
+}
+
 export function sessionsForProject(
   sessions: readonly SessionInfo[],
   projectKey: string,

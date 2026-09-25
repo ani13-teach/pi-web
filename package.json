@@ -1,6 +1,6 @@
 {
   "name": "pi-desktop",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "description": "Windows desktop host for the pi coding agent (no local HTTP port)",
   "type": "module",

@@ -76,6 +76,12 @@ test("subagent completion stays silent and never becomes unread", () => {
   );
 });
 
+test("collapsed workspace indicator renders a solid dot for unread and a spinning outline for running", () => {
+  assert.match(source, /otherWorkspaceActivityIndicator\(projectActivity, selectedProject\?\.key\)/);
+  assert.match(source, /otherWorkspaceIndicator === "unread" \? \([\s\S]*?borderRadius: "50%", background: "currentColor"/);
+  assert.match(source, /\) : \(\s*<svg width="12" height="12"[\s\S]*?<path d="M21 12a9 9 0 1 1-3\.8-7\.4"[\s\S]*?<animateTransform[^>]*repeatCount="indefinite"/);
+});
+
 test("includes project activity counts in accessible labels", () => {
   assert.match(
     source,

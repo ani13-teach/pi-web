@@ -6,7 +6,7 @@ import { includeSubagentAncestors, listSessionFamilies, listVisibleSessionRows }
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
-import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
+import { getProjectActivity, getRecentProjects, otherWorkspaceActivityIndicator, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import { useI18n } from "@/hooks/useI18n";
@@ -969,15 +969,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     [allSessions, runningSessionIds, unreadSessionIds],
   );
 
-  // Any activity in a project other than the one currently selected — shown as
-  // a dot on the (collapsed) selector button so it is visible without opening
-  // the dropdown.
-  const hasOtherWorkspaceActivity = useMemo(
-    () => [...projectActivity.entries()].some(
-      ([key, { running, unread }]) => key !== selectedProject?.key && (running > 0 || unread > 0),
-    ),
-    [projectActivity, selectedProject],
-  );
+  // Show completed unread work first; otherwise show an animated ring while
+  // another workspace is still running.
+  const otherWorkspaceIndicator = otherWorkspaceActivityIndicator(projectActivity, selectedProject?.key);
 
   const filteredSessions = selectedProject
     ? sessionsForProject(allSessions, selectedProject.key)
@@ -1173,19 +1167,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                  {initialSessionId && !restoredRef.current ? "" : t("sidebar.selectProject")}
               </span>
             )}
-            {hasOtherWorkspaceActivity && (
+            {otherWorkspaceIndicator && (
               <span
-                title={t("sidebar.newActivity")}
-                aria-label={t("sidebar.newActivity")}
+                title={t(otherWorkspaceIndicator === "unread" ? "sidebar.newSessionActivity" : "sidebar.agentRunning")}
+                aria-label={t(otherWorkspaceIndicator === "unread" ? "sidebar.newSessionActivity" : "sidebar.agentRunning")}
                 style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
+                  width: 12,
+                  height: 12,
                   flexShrink: 0,
                   marginLeft: 6,
-                  background: "var(--accent)",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--accent)",
                 }}
-              />
+              >
+                {otherWorkspaceIndicator === "unread" ? (
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: "currentColor" }} />
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <g>
+                      <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" />
+                      <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
+                    </g>
+                  </svg>
+                )}
+              </span>
             )}
           </button>
 

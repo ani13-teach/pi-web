@@ -51,6 +51,21 @@ export function splitFinalAssistantBlocks(
   };
 }
 
+// A live turn with an Agent call should show its process group immediately,
+// rather than waiting for the parent agent's final answer. Use the last
+// assistant entry: an earlier commentary message is not the final answer.
+export function findLiveSubagentProcessEnd(messages: AgentMessage[], startIdx: number, endIdx: number): number {
+  let lastAssistantIdx = -1;
+  let hasAgentCall = false;
+  for (let i = startIdx + 1; i < endIdx; i++) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    lastAssistantIdx = i;
+    hasAgentCall ||= message.content.some((block) => block.type === "toolCall" && block.toolName === "Agent");
+  }
+  return hasAgentCall ? lastAssistantIdx : -1;
+}
+
 export function countToolCallBlocks(blocks: AssistantContentBlock[]): number {
   return blocks.filter((block): block is ToolCallContent => block.type === "toolCall").length;
 }
