@@ -1,4 +1,5 @@
 import { defaultUrlTransform, type Options as ReactMarkdownOptions } from "react-markdown";
+import type { Root as MarkdownRoot, RootContent as MarkdownNode } from "mdast";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -19,7 +20,17 @@ const markdownSanitizeSchema = {
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
+const windowsDriveAbsolutePath = /^[a-zA-Z]:[\\/](?![\\/])[^\x00-\x1f\x7f]*$/;
+
 export function markdownUrlTransform(value: string): string {
+  if (windowsDriveAbsolutePath.test(value)) {
+    try {
+      const path = value.slice(3).split(/[\\/]/).map(encodeURIComponent).join("/");
+      return `file:///${value[0]}:/${path}`;
+    } catch {
+      return "";
+    }
+  }
   return /^file:/i.test(value) ? value : defaultUrlTransform(value);
 }
 
@@ -361,10 +372,25 @@ function isLikelyMathExpression(value: string): boolean {
 // GFM's default single-tilde strikethrough silently mangled such ranges (#385).
 const remarkGfmOptions = { singleTilde: false } as const;
 
+// Sanitize runs before react-markdown's urlTransform; convert only drive-path
+// links first so the existing file: protocol rule can validate them.
+function normalizeWindowsMarkdownLinks() {
+  return (tree: MarkdownRoot) => {
+    const visit = (node: MarkdownRoot | MarkdownNode) => {
+      if (node.type === "link" && windowsDriveAbsolutePath.test(node.url)) {
+        node.url = markdownUrlTransform(node.url);
+      }
+      if ("children" in node) node.children.forEach(visit);
+    };
+    visit(tree);
+  };
+}
+
 export const markdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   [remarkFrontmatter, ["yaml"]],
   [remarkGfm, remarkGfmOptions],
   remarkMath,
+  normalizeWindowsMarkdownLinks,
 ];
 export const markdownPreviewRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   [remarkFrontmatter, ["yaml"]],

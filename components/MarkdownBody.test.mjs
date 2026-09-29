@@ -46,6 +46,42 @@ test("keeps local file markdown links in the app", () => {
   assert.doesNotMatch(fileUrlHtml, /target=|rel=|\snode=/);
 });
 
+test("opens Windows drive markdown links in the app with URL-safe hrefs", () => {
+  const html = renderMarkdown("[耦合逻辑.json](C:/Users/WJZN/Downloads/耦合逻辑.json)");
+  const spacedHtml = renderMarkdown("[项目 文档](<C:/Users/WJZN/Downloads/项目 文档#1?.json>)");
+  const backslashHtml = renderMarkdown(String.raw`[report](<C:\Users\WJZN\Downloads\report.json>)`);
+
+  assert.match(html, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/%E8%80%A6%E5%90%88%E9%80%BB%E8%BE%91\.json">耦合逻辑\.json<\/a>/);
+  assert.doesNotMatch(html, /target=|rel=/);
+  assert.match(spacedHtml, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/%E9%A1%B9%E7%9B%AE%20%E6%96%87%E6%A1%A3%231%3F\.json">项目 文档<\/a>/);
+  assert.doesNotMatch(spacedHtml, /target=|rel=/);
+  assert.match(backslashHtml, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/report\.json">report<\/a>/);
+  assert.doesNotMatch(backslashHtml, /target=|rel=/);
+});
+
+test("keeps file URIs as in-app links", () => {
+  const html = renderMarkdown("[report](file:///C:/Users/WJZN/Downloads/report.html)");
+
+  assert.match(html, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/report\.html">report<\/a>/);
+  assert.doesNotMatch(html, /target=|rel=/);
+});
+
+test("keeps Windows drive links inert without an in-app file handler", () => {
+  const html = renderMarkdown("[file](C:/Users/WJZN/Downloads/file.json)", { onOpenFile: undefined });
+
+  assert.match(html, /<a href="" target="_blank" rel="noopener noreferrer">file<\/a>/);
+});
+
+test("does not allow unsafe schemes through the local-link transform", () => {
+  const javascriptHtml = renderMarkdown("[run](javascript:alert(1))");
+  const customHtml = renderMarkdown("[custom](custom:/C:/Users/WJZN/Downloads/file.json)");
+  const httpHtml = renderMarkdown("[web](http://example.com/report.json)");
+
+  assert.match(javascriptHtml, /<a target="_blank" rel="noopener noreferrer">run<\/a>/);
+  assert.match(customHtml, /<a target="_blank" rel="noopener noreferrer">custom<\/a>/);
+  assert.match(httpHtml, /<a href="http:\/\/example\.com\/report\.json" target="_blank" rel="noopener noreferrer">web<\/a>/);
+});
+
 test("keeps file URLs inert without an in-app file handler", () => {
   const html = renderMarkdown("[report](file:///home/me/project/report.html)", { onOpenFile: undefined });
 
