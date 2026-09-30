@@ -40,9 +40,9 @@ test("keeps local file markdown links in the app", () => {
   const relativeHtml = renderMarkdown("[file](components/MarkdownBody.tsx)");
   const fileUrlHtml = renderMarkdown("[report](file:///home/me/project/report.html)");
 
-  assert.match(relativeHtml, /<a href="components\/MarkdownBody\.tsx">file<\/a>/);
+  assert.match(relativeHtml, /<a href="components\/MarkdownBody\.tsx"[^>]*>file<\/a>/);
   assert.doesNotMatch(relativeHtml, /target=|rel=|\snode=/);
-  assert.match(fileUrlHtml, /<a href="file:\/\/\/home\/me\/project\/report\.html">report<\/a>/);
+  assert.match(fileUrlHtml, /<a href="file:\/\/\/home\/me\/project\/report\.html"[^>]*>report<\/a>/);
   assert.doesNotMatch(fileUrlHtml, /target=|rel=|\snode=/);
 });
 
@@ -51,18 +51,32 @@ test("opens Windows drive markdown links in the app with URL-safe hrefs", () => 
   const spacedHtml = renderMarkdown("[项目 文档](<C:/Users/WJZN/Downloads/项目 文档#1?.json>)");
   const backslashHtml = renderMarkdown(String.raw`[report](<C:\Users\WJZN\Downloads\report.json>)`);
 
-  assert.match(html, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/%E8%80%A6%E5%90%88%E9%80%BB%E8%BE%91\.json">耦合逻辑\.json<\/a>/);
+  assert.match(html, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/%E8%80%A6%E5%90%88%E9%80%BB%E8%BE%91\.json"[^>]*>耦合逻辑\.json<\/a>/);
   assert.doesNotMatch(html, /target=|rel=/);
-  assert.match(spacedHtml, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/%E9%A1%B9%E7%9B%AE%20%E6%96%87%E6%A1%A3%231%3F\.json">项目 文档<\/a>/);
+  assert.match(spacedHtml, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/%E9%A1%B9%E7%9B%AE%20%E6%96%87%E6%A1%A3%231%3F\.json"[^>]*>项目 文档<\/a>/);
   assert.doesNotMatch(spacedHtml, /target=|rel=/);
-  assert.match(backslashHtml, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/report\.json">report<\/a>/);
+  assert.match(backslashHtml, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/report\.json"[^>]*>report<\/a>/);
   assert.doesNotMatch(backslashHtml, /target=|rel=/);
+});
+
+test("does not double-encode spaces, Chinese or literal percent escapes in Windows hrefs", () => {
+  const cases = [
+    ["C:/Users/WJZN/Desktop/Pi%20Desktop%20添加%20GPT-6.1%20Sol%20模型教程.md", "Pi%20Desktop%20%E6%B7%BB%E5%8A%A0%20GPT-6.1%20Sol%20%E6%A8%A1%E5%9E%8B%E6%95%99%E7%A8%8B.md"],
+    ["C:/Users/me/%E4%B8%AD%E6%96%87%20report.md", "%E4%B8%AD%E6%96%87%20report.md"],
+    ["C:/Users/me/literal%2520.md", "literal%2520.md"],
+    ["C:/Users/me/bad%escape.md", "bad%25escape.md"],
+  ];
+  for (const [href, name] of cases) {
+    const html = renderMarkdown(`[file](${href})`);
+    assert.ok(html.includes(`/${name}\"`), html);
+    assert.doesNotMatch(html, /target=|rel=/);
+  }
 });
 
 test("keeps file URIs as in-app links", () => {
   const html = renderMarkdown("[report](file:///C:/Users/WJZN/Downloads/report.html)");
 
-  assert.match(html, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/report\.html">report<\/a>/);
+  assert.match(html, /<a href="file:\/\/\/C:\/Users\/WJZN\/Downloads\/report\.html"[^>]*>report<\/a>/);
   assert.doesNotMatch(html, /target=|rel=/);
 });
 

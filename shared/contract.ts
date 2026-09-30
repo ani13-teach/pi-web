@@ -70,6 +70,12 @@ export interface BackendMethods {
     params: Record<string, never>;
     result: { closed: boolean };
   };
+
+  /** Backup must not run while a session or terminal can write files. */
+  "backup.status": {
+    params: Record<string, never>;
+    result: { busy: boolean };
+  };
 }
 
 export type BackendMethod = keyof BackendMethods;
@@ -134,6 +140,13 @@ export interface DesktopBridge {
   };
   /** Native folder picker. Returns null when the user cancels. */
   pickDirectory: (defaultPath?: string) => Promise<string | null>;
+  /** Reveals an authorized file in the system file manager, or opens an authorized directory. */
+  openLocalFile: (options: { filePath: string; sourceSessionId?: string | null }) => Promise<void>;
+  /** The main process owns native file dialogs and never accepts a renderer-provided archive path. */
+  backupScan: (options: { includePrivate: boolean; includeSessions: boolean; includeCustomizations: boolean; includeProject: boolean }) => Promise<{ cancelled?: boolean; token?: string; preview?: { entries: number; bytes: number; kinds: Record<string, number>; warnings: string[] } }>;
+  backupExport: (options: { password: string; token: string }) => Promise<{ cancelled?: boolean; entries?: number; bytes?: number; warnings?: string[] }>;
+  backupInspect: (password: string) => Promise<{ cancelled?: boolean; token?: string; preview?: { includePrivate: boolean; entries: { path: string; size: number; kind: string }[]; warnings: string[] } }>;
+  backupRestore: (options: { token: string; password: string; overwrite: boolean }) => Promise<{ restored: number; skipped: number; warnings: string[] }>;
   invoke: <M extends BackendMethod>(method: M, params: ParamsOf<M>) => Promise<ResultOf<M>>;
   /** Start the backend again after it stopped or crashed. */
   restartBackend: () => Promise<void>;
@@ -145,5 +158,10 @@ export const DESKTOP_CHANNEL = {
   invoke: "pi-desktop:invoke",
   push: "pi-desktop:push",
   pickDirectory: "pi-desktop:pick-directory",
+  openLocalFile: "pi-desktop:open-local-file",
+  backupScan: "pi-desktop:backup-scan",
+  backupExport: "pi-desktop:backup-export",
+  backupInspect: "pi-desktop:backup-inspect",
+  backupRestore: "pi-desktop:backup-restore",
   restartBackend: "pi-desktop:restart-backend",
 } as const;

@@ -9,7 +9,7 @@ import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url)).replace(/[\\/]tests$/, "");
@@ -145,16 +145,16 @@ try {
   check("GET /api/sessions answers JSON", sessions.status === 200 && Array.isArray(sessions.json?.sessions),
     `${sessions.json?.sessions?.length ?? "?"} sessions`);
 
+  // The web UI grants file access by validating a workspace first; same flow here.
+  const granted = await request("/api/cwd/validate", jsonInit({ cwd }));
+  check("POST /api/cwd/validate accepts the workspace", granted.status === 200, JSON.stringify(granted.json).slice(0, 80));
+
   const models = await request("/api/models");
   check("GET /api/models answers JSON", models.status === 200 && Boolean(models.json),
     Object.keys(models.json ?? {}).slice(0, 4).join(","));
 
   const defaults = await request("/api/default-cwd", jsonInit({}));
   check("POST /api/default-cwd answers", defaults.status === 200, JSON.stringify(defaults.json).slice(0, 60));
-
-  // The web UI grants file access by validating a workspace first; same flow here.
-  const granted = await request("/api/cwd/validate", jsonInit({ cwd }));
-  check("POST /api/cwd/validate accepts the workspace", granted.status === 200, JSON.stringify(granted.json).slice(0, 80));
 
   // pi-web encodes an absolute file path as slash-separated, percent-encoded segments.
   const filePath = join(cwd, "package.json").replace(/\\/g, "/");
@@ -263,8 +263,9 @@ try {
 
   // A save has to end up in a file, and only for the fields that were touched.
   // It goes to a throwaway project so the real configuration is never written:
-  // a project with no trust-requiring resources counts as trusted, so this
-  // needs no trust decision.
+  // Projects without gated resources need no trust decision. A test-only
+  // isolated HOME may make resources under its real ancestors require trust;
+  // trust this fixture only when the caller explicitly opts into a temp agent.
   //
   // The project file is a pi project-settings file: auto-mode keys live under
   // "autoMode" and everything else in it was put there by the user, so a save
@@ -281,6 +282,21 @@ try {
       autoMode: { enabled: true, log: { enabled: true } },
       permissions: { deny: ["Bash(rm:*)"] },
     }, null, 2));
+
+    const sandboxAccess = await request("/api/cwd/validate", jsonInit({ cwd: sandbox }));
+    if (sandboxAccess.status !== 200) throw new Error(`Cannot validate test-only project: HTTP ${sandboxAccess.status}`);
+    const trust = await request(`/api/project-trust?cwd=${encodeURIComponent(sandbox)}`);
+    if (trust.status !== 200) throw new Error(`Cannot check test-only project trust: HTTP ${trust.status}`);
+    if (trust.json?.requiresTrust && !trust.json?.trusted) {
+      const isolated = process.env.PI_BACKEND_TEST_TEMP_TRUST === "1"
+        && Boolean(process.env.PI_CODING_AGENT_DIR)
+        && resolve(info.agentDir) === resolve(process.env.PI_CODING_AGENT_DIR)
+        && resolve(info.agentDir).startsWith(resolve(tmpdir()) + (process.platform === "win32" ? "\\" : "/"));
+      if (!isolated) throw new Error("Project trust is required: set PI_BACKEND_TEST_TEMP_TRUST=1 with an isolated PI_CODING_AGENT_DIR inside the temp directory");
+      const grantedTrust = await request("/api/project-trust", jsonInit({ cwd: sandbox }));
+      if (grantedTrust.status !== 200 || !grantedTrust.json?.trusted)
+        throw new Error(`Cannot trust test-only project: HTTP ${grantedTrust.status}`);
+    }
 
     const saved = await request("/api/automode", jsonInit({
       scope: "project",

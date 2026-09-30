@@ -1,3 +1,10 @@
+export interface LocalFileOpenOptions {
+  /** Explicit user double-click: locate the path in the system file explorer. */
+  system?: boolean;
+}
+
+export type LocalFileOpenHandler = (filePath: string, options?: LocalFileOpenOptions) => void;
+
 interface LocalFileClickEvent {
   defaultPrevented: boolean;
   button: number;

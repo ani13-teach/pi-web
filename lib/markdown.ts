@@ -25,7 +25,13 @@ const windowsDriveAbsolutePath = /^[a-zA-Z]:[\\/](?![\\/])[^\x00-\x1f\x7f]*$/;
 export function markdownUrlTransform(value: string): string {
   if (windowsDriveAbsolutePath.test(value)) {
     try {
-      const path = value.slice(3).split(/[\\/]/).map(encodeURIComponent).join("/");
+      const path = value.slice(3).split(/[\\/]/).map((segment) => {
+        // Markdown destinations may already contain URL escapes. Normalize once
+        // instead of turning %20 into %2520 (a literal %20 in the file path).
+        let decoded = segment;
+        try { decoded = decodeURIComponent(segment); } catch { /* Literal malformed percent sequence. */ }
+        return encodeURIComponent(decoded);
+      }).join("/");
       return `file:///${value[0]}:/${path}`;
     } catch {
       return "";

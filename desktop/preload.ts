@@ -26,6 +26,15 @@ const bridge: DesktopBridge = {
   pickDirectory: async (defaultPath?: string): Promise<string | null> =>
     (await ipcRenderer.invoke(DESKTOP_CHANNEL.pickDirectory, defaultPath)) as string | null,
 
+  openLocalFile: async (options): Promise<void> => {
+    await ipcRenderer.invoke(DESKTOP_CHANNEL.openLocalFile, options);
+  },
+
+  backupScan: (options) => ipcRenderer.invoke(DESKTOP_CHANNEL.backupScan, options),
+  backupExport: (options) => ipcRenderer.invoke(DESKTOP_CHANNEL.backupExport, options),
+  backupInspect: (password) => ipcRenderer.invoke(DESKTOP_CHANNEL.backupInspect, password),
+  backupRestore: (options) => ipcRenderer.invoke(DESKTOP_CHANNEL.backupRestore, options),
+
   /** One request/response round trip to the backend. */
   invoke: <M extends BackendMethod>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> =>
     ipcRenderer.invoke(DESKTOP_CHANNEL.invoke, method, params) as Promise<ResultOf<M>>,

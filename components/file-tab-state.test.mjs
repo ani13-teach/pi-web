@@ -96,3 +96,29 @@ test("a remounted viewer ignores the previous revision's late cleanup", () => {
   assert.strictEqual(stale, reopened);
   assert.equal(stale[0].viewerState.displayMode, "diff");
 });
+
+test("location preview and content preview stay isolated for the same file", () => {
+  const explorerInput = { ...openA, tabId: "explorer:/repo/a.ts", previewKind: "explorer", sourceSessionId: "session-1" };
+  const tabs = openFileTab([tabA], explorerInput);
+  assert.equal(tabs.length, 2);
+  assert.strictEqual(tabs[0], tabA);
+  assert.equal(tabs[1].previewKind, "explorer");
+  assert.equal(tabs[1].sourceSessionId, "session-1");
+  assert.equal(tabs[1].viewerState, undefined);
+
+  const reopened = openFileTab(tabs, { ...explorerInput, sourceSessionId: "session-2" });
+  assert.strictEqual(reopened[0], tabA);
+  assert.equal(reopened[1].sourceSessionId, "session-2");
+  assert.equal(reopened[1].previewKind, "explorer");
+  assert.equal(reopened[1].viewerRevision, 1);
+  assert.strictEqual(openFileTab(reopened, { ...openA }), reopened);
+  assert.equal(reopened[0].previewKind, undefined);
+  assert.strictEqual(reopened[0].viewerState, tabA.viewerState);
+});
+
+test("reopening a location without a source keeps its prior authorization", () => {
+  const input = { ...openA, tabId: "explorer:/repo/a.ts", previewKind: "explorer", sourceSessionId: "session-1" };
+  const tabs = openFileTab([], input);
+  assert.strictEqual(openFileTab(tabs, { ...input, sourceSessionId: null }), tabs);
+  assert.equal(tabs[0].sourceSessionId, "session-1");
+});

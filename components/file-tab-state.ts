@@ -5,6 +5,7 @@ interface OpenFileTabInput {
   fileName: string;
   filePath: string;
   modeHint?: "diff";
+  previewKind?: "explorer";
   sourceSessionId?: string | null;
   tabId: string;
 }
@@ -17,6 +18,7 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
       label: input.fileName,
       filePath: input.filePath,
       sourceSessionId: input.sourceSessionId,
+      previewKind: input.previewKind,
       initialDisplayMode: input.modeHint,
       viewerState: input.modeHint ? {
         displayMode: input.modeHint,

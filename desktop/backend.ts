@@ -170,6 +170,11 @@ const handlers: Record<string, Handler> = {
 
   "http.request": request,
 
+  "backup.status": () => ({
+    busy: Boolean([...(globalThis.__piSessions?.values() ?? [])].some((session) => session.isRunning())
+      || [...(globalThis.__piWebTerminals?.keys() ?? [])].length),
+  }),
+
   "http.pull": (params: { streamId: string }) => pullStream(params.streamId),
 
   "http.cancel": async (params: { streamId: string }) => {

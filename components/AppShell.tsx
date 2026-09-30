@@ -7,6 +7,7 @@ import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
+import { LinkedFileExplorer } from "./LinkedFileExplorer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
@@ -26,6 +27,8 @@ import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
+import type { LocalFileOpenOptions } from "@/lib/file-links";
+import type { DesktopBridge } from "@/shared/contract";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
   claimExtensionAttentionNotification,
@@ -668,7 +671,7 @@ export function AppShell() {
       // File tabs are keyed by absolute path, so tabs opened in the previous
       // project must not linger. Same-project worktree switches keep them.
       setFileTabs([]);
-      if (!activeFileTabId || activeFileTabId.startsWith("file:")) {
+      if (!activeFileTabId || activeFileTabId.startsWith("file:") || activeFileTabId.startsWith("explorer:")) {
         setActiveFileTabId(null);
         setRightPanelOpen(false);
       }
@@ -692,7 +695,7 @@ export function AppShell() {
     const projectKey = workspaceKeyOf(session);
     if (activeProjectKeyRef.current !== projectKey) {
       setFileTabs([]);
-      if (!activeFileTabId || activeFileTabId.startsWith("file:")) {
+      if (!activeFileTabId || activeFileTabId.startsWith("file:") || activeFileTabId.startsWith("explorer:")) {
         setActiveFileTabId(null);
         setRightPanelOpen(false);
       }
@@ -972,15 +975,17 @@ export function AppShell() {
   const handleOpenFile = useCallback((
     filePath: string,
     fileName: string,
-    options?: { sourceSessionId?: string | null; modeHint?: "diff" },
+    options?: { sourceSessionId?: string | null; modeHint?: "diff"; previewKind?: "explorer" },
   ) => {
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
-    const tabId = `file:${filePath}`;
+    const previewKind = options?.previewKind;
+    const tabId = `${previewKind === "explorer" ? "explorer" : "file"}:${filePath}`;
     setFileTabs((prev) => openFileTab(prev, {
       fileName,
       filePath,
       modeHint,
+      previewKind,
       sourceSessionId,
       tabId,
     }));
@@ -990,9 +995,23 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
-  const handleOpenLinkedFile = useCallback((filePath: string) => {
-    handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
-  }, [handleOpenFile, selectedSession?.id]);
+  const handleRevealFile = useCallback((filePath: string, sourceSessionId?: string | null) => {
+    const bridge = (window as unknown as { piDesktop?: DesktopBridge }).piDesktop;
+    if (!bridge?.openLocalFile) return false;
+    void bridge.openLocalFile({ filePath, sourceSessionId }).catch((error: unknown) => {
+      window.alert(translate("chat.systemOpenFailed", {
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
+    return true;
+  }, [translate]);
+
+  const handleOpenLinkedFile = useCallback((filePath: string, options?: LocalFileOpenOptions) => {
+    const sourceSessionId = selectedSession?.id ?? null;
+    if (options?.system && handleRevealFile(filePath, sourceSessionId)) return;
+    // Browser-only clients use the same location preview without a native bridge.
+    handleOpenFile(filePath, getFileName(filePath), { sourceSessionId, previewKind: "explorer" });
+  }, [handleOpenFile, handleRevealFile, selectedSession?.id]);
 
   const handleOpenTerminal = useCallback((cwd: string) => {
     const existing = terminalTabs.find((tab) => tab.cwd === cwd);
@@ -2390,7 +2409,17 @@ export function AppShell() {
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
         <div style={{ flex: 1, minHeight: 0, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-          {activeFileTab?.filePath ? (
+          {activeFileTab?.filePath ? activeFileTab.previewKind === "explorer" ? (
+            <LinkedFileExplorer
+              key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
+              filePath={activeFileTab.filePath}
+              sourceSessionId={activeFileTab.sourceSessionId}
+              onReveal={(filePath) => handleRevealFile(filePath, activeFileTab.sourceSessionId)}
+              onOpenFile={(filePath, fileName) => handleOpenFile(filePath, fileName, {
+                sourceSessionId: activeFileTab.sourceSessionId,
+              })}
+            />
+          ) : (
             <FileViewer
               key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
               filePath={activeFileTab.filePath}

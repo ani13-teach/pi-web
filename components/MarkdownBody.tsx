@@ -2,20 +2,24 @@
 
 import { useMemo, type MouseEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import { resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
+import { resolveLocalFileHref, shouldOpenLocalFileInApp, type LocalFileOpenHandler } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, normalizeDisplayMath } from "@/lib/markdown";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
+import { useI18n } from "@/hooks/useI18n";
+import { useLocalFileClicks } from "@/hooks/useLocalFileClicks";
 
 interface MarkdownBodyProps {
   children: string;
   className?: string;
   isStreaming?: boolean;
   cwd?: string;
-  onOpenFile?: (filePath: string) => void;
+  onOpenFile?: LocalFileOpenHandler;
 }
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
+  const { t } = useI18n();
+  const fileClicks = useLocalFileClicks(onOpenFile);
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
   const components = useMemo<Components>(() => ({
@@ -60,16 +64,18 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         );
       }
 
-      const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+      const handleClick = (event: MouseEvent<HTMLAnchorElement>, system = false) => {
         if (!shouldOpenLocalFileInApp(event)) return;
         const target = event.currentTarget.getAttribute("target");
         if (target && target !== "_self") return;
         event.preventDefault();
-        openFile(filePath);
+        if (system) fileClicks.system(filePath);
+        else fileClicks.preview(filePath, event.detail);
       };
 
       return (
-        <a href={href} {...props} onClick={handleClick}>
+        <a href={href} {...props} title={props.title ?? t("chat.localFileOpenHint")}
+          onClick={(event) => handleClick(event)} onDoubleClick={(event) => handleClick(event, true)}>
           {children}
         </a>
       );
@@ -91,7 +97,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         </div>
       );
     },
-  }), [cwd, isStreaming, onOpenFile]);
+  }), [cwd, isStreaming, onOpenFile, t, fileClicks]);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>

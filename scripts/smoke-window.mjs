@@ -13,7 +13,7 @@
  * exactly that much: they cover what the snapshot saw, not the whole lifetime of
  * the app and not processes started after the snapshot.
  *
- *   node scripts/smoke-window.mjs [--hold 15000] [--binary <exe>] [--isolate]
+ *   node scripts/smoke-window.mjs [--hold 15000] [--binary <exe>] [--isolate] [--project <dev directory>]
  *
  * --binary points the same checks at a packaged build (release/win-unpacked/...),
  * which is the artifact users actually run. A packaged build must be checked
@@ -29,7 +29,7 @@
 
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { stageApp } from "./stage-app.mjs";
 
 const args = process.argv.slice(2);
@@ -41,6 +41,9 @@ const flag = (name, fallback) => {
 // open; the snapshot needs a second or two of PowerShell.
 const hold = flag("hold", "15000");
 const packagedBinary = flag("binary", null);
+// Allows running from a throwaway cwd, so smoke screenshots never overwrite
+// existing .tmp-shot files in the source checkout.
+const devProject = resolve(flag("project", "."));
 const isolate = args.includes("--isolate");
 
 /**
@@ -105,7 +108,7 @@ if (packagedBinary) {
 
 const electronBinary = binary
   ?? join(
-    process.cwd(),
+    devProject,
     "node_modules",
     "electron",
     "dist",
@@ -120,7 +123,7 @@ if (!existsSync(electronBinary)) {
 
 if (!packagedBinary) {
   for (const required of ["dist/main/main.cjs", "dist/main/backend.mjs", "dist/renderer/index.html"]) {
-    if (!existsSync(join(process.cwd(), required))) {
+    if (!existsSync(join(devProject, required))) {
       console.error(`Missing ${required} — run: npm run build`);
       process.exit(1);
     }
@@ -250,7 +253,7 @@ foreach ($s in $sampled) {
 // throwaway directory to check a build while the app is already open.
 const userData = process.env.PI_DESKTOP_SMOKE_USERDATA;
 if (userData) mkdirSync(userData, { recursive: true });
-const childArgs = packagedBinary ? [] : ["."];
+const childArgs = packagedBinary ? [] : [devProject];
 if (userData) childArgs.push(`--user-data-dir=${userData}`);
 
 const child = spawn(electronBinary, childArgs, {

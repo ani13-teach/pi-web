@@ -1,7 +1,9 @@
 "use client";
 
 import { useI18n } from "@/hooks/useI18n";
+import { useLocalFileClicks } from "@/hooks/useLocalFileClicks";
 import { getFileName } from "@/lib/file-paths";
+import type { LocalFileOpenHandler } from "@/lib/file-links";
 import type { WrittenFile } from "@/lib/turn-written-files";
 import { getFileIcon } from "./FileIcons";
 
@@ -12,9 +14,10 @@ import { getFileIcon } from "./FileIcons";
  */
 export function TurnWrittenFiles({ files, onOpenFile }: {
   files: WrittenFile[];
-  onOpenFile?: (filePath: string) => void;
+  onOpenFile?: LocalFileOpenHandler;
 }) {
   const { t } = useI18n();
+  const fileClicks = useLocalFileClicks(onOpenFile);
   if (files.length === 0) return null;
 
   return (
@@ -25,9 +28,10 @@ export function TurnWrittenFiles({ files, onOpenFile }: {
           <button
             key={filePath}
             type="button"
-            title={filePath}
+            title={`${filePath}\n${t("chat.localFileOpenHint")}`}
             aria-label={t("chat.openWrittenFile", { name })}
-            onClick={() => onOpenFile?.(filePath)}
+            onClick={(event) => fileClicks.preview(filePath, event.detail)}
+            onDoubleClick={() => fileClicks.system(filePath)}
             style={{
               display: "inline-flex",
               alignItems: "center",

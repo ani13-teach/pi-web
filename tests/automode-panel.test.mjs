@@ -33,7 +33,7 @@ const locales = {
 };
 
 test("the settings dialog registers an auto-mode tab", () => {
-  assert.match(navigation, /"automode",\s*\] as const;/);
+  assert.match(navigation, /"automode",/);
   assert.match(panel, /id: "automode", label: t\("common\.autoMode"\), requiresProject: false/);
   assert.match(panel, /if \(section === "automode"\) return <svg/);
   assert.match(panel, /<AutomodeConfig cwd=\{cwd\} sessionId=\{sessionId\} onReloaded=\{onSessionReloaded\} \/>/);

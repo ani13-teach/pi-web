@@ -14,11 +14,14 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, writeFileSync, rmSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, lstat, readdir, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, protocol, screen, session, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, protocol, screen, session, shell, Tray, type IpcMainInvokeEvent } from "electron";
+import { createBackup, inspectBackup, restoreBackup, scanBackup } from "../lib/backup/index";
+import { openLocalFile } from "./local-file-open";
 
 import {
   APP_ORIGIN,
@@ -30,6 +33,7 @@ import {
   decidePreviewNavigation,
   decideWindowOpen,
   isExportPreviewRequestAllowed,
+  isSameOrigin,
   previewUrlFor,
 } from "./navigation";
 import {
@@ -159,6 +163,7 @@ const BROWSER_ONLY_HEADERS = new Set([
 ]);
 
 async function serveApi(request: Request): Promise<Response> {
+  if (backupBusy) return new Response("Backup in progress", { status: 503 });
   const url = new URL(request.url);
   const headers: Record<string, string> = {};
   request.headers.forEach((value, key) => {
@@ -227,6 +232,7 @@ class BackendHost {
   private readonly pending = new Map<string, PendingCall>();
   private restarts = 0;
   private restarting: Promise<void> | null = null;
+  private plannedStop: ChildProcess | null = null;
 
   constructor(private readonly onPush: (push: BackendPush) => void) {}
 
@@ -260,10 +266,12 @@ class BackendHost {
     });
     child.on("message", (message: BackendOutMessage) => this.onMessage(message));
     child.on("exit", (code, signal) => {
-      this.child = null;
+      if (this.child === child) this.child = null;
+      const planned = this.plannedStop === child;
+      if (planned) this.plannedStop = null;
       const reason = `backend exited (${signal ? `signal ${signal}` : `code ${code}`})`;
       this.failAll(new Error(reason));
-      this.onPush({ type: "backend.down", reason });
+      if (!planned) this.onPush({ type: "backend.down", reason });
     });
     child.on("error", (error) => {
       this.failAll(error);
@@ -357,13 +365,14 @@ class BackendHost {
   }
 
   /** Ask the backend to release sessions and PTYs, then wait for it to exit. */
-  async shutdown(timeoutMs = 5_000): Promise<void> {
+  async shutdown(timeoutMs = 5_000, requireGraceful = false): Promise<void> {
     const child = this.child;
     if (!child) return;
     // One deadline for the whole thing: waiting on the request first used to
     // leave this with the default 120s request timeout before the exit wait
     // even started, so quitting could hang far longer than asked.
     const deadline = Date.now() + timeoutMs;
+    if (requireGraceful) this.plannedStop = child;
     const exited = new Promise<void>((resolveCall) => child.once("exit", () => resolveCall()));
     try {
       await this.request("backend.shutdown", {}, Math.max(1_000, timeoutMs - 500));
@@ -386,7 +395,8 @@ class BackendHost {
       await Promise.race([exited, delay(1_000)]);
     }
     if (this.child === child) this.child = null;
-    this.restarts += 1;
+    if (!requireGraceful) this.restarts += 1;
+    if (timedOut && requireGraceful) throw new Error("Could not safely stop active sessions for backup");
   }
 
   /** Simulates a crash, so recovery paths can be tested for real. */
@@ -776,9 +786,13 @@ async function runSmokeChecks(window: BrowserWindow): Promise<void> {
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } },
   ];
   writeFileSync(fixtureFile, fixture.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  for (const cwd of new Set([scenarioWorkspace(), app.getPath("home")])) {
+    const access = await api("/api/cwd/validate", { method: "POST", body: { cwd } });
+    if (access.status !== 200) throw new Error(`Smoke workspace validation failed (${access.status})`);
+  }
   await api("/api/sessions?force=1");
   await window.loadURL(`${APP_ORIGIN}/index.html?session=${fixtureId}`);
-  const source = `window.__piSmokeKeepTerminal = ${keepTerminal}; window.__piSmokeSessionId = ${JSON.stringify(fixtureId)};\n${probeSource}`;
+  const source = `window.__piSmokeKeepTerminal = ${keepTerminal}; window.__piSmokeSessionId = ${JSON.stringify(fixtureId)}; window.__piSmokeWorkspace = ${JSON.stringify(scenarioWorkspace())};\n${probeSource}`;
 
   // Renderer console output is the only place some failures show up.
   window.webContents.on("console-message", (_event, level, message) => {
@@ -1332,6 +1346,151 @@ async function runScenario(window: BrowserWindow, scenario: string): Promise<voi
   app.exit(failed === 0 ? 0 : 1);
 }
 
+// Archive paths never cross the renderer bridge. Only a native dialog may select them.
+let backupBusy = false;
+const backupInspections = new Map<string, { file: string; size: number; modified: number; expires: number }>();
+const backupScans = new Map<string, { agentDir: string; projectDir?: string; includePrivate: boolean;
+  includeSessions: boolean; includeCustomizations: boolean; preview: Awaited<ReturnType<typeof scanBackup>>; expires: number }>();
+
+function assertBackupCaller(event: IpcMainInvokeEvent): void {
+  if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame ||
+      !event.senderFrame.url.startsWith(`${APP_ORIGIN}/`)) {
+    throw new Error("Only the main app window can use backup");
+  }
+}
+
+function backupPassword(value: unknown): string {
+  if (typeof value !== "string" || value.length < 8 || value.length > 1024) {
+    throw new Error("Backup password must contain at least 8 characters");
+  }
+  return value;
+}
+
+async function withStoppedBackend<T>(work: (agentDir: string) => Promise<T>): Promise<T> {
+  if (backupBusy || !backend.running) throw new Error("Backup unavailable while backend is busy");
+  backupBusy = true;
+  try {
+    const state = await backend.request("backup.status", {}, 10_000);
+    if (state.busy) throw new Error("Stop active agent sessions and terminals before backup");
+    const { agentDir } = await backend.request("app.info", {}, 10_000);
+    // Release open session files and block new requests until the archive is complete.
+    await backend.shutdown(30_000, true);
+    return await work(agentDir);
+  } finally {
+    if (!backend.running && !quitting) backend.start();
+    backupBusy = false;
+  }
+}
+
+ipcMain.handle(DESKTOP_CHANNEL.backupScan, async (event, options: unknown) => {
+  assertBackupCaller(event);
+  const input = options as { includePrivate?: unknown; includeSessions?: unknown;
+    includeCustomizations?: unknown; includeProject?: unknown } | null;
+  if (typeof input?.includePrivate !== "boolean" || typeof input.includeSessions !== "boolean" ||
+    typeof input.includeCustomizations !== "boolean" || typeof input.includeProject !== "boolean")
+    throw new Error("Invalid backup options");
+  const includePrivate = input.includePrivate;
+  if (!includePrivate && (input.includeSessions || input.includeCustomizations || input.includeProject))
+    throw new Error("Private categories require explicit consent");
+  let projectDir: string | undefined;
+  if (includePrivate && input.includeProject) {
+    const project = await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory"] });
+    if (project.canceled || !project.filePaths[0]) return { cancelled: true };
+    projectDir = project.filePaths[0];
+  }
+  const sections = { includePrivate, includeSessions: input.includeSessions,
+    includeCustomizations: input.includeCustomizations };
+  const { agentDir, preview } = await withStoppedBackend(async (dir) => ({ agentDir: dir,
+    preview: await scanBackup({ agentDir: dir, ...sections, projectDir }),
+  }));
+  for (const [id, scan] of backupScans) if (scan.expires < Date.now()) backupScans.delete(id);
+  if (backupScans.size >= 32) backupScans.delete(backupScans.keys().next().value!);
+  const token = randomUUID();
+  backupScans.set(token, { agentDir, projectDir, ...sections, preview, expires: Date.now() + 10 * 60_000 });
+  return { token, preview };
+});
+
+ipcMain.handle(DESKTOP_CHANNEL.backupExport, async (event, options: unknown) => {
+  assertBackupCaller(event);
+  const input = options as { password?: unknown; token?: unknown } | null;
+  const password = backupPassword(input?.password);
+  if (typeof input?.token !== "string") throw new Error("Scan before exporting");
+  const scanned = backupScans.get(input.token);
+  if (!scanned || scanned.expires < Date.now()) throw new Error("Scan again before exporting");
+  const selected = await dialog.showSaveDialog(mainWindow!, {
+    defaultPath: "pi-desktop-backup.pibak", filters: [{ name: "Encrypted Pi Desktop backup", extensions: ["pibak"] }],
+  });
+  if (selected.canceled || !selected.filePath) return { cancelled: true };
+  const result = await withStoppedBackend(async (agentDir) => {
+    if (agentDir !== scanned.agentDir) throw new Error("Agent directory changed; scan again");
+    const current = await scanBackup({ agentDir, includePrivate: scanned.includePrivate,
+      includeSessions: scanned.includeSessions, includeCustomizations: scanned.includeCustomizations,
+      projectDir: scanned.projectDir });
+    if (current.entries !== scanned.preview.entries || current.bytes !== scanned.preview.bytes ||
+      JSON.stringify(current.kinds) !== JSON.stringify(scanned.preview.kinds))
+      throw new Error("Backup sources changed; scan again");
+    return createBackup({ agentDir, outputPath: selected.filePath!, password,
+      includePrivate: scanned.includePrivate, includeSessions: scanned.includeSessions,
+      includeCustomizations: scanned.includeCustomizations, projectDir: scanned.projectDir });
+  });
+  backupScans.delete(input.token);
+  return result;
+});
+
+ipcMain.handle(DESKTOP_CHANNEL.backupInspect, async (event, supplied: unknown) => {
+  assertBackupCaller(event);
+  const password = backupPassword(supplied);
+  const selection = await dialog.showOpenDialog(mainWindow!, {
+    properties: ["openFile"], filters: [{ name: "Encrypted Pi Desktop backup", extensions: ["pibak"] }],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { cancelled: true };
+  const file = selection.filePaths[0];
+  const before = await lstat(file);
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error("Not a regular backup file");
+  const preview = await inspectBackup({ archivePath: file, password });
+  const after = await lstat(file);
+  if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error("Backup file changed during preview");
+  const token = randomUUID();
+  backupInspections.set(token, { file, size: after.size, modified: after.mtimeMs, expires: Date.now() + 10 * 60_000 });
+  return { token, preview };
+});
+
+ipcMain.handle(DESKTOP_CHANNEL.backupRestore, async (event, options: unknown) => {
+  assertBackupCaller(event);
+  const input = options as { token?: unknown; password?: unknown; overwrite?: unknown } | null;
+  const password = backupPassword(input?.password);
+  if (typeof input?.token !== "string" || typeof input?.overwrite !== "boolean") throw new Error("Invalid restore request");
+  const selection = backupInspections.get(input.token);
+  backupInspections.delete(input.token);
+  if (!selection || selection.expires < Date.now()) throw new Error("Reopen the backup to restore it");
+  const current = await lstat(selection.file);
+  if (!current.isFile() || current.isSymbolicLink() || current.size !== selection.size || current.mtimeMs !== selection.modified) {
+    throw new Error("Backup changed after preview; inspect it again");
+  }
+  // Authenticate again before asking for the destination; the password may have changed.
+  await inspectBackup({ archivePath: selection.file, password });
+  if (input.overwrite) throw new Error("Overwrite is not yet supported; existing files are preserved");
+  return withStoppedBackend((agentDir) => restoreBackup({
+    agentDir, archivePath: selection.file, password,
+  }));
+});
+
+ipcMain.handle(DESKTOP_CHANNEL.openLocalFile, async (event, options: unknown) => {
+  const assertAvailable = (): void => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame ||
+        !event.senderFrame || !isSameOrigin(event.senderFrame.url, APP_ORIGIN)) {
+      throw new Error("Only the main app window can open local files");
+    }
+    if (backupBusy) throw new Error("Backup in progress; wait before opening local files");
+  };
+  await openLocalFile(options, {
+    request: (method, params, timeoutMs) => backend.request(method, params, timeoutMs),
+    openPath: (filePath) => shell.openPath(filePath),
+    showItemInFolder: (filePath) => shell.showItemInFolder(filePath),
+    assertAvailable,
+  });
+});
+
 const windowRequests = new Map<number, Set<string>>();
 
 ipcMain.handle(DESKTOP_CHANNEL.invoke, async (event, method: BackendMethod, params: unknown) => {
@@ -1357,6 +1516,7 @@ ipcMain.handle(DESKTOP_CHANNEL.invoke, async (event, method: BackendMethod, para
       windowRequests.delete(senderId);
     });
   }
+  if (backupBusy && method !== "http.cancel") throw new Error("Backup in progress; wait for it to finish");
   const streamId = (params as { streamId?: string } | null)?.streamId;
   if (method === "http.request" && streamId) owned.add(streamId);
   try {
@@ -1383,12 +1543,36 @@ ipcMain.handle(DESKTOP_CHANNEL.pickDirectory, async (_event, defaultPath?: strin
 });
 
 ipcMain.handle(DESKTOP_CHANNEL.restartBackend, async () => {
+  if (backupBusy) throw new Error("Backup in progress; wait for it to finish");
   await backend.restart();
 });
 
 // ---------------------------------------------------------------------------
 // lifecycle
 // ---------------------------------------------------------------------------
+
+// A crash can leave decrypted staging files behind. No existing files are moved
+// during restore, so these app-owned temporary directories can be removed safely
+// before the backend or any restored resource is loaded on the next launch.
+async function cleanInterruptedRestore(): Promise<void> {
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  const agentDir = configured
+    ? resolve(app.getPath("home"), configured === "~" ? homedir() : configured.startsWith("~/") || configured.startsWith("~\\")
+      ? join(homedir(), configured.slice(2)) : configured)
+    : join(homedir(), ".pi", "agent");
+  let entries;
+  try { entries = await readdir(agentDir, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!/^\.backup-restore-[a-zA-Z0-9]{6}$/.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const dir = join(agentDir, entry.name);
+    const state = await lstat(dir);
+    if (state.isDirectory() && !state.isSymbolicLink()) await rm(dir, { recursive: true, force: true });
+  }
+}
 
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) {
@@ -1398,7 +1582,8 @@ if (!singleInstance) {
     if (!quitting && app.isReady()) showMainWindow();
   });
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
+    await cleanInterruptedRestore();
     protocol.handle(APP_SCHEME, (request) => serveRequest(request));
     backend.start();
     installTray();
@@ -1420,6 +1605,9 @@ if (!singleInstance) {
     }
 
     app.on("activate", () => showMainWindow());
+  }).catch(() => {
+    dialog.showErrorBox("Pi Desktop", "Could not remove an interrupted restore's temporary files. Check the agent directory before restarting.");
+    app.quit();
   });
 
   app.on("window-all-closed", () => {

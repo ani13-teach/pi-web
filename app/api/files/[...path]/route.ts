@@ -448,9 +448,13 @@ export async function GET(
       }
     }
 
+    // Session references grant access to individual files, never directories.
+    if (stat?.isDirectory() && !allowedByRoot) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
     const existingAuthorizationPath = stat ? filePath : path.dirname(filePath);
     if (
-      !allowedBySessionReference
+      (!allowedBySessionReference || stat?.isDirectory())
       && !isExistingFilePathAllowed(existingAuthorizationPath, allowedRoots)
     ) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
@@ -501,14 +505,18 @@ export async function GET(
     }
 
     if (type === "meta") {
+      if (stat?.isDirectory()) {
+        return NextResponse.json({ isDir: true });
+      }
       if (!stat?.isFile()) {
-        return NextResponse.json({ error: "Not a file" }, { status: 400 });
+        return NextResponse.json({ error: "Not a file or directory" }, { status: 400 });
       }
       const imageMime = getImageMime(filePath);
       const audioMime = getAudioMime(filePath);
       const videoMime = getVideoMime(filePath);
       const documentMime = getDocumentMime(filePath);
       return NextResponse.json({
+        isDir: false,
         size: stat.size,
         language: getLanguage(filePath),
         mime: imageMime || audioMime || videoMime || documentMime || "text/plain",

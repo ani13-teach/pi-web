@@ -177,7 +177,7 @@
     const created = await fetch("/api/terminal", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: ".", cols: 80, rows: 24 }),
+      body: JSON.stringify({ cwd: window.__piSmokeWorkspace || ".", cols: 80, rows: 24 }),
     });
     const { id, error } = await created.json();
     if (!id) throw new Error(error ?? `terminal create failed (${created.status})`);
@@ -424,6 +424,40 @@
     const closed = await waitFor(() => !document.querySelector(".settings-dialog-surface"));
     if (!closed) throw new Error("the settings dialog stayed open");
     return `form widths ${widths.join(" / ")} px; switch rows reach the right edge; global timeout ${globalTimeout ?? "unset"}; ${fields} model pickers, ${labels.length} entries covering models.json; choosing one turned "${before || "empty"}" into "${after || "empty"}"`;
+  });
+
+  await record("the backup page requires a password and defaults to no private data", async () => {
+    const openButton = [...document.querySelectorAll("button[aria-label]")]
+      .find((button) => ["设置", "Settings", "設定"].includes(button.getAttribute("aria-label")));
+    if (!openButton) throw new Error("no settings button");
+    openButton.click();
+    const dialog = await waitFor(() => document.querySelector(".settings-dialog-surface"));
+    if (!dialog) throw new Error("settings dialog did not open");
+    const tab = [...dialog.querySelectorAll("button")]
+      .find((button) => ["备份", "Backup", "備份"].includes(button.textContent.trim()));
+    if (!tab) throw new Error("no backup tab");
+    tab.click();
+    const page = await waitFor(() => {
+      const heading = [...dialog.querySelectorAll("h2")]
+        .find((element) => ["备份", "Backup", "備份"].includes(element.textContent.trim()));
+      return heading?.parentElement ?? null;
+    });
+    if (!page) throw new Error("backup page did not load");
+    const privacy = page.querySelector('[role="switch"]');
+    if (privacy?.getAttribute("aria-checked") !== "false") throw new Error("private backup must default to no");
+    if (page.querySelectorAll('input[type="password"]').length !== 3)
+      throw new Error("export confirmation and import password inputs are missing");
+    const actions = [...page.querySelectorAll("button")].filter((button) =>
+      ["选择保存位置并导出", "Choose save location and export", "選擇儲存位置並匯出", "选择备份文件并预览", "Choose backup file and preview", "選擇備份檔案並預覽"].includes(button.textContent.trim()));
+    if (actions.length !== 2 || actions.some((button) => !button.disabled))
+      throw new Error("backup actions must require passwords");
+    privacy.click();
+    if (!await waitFor(() => page.querySelectorAll('[role="switch"]').length === 4))
+      throw new Error("private backup options are missing");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    if (!await waitFor(() => !document.querySelector(".settings-dialog-surface")))
+      throw new Error("settings dialog stayed open");
+    return "private backup defaults off; both actions require passwords; optional private categories appear only after consent";
   });
 
   return results;

@@ -12,10 +12,12 @@ function fileContentBlock() {
   return source.slice(start, end);
 }
 
-test("only the active file tab mounts a FileViewer", () => {
+test("only the active file tab mounts its explorer or content viewer", () => {
   const block = fileContentBlock();
-  assert.match(block, /activeFileTab\?\.filePath \? \(/);
+  assert.match(block, /activeFileTab\?\.filePath \? activeFileTab\.previewKind === "explorer" \? \(/);
+  assert.match(block, /<LinkedFileExplorer[\s\S]*?\) : \(\s*<FileViewer/);
   assert.doesNotMatch(block, /fileTabs\.map\(/);
+  assert.equal(block.match(/<LinkedFileExplorer/g)?.length, 1);
   assert.equal(block.match(/<FileViewer/g)?.length, 1);
 });
 
