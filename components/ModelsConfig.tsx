@@ -39,6 +39,7 @@ import {
   ConfigSidebarText,
   ConfigSplitView,
 } from "./SettingsUi";
+import { ModelLabel } from "./ModelLabel";
 import { ProviderIcon } from "./ProviderIcon";
 import { ProviderUsageSummary } from "./ProviderUsageSummary";
 
@@ -506,7 +507,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
                       style={{ width: 13, height: 13, accentColor: "var(--accent)", flexShrink: 0 }}
                     />
                     <span style={{ minWidth: 0, flex: 1 }}>
-                      <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 11 }}>{model.name ?? model.id}</span>
+                      <ModelLabel name={model.name || model.id} provider={name} style={{ display: "block", color: "var(--text)", fontSize: 11 }} />
                       {model.name && <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)" }}>{model.id}</code>}
                     </span>
                     {alreadyAdded && <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{t("models.discoveryAdded")}</span>}
@@ -2105,7 +2106,7 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
                           onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
                         >
                           <ConfigSidebarText className="is-grow" style={{ color: m.id ? "var(--text-muted)" : "var(--text-dim)" }}>
-                             {m.id || t("i18n.newModel")}
+                            {m.id ? <ModelLabel name={m.id} provider={pName} /> : t("i18n.newModel")}
                           </ConfigSidebarText>
                           {m.reasoning && (
                             <span style={{ fontSize: 9, padding: "1px 4px", background: "rgba(99,102,241,0.12)", color: "rgba(99,102,241,0.8)", borderRadius: 3, flexShrink: 0 }}>T</span>

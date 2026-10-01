@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import * as undici from "undici";
 
-export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000;
+export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 600_000;
 
 type DispatcherGlobal = typeof globalThis & {
   __piWebHttpDispatcherConfigured?: boolean;

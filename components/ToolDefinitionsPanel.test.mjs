@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { createJiti } from "jiti";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
+const { ToolDescription } = await jiti.import("./ToolDefinitionsPanel.tsx");
 
 const panelSource = await readFile(new URL("./ToolDefinitionsPanel.tsx", import.meta.url), "utf8");
 const systemSource = await readFile(new URL("./SystemPromptPanel.tsx", import.meta.url), "utf8");
@@ -30,6 +36,28 @@ test("shows schema fields and metadata in the detail form", () => {
   assert.match(panelSource, /field\.allowedValues/);
   assert.match(panelSource, /field\.defaultValue/);
   assert.match(panelSource, /selectedTool\.promptGuidelines/);
+});
+
+test("built-in Agent model descriptions display channels without mutating the registered text", () => {
+  const description = "Delegate a focused task to a configured subagent. Details.\n\nAvailable agent types:\n"
+    + "- reviewer: Review code (Tools: read, bash; Model: 哈尔/vendor/shared-id)\n"
+    + "- worker: Write code (Tools: edit; Model: legacy-id)";
+  const html = renderToStaticMarkup(React.createElement(ToolDescription, { name: "Agent", description }));
+  assert.match(html, /title="vendor\/shared-id \(哈尔\)"/);
+  assert.match(html, />\(哈尔\)<\/span>/);
+  assert.ok(html.includes("Model: legacy-id)"));
+  assert.ok(description.includes("Model: 哈尔/vendor/shared-id)"));
+  assert.ok(!description.includes("shared-id (哈尔)"));
+});
+
+test("ordinary tool and extension descriptions stay as original free text", () => {
+  for (const [name, description] of [
+    ["other", "Model: relay/model-id"],
+    ["Agent", "An external agent.\n- reviewer: Review (Tools: read; Model: relay/model-id)"],
+    ["read", "Delegate a focused task to a configured subagent.\n- reviewer: Review (Tools: read; Model: relay/model-id)"],
+  ]) {
+    assert.equal(renderToStaticMarkup(React.createElement(ToolDescription, { name, description })), description);
+  }
 });
 
 test("preserves the two-column layout on narrow screens", () => {

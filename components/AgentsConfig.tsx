@@ -5,6 +5,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/api-types";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { formatModelSpecLabel } from "@/lib/model-label";
 import type { ModelsData } from "@/lib/models-cache";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
@@ -606,7 +607,7 @@ export function AgentsConfig({
                           onChange={(provider, modelId) => update("model", `${provider}/${modelId}`)}
                           onClear={() => update("model", undefined)}
                           emptyLabel={modelsLoading ? t("agents.modelsLoading") : t("agents.inherit")}
-                          selectedLabel={draft.model && !selectedModelAvailable ? t("agents.modelUnavailable", { model: draft.model }) : undefined}
+                          selectedLabel={draft.model && !selectedModelAvailable ? t("agents.modelUnavailable", { model: formatModelSpecLabel(draft.model) }) : undefined}
                           disabled={disabled || modelsLoading || (modelOptions.length === 0 && !draft.model)}
                           ariaLabel={t("agents.model")}
                           variant="field"

@@ -35,7 +35,7 @@ test("updates a reused message when its written files change", () => {
   assert.equal(MessageView.compare(props, { ...props, writtenFiles: [{ path: "/tmp/result.txt" }] }), false);
 });
 
-test("matches response model aliases and otherwise includes the provider", () => {
+test("matches response model aliases and otherwise uses the model ID", () => {
   const names = {
     "gateway:claude-sonnet-5": "Sonnet 5",
     "custom-api:GLM-5.3": "GLM 5.3",
@@ -43,7 +43,24 @@ test("matches response model aliases and otherwise includes the provider", () =>
 
   assert.equal(getModelDisplayName("gateway", "anthropic/claude-sonnet-5", names), "Sonnet 5");
   assert.equal(getModelDisplayName("CUSTOM-API", "glm-5.3", names), "GLM 5.3");
-  assert.equal(getModelDisplayName("gateway", "unknown-model", names), "gateway/unknown-model");
+  assert.equal(getModelDisplayName("gateway", "unknown-model", names), "unknown-model");
+});
+
+test("model labels keep the message channel when the current configuration changes", () => {
+  const message = { role: "assistant", provider: "old-channel", model: "shared-id", content: [{ type: "text", text: "Historical answer" }] };
+  const html = renderMessage(message, { modelNames: {
+    "old-channel:shared-id": "Shared Model",
+    "new-channel:shared-id": "Other Model",
+  } });
+  assert.match(html, /title="Shared Model \(old-channel\)"/);
+  assert.match(html, />\(old-channel\)<\/span>/);
+  assert.doesNotMatch(html, /new-channel|Other Model/);
+  const unknown = renderMessage({ ...message, model: "missing-model" });
+  assert.match(unknown, /title="missing-model \(old-channel\)"/);
+  assert.doesNotMatch(unknown, /old-channel\/missing-model/);
+  const legacy = renderMessage({ ...message, provider: undefined });
+  assert.match(legacy, /title="shared-id"/);
+  assert.doesNotMatch(legacy, /\(undefined\)|old-channel/);
 });
 
 test("previews the first thinking line and reveals the full text with the saved default", () => {

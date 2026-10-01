@@ -58,7 +58,8 @@
     picker.click();
     const listbox = await waitFor(() => document.querySelector('[role="listbox"]'));
     if (!listbox) throw new Error("clicking the model field opened no list");
-    const labels = [...listbox.querySelectorAll('[role="option"]')].map((option) => option.innerText.trim());
+    const options = [...listbox.querySelectorAll('[role="option"]')];
+    const labels = options.map((option) => option.querySelector("span[title]")?.title ?? option.innerText.trim());
     if (labels.length < 2) throw new Error(`the picker offers ${labels.length} entries`);
 
     // Every model of every provider in models.json has to be on that list, which
@@ -71,7 +72,12 @@
       for (const model of Array.isArray(provider?.models) ? provider.models : []) {
         if (typeof model?.id !== "string" || !model.id.trim()) continue;
         const name = typeof model.name === "string" && model.name.trim() ? model.name.trim() : model.id.trim();
-        if (!labels.includes(name)) missing.push(`${providerId}/${model.id}`);
+        const expectedLabel = `${name} (${providerId})`;
+        const match = options.find((option) => option.querySelector("span[title]")?.title === expectedLabel);
+        // The tooltip alone must not pass: verify the channel is visible too.
+        if (!match || match.querySelector("span[title]")?.lastElementChild?.textContent.trim() !== `(${providerId})`) {
+          missing.push(`${providerId}/${model.id}`);
+        }
       }
     }
     if (missing.length > 0) throw new Error(`models.json entries missing from the picker: ${missing.join(", ")}`);
@@ -81,8 +87,7 @@
     // first one that says something else.
     const saveLabels = ["保存", "Save", "儲存"];
     const before = picker.innerText.trim();
-    const choices = [...listbox.querySelectorAll('[role="option"]')]
-      .filter((option) => option.innerText.trim() !== before);
+    const choices = options.filter((option) => option.innerText.trim() !== before);
     if (choices.length === 0) throw new Error(`the picker only offers the current value (${before || "empty"})`);
     choices[0].click();
     const after = await waitFor(() => {

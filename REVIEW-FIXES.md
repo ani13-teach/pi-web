@@ -4,6 +4,38 @@
 `lib/`、`components/`、`hooks/`、`app/api/`、`public/` 和两份上游 CSS 在当时保持逐字节一致
 （后来的自动模式一轮改动了其中 5 个文件，见本文最后一段）。
 
+## 模型名称统一展示渠道
+
+- 新增 `components/ModelLabel.tsx`、`lib/model-label.ts`，统一展示「模型名 (渠道名)」，提供灰色渠道与完整悬停文字。普通行和收藏行均带渠道；收起按钮同样展示，保持收藏交互和 provider/modelId 身份不变。
+- 覆盖回复标签、模型管理列表、子代理/自动模式模型提示、图片能力提示、MiniMax 模型用量和内置 Agent 工具说明。历史回复取消息自身的渠道；名称查不到时回退 ID，不重复拼渠道。`ChatInput` 兼容模型映射的 `provider:id` 键，不再把其他渠道误认成当前渠道。
+- 未知渠道、默认/继承和未命名新模型不硬补渠道。配置输入值、模型请求、注册的 Agent 描述、聊天正文和外部扩展自由文字保持原样。模型不可用提示只格式化显示；MiniMax 旧缓存兼容仅针对模型分组，不给其他配额组加渠道。
+- 代码审查发现工具说明中的长标签可能横向溢出，已改为允许换行，并增加窄容器 Chromium 检查。
+- 图片能力提示回归使用组件实际共享的 draft store，避免 Node 24 的 native ESM 与 jiti require 产生两个独立存储实例；保留图片渲染及警告断言。
+- 定向检查：`node --experimental-strip-types --test components/ModelLabel.test.mjs components/MessageView.test.mjs components/ChatInput.test.mjs components/ToolDefinitionsPanel.test.mjs tests/model-config-labels.test.mjs components/ModelsConfig.test.mjs components/AgentsConfig.test.mjs lib/provider-usage.test.mjs tests/automode-panel.test.mjs tests/automode-model-options.test.mjs lib/model-favorites.test.mjs`，127/127，退出 0；日志 `.tmp-model-channel-unit.log`。
+- 隔离 Chromium 交互：`node tests/model-selector-favorites.mjs`，33/33，退出 0；覆盖普通行/收藏行/收起按钮的渠道、长工具标签换行及既有收藏交互，无模型请求；日志 `.tmp-model-channel-browser.log`。
+- `npm run typecheck`、`npm run build` 退出 0。开发版窗口首轮 20/21：自动模式探针仍匹配旧的纯模型名；更新 `desktop/smoke-probe.js` 为同时核对完整标题及可见渠道，没有删除检查。探针定向回归 `node --test tests/smoke-model-labels.test.mjs`，4/4，退出 0；再次 `npm run build:desktop` 退出 0。
+- 开发版 `dist/` 的 `scripts/smoke-window.mjs --project C:/Users/jch/pi-desktop`（等同 `npm run test:window` 的检查入口）使用临时独立用户数据目录和工作目录，最终 21/21，后置 3/3，退出 0；日志 `.tmp-model-channel-window.log`。夹具与临时目录已清理。未做真实模型聊天测试；源码修改阶段未打包、安装、提交，也未修改已安装版本。
+
+### 模型渠道展示安装包
+
+- 用户随后授权打包。`npm run package` 退出 0；日志 `.tmp-package-model-channels.log`。安装包 `release/Pi Desktop Setup 0.0.6.exe`，140876853 字节，修改时间 `2026-10-01T06:37:23.561Z`；SHA-256 `1768e65cd5fd597d721211ae3d029e83b5bdbd0bf6f56990a8cae82d53482ad7`。包含当前源码中的模型渠道展示与收藏功能。
+- `release/win-unpacked` 修改时间 `2026-10-01T06:36:22.763Z`；`resources/app.asar` 修改时间 `2026-10-01T06:36:21.865Z`，8017151 字节。
+- 打包版窗口检查：`scripts/smoke-window.mjs --binary <release/win-unpacked/Pi Desktop.exe> --isolate --project C:/Users/jch/pi-desktop`（`test:window:packaged` 的相同入口），仓库外隔离副本 21/21、后置 3/3，退出 0；日志 `.tmp-window-model-channels-packaged.log` 包含 `isolated copy:`。检查使用独立临时用户数据与工作目录，夹具和临时目录已清理。
+- 未做打包版真实模型聊天测试，未安装或提交，不修改用户当前已安装版本。
+
+## 模型收藏置顶
+
+- `components/ModelSelector.tsx` 每个模型增加独立星标按钮，收藏后只在顶部「★ 收藏」展示一次，附渠道名；取消回原分组。搜索先筛选再分组，无收藏或无匹配收藏时隐藏收藏区。
+- `lib/model-favorites.ts` 用 provider/modelId 二元身份区分模型，安全读取、去重与写入本机 `pi-model-favorites`；坏数据或存储不可用不阻断选模型，暂不可选的收藏保留记录。
+- `hooks/useModelFavorites.ts` 同步当前窗口各选择器及其他同源窗口的存储变化，不修改模型配置或会话。中英、简繁文案均已补充。
+- 星标与模型名称是两个相邻按钮，点星标不触发模型选择，也不关闭列表。跨分组移动后恢复到同一模型星标的焦点，键盘 Enter/Space 和 Escape 可连续使用。
+- 存储及共享选择器兼容回归：`node --experimental-strip-types --test lib/model-favorites.test.mjs components/AgentsConfig.test.mjs`，29/29，退出 0（存储 11 项、AgentsConfig 18 项）。
+- 实际浏览器交互：`node tests/model-selector-favorites.mjs`，29/29，退出 0；使用实际 React 组件、临时模型与独立 Electron 数据目录，覆盖收藏/取消、去重、渠道独立、同窗口同步、搜索、全收藏、名字选择、默认值、禁用、reload 持久化、键盘焦点及 Escape，无模型请求或监听端口。
+- `components/ChatInput.test.mjs` 中选择器显示、切换中锁定、筛选和禁用 field 的 4 项定向回归通过，退出 0。
+- `npm run typecheck`、`npm run build`：退出 0。开发版 `dist/` 的 `npm run test:window`（临时独立用户数据目录）：21/21，后置 3/3，退出 0；测试夹具与临时目录已清理。
+- 按用户要求生成安装包，不代为安装：`npm run package` 退出 0，日志 `.tmp-package-model-favorites.log`。产物 `release/Pi Desktop Setup 0.0.6.exe`，140876389 字节，修改时间 `2026-10-01T04:59:24.980Z`；SHA-256 `0f4d71a53304be64ec102b0a8040c2d86b80ebfde968531463c2d970bce6ad14`。`release/win-unpacked/resources/app.asar` 修改时间 `2026-10-01T04:58:31.540Z`。
+- `npm run test:window:packaged` 对仓库外隔离副本检查：21/21，后置 3/3，退出 0；日志 `.tmp-window-model-favorites-packaged.log` 含 `isolated copy:`，测试夹具与临时数据目录已清理。本轮未进行打包版真实模型聊天检查，未安装或修改已安装版本。
+
 ## 会话列表刷新按钮
 
 - 在「新建」左侧增加刷新图标按钮，点击调用 `window.location.reload()`。
@@ -305,3 +337,22 @@ SHA-256 `cad36d4d895ca7377ad7f5ad8e09a6a1b7cf1a1ffcfa34b01035fe213f54e66f`（07:
 ## 运行中的子代理过程默认折叠
 
 主会话此前跳过运行中轮次的「过程详情」分组，因此 Agent 工具调用虽自身折叠，整个过程仍逐条展开；只有父代理完成后才收起。现在含 Agent 调用的运行中轮次也使用同一个过程分组，默认折叠，允许手动展开；流式生成的新工具调用也放进组内。未使用子代理的运行中轮次保持原来的展示方式。
+
+## HTTP 空闲超时调整为 10 分钟
+
+- `lib/http-dispatcher.ts` 的默认值由 `300_000` 改为 `600_000`；环境变量代理、系统代理和直连的响应头等待及响应体空闲超时均沿用此值。未改 IPC 租约或中转站配置。
+- `lib/http-dispatcher.test.mjs` 增加默认值回归断言，README 同步说明。构建产物 `dist/main/backend.mjs` 已核对为 `6e5`。
+- `node --experimental-strip-types --test lib/http-dispatcher.test.mjs tests/system-proxy.test.mjs`：6/6，退出码 0；`npm run typecheck`、`npm run build`：退出码 0。
+- 开发版 `npm run test:window`（独立用户数据目录）：21/21，后置 3 项通过，退出码 0。
+- 用独立临时 agent 配置、新构建后台及系统代理判定，对 `澄枢云/gpt-6.1-sol`（high）做一次无工具长文本复测：274574 毫秒，900 行逐条校验正确，31416 字符，9057 输出 token，最终标记及正常结束事件均收到，无 `terminated`。这次不足 5 分钟，不能证明原来的断流问题已解决。
+- 复测脚本在模型完成后删除正在使用的 Electron 用户数据目录时报 EPERM，未正常退出，外层命令超时；随后按 PID、可执行路径及测试脚本名确认并只停止本次测试进程，清理本次临时目录和脚本，清理命令退出码 0。模型完成结果与脚本退出状态分开记录。
+- 此次源码复测时未重新打包、安装或重启用户实例；安装版更新见下节。
+
+### 用户要求更新安装版
+
+- `npm run package` 退出码 0。安装包：`release/Pi Desktop Setup 0.0.6.exe`，140875008 字节，SHA-256 `294211e30360c900afc146847d7aa4eb6a3ed51a92c9762bd5845c14266a3130`。
+- 包内后台确认默认超时为 `6e5`，后台 SHA-256 `db84d686ce0285b48bf4cea8f9a1fa7c763dd04ab6c091581530c454e84f95f6`。
+- `npm run test:window:packaged`：仓库外副本 21/21，后置 3 项通过，退出码 0。此次未重新做模型长回复复测。
+- 用户明确授权安装；当前实例仍在使用，因此安排一次性等待安装，最多等待 30 分钟。用户从托盘「完全退出」且安装路径下没有剩余应用进程后才执行 `/S` 安装；不强关用户实例，不修改会话、密钥或自动更新配置。
+- 安装前校验安装包哈希，安装后检查退出码、已安装后台哈希与 600000 毫秒设置，随后重新打开应用。此处记录的是安排，不是已安装成功。
+- 状态凭据：`C:/Users/jch/AppData/Local/Temp/pi-timeout-install-294211e3.json`；安装等待脚本及日志位于同目录同名前缀。Windows 原生启动方式已确认等待进程 PID 12004 正在运行，状态为 `waiting_for_exit`；首次 Node detached 启动未持续运行，未执行安装。

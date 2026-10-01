@@ -6,6 +6,8 @@ import { MarkdownBody } from "./MarkdownBody";
 import type { LocalFileOpenHandler } from "@/lib/file-links";
 import { ImagePreview } from "./ImagePreview";
 import { ThinkingIcon } from "./ThinkingIcon";
+import { ModelLabel } from "./ModelLabel";
+import { getModelName } from "@/lib/model-label";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
@@ -211,18 +213,7 @@ export function getModelDisplayName(
   responseModel: string,
   modelNames?: Record<string, string>,
 ): string {
-  const normalizedProvider = provider.toLowerCase();
-  const normalizedResponse = responseModel.toLowerCase();
-  const configured = Object.entries(modelNames ?? {}).flatMap(([key, name]) => {
-    const separator = key.indexOf(":");
-    return separator > 0 && key.slice(0, separator).toLowerCase() === normalizedProvider
-      ? [{ id: key.slice(separator + 1).toLowerCase(), name }]
-      : [];
-  });
-  return configured.find((model) => model.id === normalizedResponse)?.name
-    ?? configured.find((model) => normalizedResponse.endsWith(`/${model.id}`))?.name
-    ?? Object.entries(modelNames ?? {}).find(([key]) => key.toLowerCase() === normalizedResponse)?.[1]
-    ?? `${provider}/${responseModel}`;
+  return getModelName(provider, responseModel, modelNames);
 }
 
 function formatTime(ts?: number): string | null {
@@ -768,8 +759,8 @@ function AssistantMessageView({
           gap: 6,
         }}
       >
-        {message.provider && (
-          <span>{getModelDisplayName(message.provider, message.model, modelNames)}</span>
+        {message.model && (
+          <ModelLabel name={getModelDisplayName(message.provider, message.model, modelNames)} provider={message.provider} />
         )}
         {isStreaming && (() => {
           const est = Math.round(estimatedTokens);

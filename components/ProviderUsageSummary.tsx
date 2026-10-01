@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { isProviderUsageId } from "@/lib/provider-usage-ids";
+import { ModelLabel } from "./ModelLabel";
 
 type UsageBucket = {
   id: string;
   label: string;
   groupLabel?: string;
+  modelName?: string;
   used?: number;
   remaining?: number;
   limit?: number;
@@ -23,6 +25,15 @@ type UsageReport = { capturedAt: number; buckets: UsageBucket[]; metrics: UsageM
 type UsageResponse = { providerId: string; status: "ready" | "auth-unavailable" | "query-failed"; report?: UsageReport; message?: string };
 
 const STORAGE_PREFIX = "pi-web:provider-usage:";
+
+export function getUsageBucketModelName(bucket: UsageBucket, providerId: string): string | undefined {
+  if (bucket.modelName) return bucket.modelName;
+  // Older MiniMax cache entries stored model names in groupLabel. Its only
+  // non-model fallback was "Quota N"; other providers use real quota groups.
+  if ((providerId === "minimax" || providerId === "minimax-cn")
+    && bucket.groupLabel && !/^Quota \d+$/.test(bucket.groupLabel)) return bucket.groupLabel;
+  return undefined;
+}
 
 export function ProviderUsageSummary({ providerId, enabled }: { providerId: string; enabled: boolean }) {
   if (!isProviderUsageId(providerId)) return null;
@@ -118,7 +129,11 @@ function ProviderUsageContent({ providerId, enabled }: { providerId: string; ena
         <div style={{ display: "grid", gridTemplateColumns: "180px minmax(0, 1fr)", columnGap: 14, rowGap: 8, alignItems: "baseline", minWidth: 0, width: "min(100%, 420px)", maxWidth: "100%", fontSize: 12 }}>
           {report.buckets.map((bucket) => (
             <div key={bucket.id} style={{ display: "contents" }}>
-              <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{bucket.groupLabel ? `${bucket.groupLabel} / ${bucket.label}` : bucket.label}</span>
+              <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {getUsageBucketModelName(bucket, providerId)
+                  ? <><ModelLabel name={getUsageBucketModelName(bucket, providerId)!} provider={providerId} /> / {bucket.label}</>
+                  : bucket.groupLabel ? `${bucket.groupLabel} / ${bucket.label}` : bucket.label}
+              </span>
               <span style={{ color: "var(--text)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{formatBucket(bucket, t("providerUsage.available"))}</span>
             </div>
           ))}

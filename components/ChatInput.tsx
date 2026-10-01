@@ -28,6 +28,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
+import { formatModelLabel } from "@/lib/model-label";
 
 export { filterModelOptions } from "./ModelSelector";
 
@@ -1512,11 +1513,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (modelList && modelList.length > 0) {
       return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }));
     }
-    return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
-      provider: model?.provider ?? "unknown",
-      modelId,
-      name,
-    }));
+    return Object.entries(modelNames ?? {}).map(([key, name]) => {
+      const separator = key.indexOf(":");
+      return {
+        provider: separator > 0 ? key.slice(0, separator) : model?.provider ?? "",
+        modelId: separator > 0 ? key.slice(separator + 1) : key,
+        name,
+      };
+    });
   })();
 
   const compactSavedTokens = compactResult
@@ -1597,7 +1601,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             <ModelNoticeBanner
               tone="warning"
               title={t("chat.imageNotSupportedTitle")}
-              body={t("chat.imageNotSupportedBody", { model: entry?.name || model?.modelId || "" })}
+              body={t("chat.imageNotSupportedBody", { model: formatModelLabel(entry?.name || model?.modelId || "", model?.provider) })}
               onClose={() => setImageWarningDismissed(true)}
             />
           );

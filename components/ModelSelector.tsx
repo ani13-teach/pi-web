@@ -3,6 +3,10 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useModelFavorites } from "@/hooks/useModelFavorites";
+import { modelFavoriteKey } from "@/lib/model-favorites";
+import { formatModelLabel } from "@/lib/model-label";
+import { ModelLabel } from "./ModelLabel";
 
 export interface ModelSelectorOption {
   provider: string;
@@ -64,8 +68,10 @@ export function ModelSelector({
 }: ModelSelectorProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
+  const { favorites, toggleFavorite } = useModelFavorites();
   const rootRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const favoriteFocusRef = useRef<string | null>(null);
   const [open, setOpen] = useState(false);
   const [anchorRect, setAnchorRect] = useState<{ top: number; right: number; bottom: number; left: number; width: number } | null>(null);
   const [filter, setFilter] = useState("");
@@ -73,17 +79,41 @@ export function ModelSelector({
   const sortedOptions = useMemo(() => [...options].sort(compareModelOptions), [options]);
   const filteredOptions = filterModelOptions(sortedOptions, filter);
   const showFilter = sortedOptions.length > MODEL_FILTER_THRESHOLD;
+  const favoriteKeys = new Set(favorites.map(modelFavoriteKey));
+  const favoriteOptions = filteredOptions.filter((option) => favoriteKeys.has(modelFavoriteKey(option)));
   const modelsByProvider: { provider: string; options: ModelSelectorOption[] }[] = [];
 
   for (const option of filteredOptions) {
+    if (favoriteKeys.has(modelFavoriteKey(option))) continue;
     const group = modelsByProvider.find((item) => item.provider === option.provider);
     if (group) group.options.push(option);
     else modelsByProvider.push({ provider: option.provider, options: [option] });
   }
 
+  const renderOption = (option: ModelSelectorOption, favorite: boolean) => (
+    <ModelOptionButton
+      key={modelFavoriteKey(option)}
+      active={option.modelId === value?.modelId && option.provider === value?.provider}
+      label={option.name}
+      providerLabel={option.provider}
+      favorite={favorite}
+      favoriteKey={modelFavoriteKey(option)}
+      favoriteTitle={t(favorite ? "chat.unfavoriteModel" : "chat.favoriteModel")}
+      onToggleFavorite={(restoreFocus) => {
+        favoriteFocusRef.current = restoreFocus ? modelFavoriteKey(option) : null;
+        toggleFavorite(option);
+      }}
+      onClick={() => choose(option)}
+    />
+  );
+
   const currentName = selectedLabel ?? (value
     ? sortedOptions.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
     : emptyLabel ?? (sortedOptions.length > 0 ? "Select model" : "No models"));
+
+  // A custom label (e.g. an unavailable-model notice) is already formatted.
+  const currentProvider = selectedLabel === undefined ? value?.provider : undefined;
+  const currentLabel = formatModelLabel(currentName, currentProvider);
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -98,6 +128,16 @@ export function ModelSelector({
     document.addEventListener("mousedown", handleOutsideClick);
     return () => document.removeEventListener("mousedown", handleOutsideClick);
   }, []);
+
+  useEffect(() => {
+    const key = favoriteFocusRef.current;
+    if (key === null) return;
+    favoriteFocusRef.current = null;
+    // Moving between groups remounts the row. Keep keyboard focus on its star.
+    const button = [...(panelRef.current?.querySelectorAll<HTMLButtonElement>("[data-model-favorite-key]") ?? [])]
+      .find((item) => item.dataset.modelFavoriteKey === key);
+    button?.focus({ preventScroll: true });
+  }, [favorites]);
 
   useEffect(() => {
     if (!locked) return;
@@ -170,7 +210,7 @@ export function ModelSelector({
         aria-expanded={open}
         aria-busy={busy || undefined}
         disabled={locked}
-        title={busy ? "Switching model" : locked ? currentName : sortedOptions.length > 0 || onClear ? titleText ?? "Change model" : "No available models"}
+        title={busy ? `Switching model: ${currentLabel}` : locked ? currentLabel : sortedOptions.length > 0 || onClear ? `${titleText ?? "Change model"}: ${currentLabel}` : "No available models"}
         style={buttonStyle}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -209,7 +249,7 @@ export function ModelSelector({
             <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
           </svg>
         )}
-        <span style={{
+        <ModelLabel name={currentName} provider={currentProvider} style={{
           flex: 1,
           minWidth: 0,
           overflow: "hidden",
@@ -221,7 +261,7 @@ export function ModelSelector({
           // wider than the pane itself, because its rows size to their minimum
           // content. The toolbar keeps its own width, clamped by maxWidth instead.
           ...(variant === "field" ? { width: 0 } : {}),
-        }}>{currentName}</span>
+        }} />
         {variant === "field" && (
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }}>
             <polyline points="6 9 12 15 18 9" />
@@ -297,25 +337,26 @@ export function ModelSelector({
                   onClear();
                 }} />
               )}
-              {modelsByProvider.length === 0 ? (
+              {favoriteOptions.length > 0 && (
+                <div data-model-favorites>
+                  <div style={{ padding: "6px 12px 4px", borderTop: onClear ? "1px solid var(--border)" : "none", color: "var(--text-dim)", fontSize: 10, fontWeight: 600 }}>
+                    ★ {t("chat.favoriteModels")}
+                  </div>
+                  {favoriteOptions.map((option) => renderOption(option, true))}
+                </div>
+              )}
+              {filteredOptions.length === 0 ? (
                 <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
                   {filter.trim() ? t("chat.noMatchingModels") : "No available models"}
                 </div>
               ) : modelsByProvider.map((group, index) => (
                 <div key={group.provider}>
-                  {modelsByProvider.length > 1 && (
-                    <div style={{ padding: "6px 12px 4px", borderTop: index > 0 || onClear ? "1px solid var(--border)" : "none", color: "var(--text-dim)", fontSize: 10, fontWeight: 600, letterSpacing: 0, textTransform: "uppercase" }}>
+                  {(modelsByProvider.length > 1 || favoriteOptions.length > 0) && (
+                    <div style={{ padding: "6px 12px 4px", borderTop: index > 0 || onClear || favoriteOptions.length > 0 ? "1px solid var(--border)" : "none", color: "var(--text-dim)", fontSize: 10, fontWeight: 600, letterSpacing: 0, textTransform: "uppercase" }}>
                       {group.provider}
                     </div>
                   )}
-                  {group.options.map((option) => (
-                    <ModelOptionButton
-                      key={`${option.provider}:${option.modelId}`}
-                      active={option.modelId === value?.modelId && option.provider === value?.provider}
-                      label={option.name}
-                      onClick={() => choose(option)}
-                    />
-                  ))}
+                  {group.options.map((option) => renderOption(option, false))}
                 </div>
               ))}
             </div>
@@ -326,21 +367,47 @@ export function ModelSelector({
   );
 }
 
-function ModelOptionButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+function ModelOptionButton({ active, label, providerLabel, favorite, favoriteKey, favoriteTitle, onToggleFavorite, onClick }: {
+  active: boolean;
+  label: string;
+  providerLabel?: string;
+  favorite?: boolean;
+  favoriteKey?: string;
+  favoriteTitle?: string;
+  onToggleFavorite?: (restoreFocus: boolean) => void;
+  onClick: () => void;
+}) {
   return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={active}
-      onClick={onClick}
-      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 12px", border: "none", background: active ? "var(--bg-selected)" : "none", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: active ? 600 : 400, textAlign: "left", whiteSpace: "nowrap" }}
-      onMouseEnter={(event) => { if (!active) event.currentTarget.style.background = "var(--bg-hover)"; }}
-      onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = "none"; }}
-    >
-      {active
-        ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-        : <span style={{ width: 10, flexShrink: 0 }} />}
-      <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
-    </button>
+    <div style={{ display: "flex", alignItems: "stretch", background: active ? "var(--bg-selected)" : "none" }}>
+      <button
+        type="button"
+        role="option"
+        aria-selected={active}
+        onClick={onClick}
+        style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, padding: "7px 12px", border: "none", background: active ? "var(--bg-selected)" : "none", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: active ? 600 : 400, textAlign: "left", whiteSpace: "nowrap" }}
+        onMouseEnter={(event) => { if (!active) event.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = "none"; }}
+      >
+        {active
+          ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+          : <span style={{ width: 10, flexShrink: 0 }} />}
+        <ModelLabel name={label} provider={providerLabel} />
+      </button>
+      {onToggleFavorite && (
+        <button
+          type="button"
+          aria-label={`${favoriteTitle}: ${formatModelLabel(label, providerLabel)}`}
+          aria-pressed={favorite}
+          data-model-favorite-key={favoriteKey}
+          title={favoriteTitle}
+          onClick={(event) => onToggleFavorite(document.activeElement === event.currentTarget)}
+          style={{ flexShrink: 0, width: 32, padding: "5px", border: "none", background: "none", color: favorite ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", fontSize: 18, lineHeight: 1 }}
+          onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; }}
+          onMouseLeave={(event) => { event.currentTarget.style.background = "none"; }}
+        >
+          <span aria-hidden="true">{favorite ? "★" : "☆"}</span>
+        </button>
+      )}
+    </div>
   );
 }

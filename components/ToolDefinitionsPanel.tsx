@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { ToolEntry } from "@/lib/tool-presets";
+import { splitModelLabelSpec } from "@/lib/model-label";
+import { ModelLabel } from "./ModelLabel";
 
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 
@@ -91,6 +93,25 @@ export function getToolParameterFields(parameters?: Record<string, unknown>): Pa
   });
 }
 
+// Only the built-in Agent's generated profile rows are model labels. Keep the
+// registered tool description (and all arbitrary extension text) unchanged.
+export function ToolDescription({ name, description }: { name: string; description: string }) {
+  if (name !== "Agent" || !description.startsWith("Delegate a focused task to a configured subagent.")) {
+    return <>{description}</>;
+  }
+  return <>{description.split("\n").map((line, index) => {
+    const toolsAt = line.indexOf(" (Tools: ");
+    const modelAt = line.lastIndexOf("; Model: ");
+    const isProfile = line.startsWith("- ") && toolsAt > 0 && modelAt > toolsAt && line.endsWith(")");
+    const spec = isProfile ? line.slice(modelAt + 9, -1) : "";
+    const model = splitModelLabelSpec(spec);
+    return <Fragment key={index}>
+      {index > 0 && "\n"}
+      {isProfile && model.provider ? <>{line.slice(0, modelAt + 9)}<ModelLabel name={model.name} provider={model.provider} style={{ whiteSpace: "normal", overflowWrap: "anywhere" }} />)</> : line}
+    </Fragment>;
+  })}</>;
+}
+
 function EmptyState({ children }: { children: string }) {
   return <div className="tool-definitions-empty">{children}</div>;
 }
@@ -143,7 +164,7 @@ export function ToolDefinitionsPanel({ loading, tools, translate }: Props) {
             {selectedTool.description && (
               <section className="tool-definition-section">
                 <div className="tool-definition-section-label">{translate("tools.description")}</div>
-                <div className="tool-definition-description">{selectedTool.description}</div>
+                <div className="tool-definition-description"><ToolDescription name={selectedTool.name} description={selectedTool.description} /></div>
               </section>
             )}
 

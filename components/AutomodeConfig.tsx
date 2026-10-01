@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { formatModelSpecLabel } from "@/lib/model-label";
 import {
   buildPatch,
   changedKeys,
@@ -301,7 +302,7 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                 </div>
                 {!draft.classifierModel.trim() && effective.classifierModel && (
                   <p className="settings-general-description">
-                    {t("automode.inheritedModel", { model: effective.classifierModel })}
+                    {t("automode.inheritedModel", { model: formatModelSpecLabel(effective.classifierModel) })}
                   </p>
                 )}
                 <ResultLine result={results.primary} />
@@ -514,7 +515,7 @@ function ModelSpecField({ label, value, options, loading, emptyLabel, onChange }
   const selectedLabel = !loading && current && !options.some(
     (option) => modelSpecOf(option.provider, option.modelId) === current,
   )
-    ? t("automode.modelUnavailable", { model: current })
+    ? t("automode.modelUnavailable", { model: formatModelSpecLabel(current) })
     : undefined;
 
   if (!loading && options.length === 0) {

@@ -12,6 +12,7 @@ export interface UsageBucket {
   id: string;
   label: string;
   groupLabel?: string;
+  modelName?: string;
   used?: number;
   remaining?: number;
   limit?: number;
@@ -296,8 +297,10 @@ function addMiniMaxWindow(buckets: UsageBucket[], row: Record<string, unknown>, 
   const end = number(row[endField]);
   const start = number(row[startField]);
   const percent = nonnegative(row[percentField]);
+  const modelName = stringValue(row.model_name);
+  const modelLabel = modelName ? { modelName } : {};
   if (status === 3) {
-    buckets.push({ id: `${groupLabel}:${suffix}`, label: suffix === "weekly" ? "Weekly" : "Rolling", groupLabel, remaining: 100, unit: "percent", period: "Unlimited" });
+    buckets.push({ id: `${groupLabel}:${suffix}`, label: suffix === "weekly" ? "Weekly" : "Rolling", groupLabel, ...modelLabel, remaining: 100, unit: "percent", period: "Unlimited" });
     return;
   }
   const total = nonnegativeInteger(row[totalField]);
@@ -312,10 +315,10 @@ function addMiniMaxWindow(buckets: UsageBucket[], row: Record<string, unknown>, 
       const asUsed = (total - count) / total * 100;
       if (Math.abs(asUsed - percent) < Math.abs(asRemaining - percent)) remaining = total - count;
     }
-    buckets.push({ id: `${groupLabel}:${suffix}`, label: suffix === "weekly" ? "Weekly" : "Rolling", groupLabel, used: total - remaining, remaining, limit: total, unit: "count", ...(windowMinutes ? { windowMinutes } : {}), ...(resetsAt ? { resetsAt } : {}) });
+    buckets.push({ id: `${groupLabel}:${suffix}`, label: suffix === "weekly" ? "Weekly" : "Rolling", groupLabel, ...modelLabel, used: total - remaining, remaining, limit: total, unit: "count", ...(windowMinutes ? { windowMinutes } : {}), ...(resetsAt ? { resetsAt } : {}) });
     return;
   }
-  buckets.push({ id: `${groupLabel}:${suffix}`, label: suffix === "weekly" ? "Weekly" : "Rolling", groupLabel, used: 100 - clamp(percent!), remaining: clamp(percent!), limit: 100, unit: "percent", ...(windowMinutes ? { windowMinutes } : {}), ...(resetsAt ? { resetsAt } : {}) });
+  buckets.push({ id: `${groupLabel}:${suffix}`, label: suffix === "weekly" ? "Weekly" : "Rolling", groupLabel, ...modelLabel, used: 100 - clamp(percent!), remaining: clamp(percent!), limit: 100, unit: "percent", ...(windowMinutes ? { windowMinutes } : {}), ...(resetsAt ? { resetsAt } : {}) });
 }
 
 function windowLabel(seconds: number | undefined): string {

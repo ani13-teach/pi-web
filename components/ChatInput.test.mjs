@@ -13,7 +13,10 @@ const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, modelSupportsImageInput, replaceLinksWithMarkdown, shouldCompressImageFile } = await jiti.import("./ChatInput.tsx");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
-const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store.ts");
+const { formatModelLabel } = await jiti.import("@/lib/model-label.ts");
+// The transformed component uses require; share its store instead of creating
+// a separate native ESM instance of this stateful module on Node 24.
+const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = jiti("@/lib/draft-store");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 test("preserves pasted HTML links as Markdown without changing plain text layout", () => {
@@ -312,11 +315,37 @@ test("shows and locks the optimistic model while a switch is pending", () => {
     ),
   );
 
-  assert.match(html, /title="Switching model"/);
+  assert.match(html, /title="Switching model: DeepSeek V4 Flash \(deepseek\)"/);
   assert.match(html, /aria-busy="true"/);
   assert.match(html, /disabled=""/);
   assert.match(html, />DeepSeek V4 Flash</);
   assert.match(html, /animation:spin 0\.8s linear infinite/);
+});
+
+test("fallback model names use each keyed channel instead of the current channel", () => {
+  for (const [provider, expected] of [["哈尔", "Model A (哈尔)"], ["openai-codex", "Model B (openai-codex)"]]) {
+    const html = renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(ChatInput, {
+      onSend() {}, onAbort() {}, onModelChange() {}, isStreaming: false,
+      model: { provider, modelId: "shared-id" },
+      modelNames: { "哈尔:shared-id": "Model A", "openai-codex:shared-id": "Model B" },
+    })));
+    assert.ok(html.includes(`title="${expected}"`));
+    assert.ok(html.includes(`>(${provider})</span>`));
+  }
+});
+
+test("image unsupported notice formats only its model display value", () => {
+  const source = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findNotice(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === "t" && node.arguments[0]?.getText(source) === '"chat.imageNotSupportedBody"') return node;
+    return ts.forEachChild(node, findNotice);
+  }
+  const script = new Script(ts.transpileModule(findNotice(source).getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText);
+  const model = Object.freeze({ provider: "哈尔", modelId: "shared-id" });
+  const entry = Object.freeze({ name: "Shared Model" });
+  const notice = script.runInNewContext({ t: (key, params) => params.model, formatModelLabel, model, entry });
+  assert.equal(notice, "Shared Model (哈尔)");
+  assert.deepEqual(model, { provider: "哈尔", modelId: "shared-id" });
 });
 
 test("filters model options by name and id", () => {
@@ -691,7 +720,7 @@ test("renders image warnings for known text-only defaults without an explicit mo
       assert.match(html, /<img/);
       assert.equal(html.includes("Images may not be sent"), warningExpected, `default model: ${modelId}`);
       if (warningExpected) {
-        assert.match(html, /The selected model \(Text Only\) does not support image input/);
+        assert.match(html, /The selected model \(Text Only \(custom\)\) does not support image input/);
         assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
       }
     }
