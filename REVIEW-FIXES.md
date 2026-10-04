@@ -338,6 +338,20 @@ SHA-256 `cad36d4d895ca7377ad7f5ad8e09a6a1b7cf1a1ffcfa34b01035fe213f54e66f`（07:
 
 主会话此前跳过运行中轮次的「过程详情」分组，因此 Agent 工具调用虽自身折叠，整个过程仍逐条展开；只有父代理完成后才收起。现在含 Agent 调用的运行中轮次也使用同一个过程分组，默认折叠，允许手动展开；流式生成的新工具调用也放进组内。未使用子代理的运行中轮次保持原来的展示方式。
 
+## HTTP 空闲超时调整为 30 分钟
+
+- 默认响应头等待及响应体空闲超时由 `600_000` 改为 `1_800_000` 毫秒；环境变量代理、系统代理和直连沿用同一默认值。响应体仍按连续无数据时间计时，不限制回复总时长。
+- 同步默认值回归断言与 README。历史 10 分钟调整记录保留如下；本轮不修改 IPC 租约、中转站配置或已安装版本。
+- `node --experimental-strip-types --test lib/http-dispatcher.test.mjs tests/system-proxy.test.mjs`：6/6，退出码 0；`npm run typecheck`、`npm run build`：退出码 0。开发版后台产物确认默认值为 `18e5`。
+- 开发版窗口检查首轮使用空的临时 agent 配置，因无模型选择器为 20/21，退出码 1；改为仅隔离 Electron 用户数据目录后重跑 `node scripts/smoke-window.mjs --project C:/Users/jch/pi-desktop`：21/21，后置 3/3，退出码 0。夹具会话与本轮临时目录已清理；未运行真实模型长回复测试，未打包、安装、提交或推送。
+
+### 30 分钟超时安装包
+
+- 用户授权更新安装包。`npm run package` 退出码 0，日志 `.tmp-package-http-30m.log`。产物 `release/Pi Desktop Setup 0.0.6.exe`，140877057 字节，修改时间 `2026-10-03T10:24:20.684Z`；SHA-256 `f2873e7cad8c324c2c936cbbf81eba68f925e9999003df37134124274e32889f`。
+- `release/win-unpacked` 修改时间 `2026-10-03T10:23:07.765Z`；包内 `resources/app.asar` 修改时间 `2026-10-03T10:23:06.816Z`。包内后台确认默认超时为 `18e5`（1800000 毫秒），后台 SHA-256 `352c935315ea9cba421061e475a3fe1f086247ebb691facf00bad0feaaba14f5`。
+- `npm run test:window:packaged` 使用独立临时用户数据目录、仓库外隔离副本：窗口 21/21、后置 3/3，真实退出码 0；日志 `.tmp-window-http-30m-packaged.log` 包含 `isolated copy:`。退出阶段出现一条 `Only the main app window can use the backend bridge` 日志，验收未失败；本轮不扩展排查。测试夹具、隔离副本和临时用户数据已清理。
+- 未做打包版真实模型长回复测试，未自动安装或关闭当前应用，未提交或推送源码。
+
 ## HTTP 空闲超时调整为 10 分钟
 
 - `lib/http-dispatcher.ts` 的默认值由 `300_000` 改为 `600_000`；环境变量代理、系统代理和直连的响应头等待及响应体空闲超时均沿用此值。未改 IPC 租约或中转站配置。
