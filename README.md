@@ -90,6 +90,29 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
   - 本项目：`<项目>/.pi/automode.local.json`（项目未受信任时会被忽略，设置页会标出来）
 - 页面上保存时只写你动过的项，没动过的键不进文件，继续用下层的值。
 
+## 内置子代理
+
+内置实现现为本地 `C:/Users/jch/.pi/agent/local/pi-subagents` 的完整 `0.19.0` 源码，
+位于 `builtin/pi-subagents/`，包含原有备用模型修改。旧的 Desktop 自研运行时、队列、提示词与输入文件实现已移除。
+`Agent`、`get_subagent_result`、`steer_subagent`、`SubagentWorkflow` 及调度、嵌套、记忆、worktree 等执行逻辑由这份源码提供。
+旧 `input_files` 参数不再提供；需要文件上下文时在任务中给出路径，让原生代理读取。
+
+- 每个根会话加载独立的单文件 bundle，配置与任务不会串到其他会话；子会话仍可在 Desktop 中查看、转向和停止。
+- 启动前排除磁盘上重复安装的 `pi-subagents`，不修改它们或用户的全局插件设置。未受信任项目的扩展不会加载。
+- 子会话通过原有 IPC 接入，扩展只绑定一次；保留 Desktop 自动模式保护、历史关系与工具范围快照。
+- 配置页使用原生代理解析与默认值；新配置默认启用内置实现，已有显式关闭状态仍保留。开关与并发配置仍存于 `agents/settings.json`，重载会话后应用。
+- 内置预设仅五套：`plan`、`review`、`work`、`scout`、`test`，分别沿用原 `planner`、`reviewer`、`worker`、`scout`、`tester` 的完整提示词、工具、指定/备用模型、思考级别和轮次限制；不再内置 `Agent/general-purpose`、`Explore`、`Plan` 或长名称的重复预设。技能、扩展、继承上下文和后台默认均关闭。原全局 `.md` 文件保留为用户配置，不删除不改写；模型渠道和凭据不随预设复制，指定模型不可用时可在设置页更换。
+- 列表内置分组置顶；同名生效优先级为 **内置 → 项目 → 工作区 → 全局**。选中内置项只编辑它自身，不自动转向同名全局/项目文件。内置编辑和新建使用同一 `/api/subagents/profiles` 接口，独立保存到 `~/.pi/agent/desktop-agents/<id>.md`，不修改程序包。新建默认选择内置，也可选择全局 `agents/<id>.md` 或项目 `.pi/agents/<id>.md`。
+- 预设和新建内置 Agent 均可删除；内置删除记录保存在 `desktop-agents/.deleted/`，重启后不会恢复预设。删除内置后若存在低层同名用户配置，则该用户配置重新生效；其他范围的文件不受影响。内置/全局/项目 ID 都可编辑，保存时保留原配置和未知 frontmatter、移除旧源，并拒绝覆盖同范围已有 ID 或目标文件；预设改名不会复活旧 ID。工作区来源仍只读。
+- 启用/停用也通过相同接口保存；切换只改已保存配置的启用状态，不提交未保存的 ID 等草稿。保存、切换或删除后提供会话重载提示。默认调用回退到已启用的 `work`；它已删除或停用时明确拒绝，不偷偷使用隐藏的通用预设。
+- “指定模型”旁提供单个“备用模型”的下拉模型列表，复用模型搜索/收藏与渠道显示；可选择、清空并保存到对应内置、全局或项目 Agent Markdown 的 `fallback_model`，已有文件设置会回显。模型不可用时保留其值并标注；清空后保存才关闭备用模型。保持原有认证/服务错误切换规则，不增加多模型顺序重试。
+- CLI 的键盘 FleetView/自动补全属于终端功能；Desktop 仍使用自己的会话界面，不伪装成 TUI。源码包含完整功能不等于已逐项实测所有模型、工作流和调度场景。
+- 构建复制许可证与来源清单；`node builtin/pi-subagents/scripts/source-manifest.mjs` 检查源码文件库存及 SHA-256。
+
+定向检查：`node --test lib/subagent-extension.test.mjs lib/rpc-manager.test.mjs lib/subagents.test.mjs lib/subagent-settings.test.mjs components/AgentsConfig.test.mjs`。
+备用模型界面/保存检查：`node --test components/AgentsConfig.test.mjs lib/subagents.test.mjs app/api/subagents/profiles/route.test.mjs`（路由测试使用与 Desktop 构建相同的 `next/server` 垫片）。
+其中子代理测试使用真实 SDK 会话和本地模拟 provider，不调用真实模型或修改用户会话。
+
 ## 模型名称与渠道
 
 界面中的具体模型统一显示为「模型名 (渠道名)」，例如 `GPT-6.1 Sol (哈尔)`。
@@ -114,6 +137,20 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 
 定向检查：`node --experimental-strip-types --test lib/model-favorites.test.mjs`（存储）和
 `node tests/model-selector-favorites.mjs`（隔离 Chromium fixture 的实际点击、键盘、筛选及 reload）。
+
+## 版本号与重新打包约定
+
+- **源码有更新后，重新生成安装包必须使用新的版本号**，不得沿用旧版本号覆盖之前的安装包。以一次源码更新后的新安装包为单位升级，不为逐个文件修改或同一源码的失败构建重试重复升级。
+- **用户已默认授权自动升级版本号，无需每次再次询问或等待授权。每次升级只递增 `0.0.1`，即补丁号（patch）加 1，主版本号（major）和次版本号（minor）保持不变。** 无论是修复、小幅调整、新功能还是不兼容变更，都遵循此规则，不得按改动性质一次性升级 `0.1.0` 或 `1.0.0`；例如 `0.2.0` → `0.2.1`，`0.2.9` → `0.2.10`。
+- 打包前同步 `package.json` 与 `package-lock.json` 的项目版本，重新构建，确保应用内显示版本、安装包文件名及打包元数据一致。不自动创建 Git 提交或标签。
+- 此约定授权的是常规版本号升级，不表示每次修改文件都要立即打包，也不自动授权安装、发布或推送；这些仍按具体任务范围执行。
+
+## 最新安装包
+
+- 版本：`0.2.1`（应用显示为 `0.2.1-desktop`），内置配置优先；仅保留 `plan`、`review`、`work`、`scout`、`test` 五套预设，支持删除/新建内置 Agent 和修改 ID。
+- 安装包：`release/Pi Desktop Setup 0.2.1.exe`，Windows x64，141488350 字节。
+- SHA-256：`086976ef607fcfd67802bc4a841f1d1a93c7182521ee3501587f932373fcab51`。
+- 仓库外打包版窗口检查：隔离副本运行 `node scripts/smoke-window.mjs --binary "release/win-unpacked/Pi Desktop.exe" --isolate`，窗口 22/22、后置 3/3，退出 0；包含五套内置项、ID 草稿编辑、删除按钮与新建三范围的实际点击检查。日志 `.tmp-agents-ui-pkg-window-0.2.1.log`，详情见 `REVIEW-FIXES.md`。本次未运行打包版真实模型聊天/崩溃检查，也未自动安装。
 
 ## 命令
 
@@ -415,7 +452,7 @@ pi-web 服务就这样被误报成“应用在监听 30141”）。
 
 | 失败项 | 原因 |
 |---|---|
-| `lib/directory-browser` / `lib/subagent-input` 的符号链接用例 | 本机没有符号链接权限（Windows 需开发者模式或管理员），`EPERM: symlink` |
+| `lib/directory-browser` 的符号链接用例 | 本机没有符号链接权限（Windows 需开发者模式或管理员），`EPERM: symlink`；旧 `subagent-input` 用例已随执行引擎替换移除 |
 | `lib/project-command-env` 的 PATH 用例 | 测试自己用宿主的 `path.delimiter` 却模拟 linux，只在 POSIX 主机上成立 |
 | `lib/terminal-manager` 的 pid 用例 | node-pty 1.2.0-beta.15 在 Windows 上 `spawn()` 返回 `pid: 0`（ConPTY 后端如此），直接调用同样如此 |
 | `lib/terminal-manager` 的租约过期用例 | 测试用 mock 定时器，但 jiti 转译后模块里拿到的是真实 `setTimeout`，mock 不生效 |

@@ -431,6 +431,85 @@
     return `form widths ${widths.join(" / ")} px; switch rows reach the right edge; global timeout ${globalTimeout ?? "unset"}; ${fields} model pickers, ${labels.length} entries covering models.json; choosing one turned "${before || "empty"}" into "${after || "empty"}"`;
   });
 
+  await record("built-in agents are editable through the shared configuration form", async () => {
+    const openButton = [...document.querySelectorAll("button[aria-label]")]
+      .find((button) => ["设置", "Settings", "設定"].includes(button.getAttribute("aria-label")));
+    if (!openButton) throw new Error("no settings button");
+    openButton.click();
+    try {
+      const dialog = await waitFor(() => document.querySelector(".settings-dialog-surface"));
+      if (!dialog) throw new Error("settings dialog did not open");
+      const tab = [...dialog.querySelectorAll("button")]
+        .find((button) => ["子代理", "Sub-agents"].includes(button.textContent.trim()));
+      if (!tab) throw new Error("no sub-agents tab");
+      tab.click();
+      const group = await waitFor(() => [...dialog.querySelectorAll(".config-sidebar-group")]
+        .find((element) => ["内置", "內建", "built-in"].includes(element.querySelector(".config-sidebar-group-label")?.textContent.trim())));
+      if (!group) throw new Error("no built-in profiles");
+      const buttons = [...group.querySelectorAll(".config-sidebar-item")];
+      const expectedNames = ["plan", "review", "work", "scout", "test"];
+      if (buttons.length !== expectedNames.length) throw new Error(`expected ${expectedNames.length} built-in presets, saw ${buttons.length}`);
+      const seen = new Set();
+      for (const button of buttons) {
+        button.click();
+        const detail = await waitFor(() => button.getAttribute("aria-current") === "page" && dialog.querySelector(".config-detail textarea"));
+        if (!detail || detail.disabled) throw new Error("the built-in prompt is read-only");
+        const pane = detail.closest(".config-detail");
+        for (const control of pane.querySelectorAll("input, select, textarea")) {
+          if (control.disabled) throw new Error(`a built-in field is disabled: ${control.getAttribute("aria-label") ?? control.type}`);
+        }
+        const scopeField = [...pane.querySelectorAll(".config-field")]
+          .find((field) => ["保存到", "儲存至", "Save to"].includes(field.querySelector(".config-field-label")?.textContent.trim()));
+        if (scopeField) throw new Error("existing built-ins must edit their own scope directly");
+        const idInput = pane.querySelector('input[aria-label="子代理 ID"], input[aria-label="Sub-agent ID"]');
+        const id = idInput?.value;
+        if (!idInput || idInput.disabled || !expectedNames.includes(id) || seen.has(id)) throw new Error(`unexpected, repeated or read-only identity: ${id}`);
+        seen.add(id);
+        const remove = [...pane.querySelectorAll("button")]
+          .find((item) => ["删除", "刪除", "Delete"].includes(item.textContent.trim()));
+        if (!remove || remove.disabled) throw new Error("a built-in preset has no enabled delete action");
+        const save = [...dialog.querySelectorAll(".config-footer button")]
+          .find((item) => ["保存", "儲存", "Save"].includes(item.textContent.trim()));
+        if (!save || save.disabled) throw new Error("a built-in profile has no enabled save action");
+        // Change only the draft ID, then reselect to discard it. Never click Save,
+        // Delete or the enabled switch: this probe must not write configuration.
+        const changedId = `${id}-smoke-draft`;
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(idInput, changedId);
+        idInput.dispatchEvent(new Event("input", { bubbles: true }));
+        if (!await waitFor(() => pane.querySelector('input[aria-label="子代理 ID"], input[aria-label="Sub-agent ID"]')?.value === changedId)) throw new Error("the ID input did not accept draft edits");
+        // Force another render to confirm the edited ID reached React state.
+        const displayInput = pane.querySelector('input[aria-label="显示名称"], input[aria-label="顯示名稱"], input[aria-label="Display name"]');
+        if (!displayInput) throw new Error("the display-name input is missing");
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(displayInput, `${displayInput.value} smoke draft`);
+        displayInput.dispatchEvent(new Event("input", { bubbles: true }));
+        await sleep(200);
+        if (idInput.value !== changedId) throw new Error("the edited ID was not retained in the draft");
+        button.click();
+        if (!await waitFor(() => idInput.value === id)) throw new Error("reselecting did not discard the draft ID");
+      }
+      if (expectedNames.some((name) => !seen.has(name))) throw new Error("a built-in preset was not checked");
+      const create = [...dialog.querySelectorAll(".config-list-action-button")]
+        .find((item) => ["新建子代理", "新增子代理", "New sub-agent"].includes(item.textContent.trim()));
+      if (!create) throw new Error("no new sub-agent action");
+      create.click();
+      const scopeField = await waitFor(() => [...dialog.querySelectorAll(".config-detail .config-field")]
+        .find((field) => ["保存到", "儲存至", "Save to"].includes(field.querySelector(".config-field-label")?.textContent.trim())));
+      const scopes = scopeField ? [...scopeField.querySelectorAll("button")] : [];
+      const scopeLabels = [["内置", "內建", "built-in"], ["全局", "全域", "global"], ["项目", "專案", "project"]];
+      if (scopes.length !== 3 || scopes.some((scope, index) => scope.disabled || !scopeLabels[index].includes(scope.textContent.trim()))) throw new Error("creation must offer built-in, global and project scopes");
+      if (scopes[0].getAttribute("aria-pressed") !== "true" || !dialog.querySelector(".config-detail-path")?.textContent.includes("desktop-agents/")) throw new Error("new agents must default to built-in storage");
+      const paths = ["desktop-agents/", ".pi/agent/agents/", "./.pi/agents/"];
+      for (let index = 0; index < scopes.length; index++) {
+        scopes[index].click();
+        if (!await waitFor(() => scopes[index].getAttribute("aria-pressed") === "true" && dialog.querySelector(".config-detail-path")?.textContent.includes(paths[index]))) throw new Error("the creation target path does not match its selected scope");
+      }
+      return "five presets expose editable IDs, direct built-in editing and delete actions; creation defaults to built-in and offers three scopes; no configuration writes";
+    } finally {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      if (!await waitFor(() => !document.querySelector(".settings-dialog-surface"))) throw new Error("settings dialog stayed open");
+    }
+  });
+
   await record("the backup page requires a password and defaults to no private data", async () => {
     const openButton = [...document.querySelectorAll("button[aria-label]")]
       .find((button) => ["设置", "Settings", "設定"].includes(button.getAttribute("aria-label")));

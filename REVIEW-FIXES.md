@@ -4,6 +4,98 @@
 `lib/`、`components/`、`hooks/`、`app/api/`、`public/` 和两份上游 CSS 在当时保持逐字节一致
 （后来的自动模式一轮改动了其中 5 个文件，见本文最后一段）。
 
+## 0.2.1 安装包交付
+
+- 按本次重新打包要求及每次仅 patch 加 1 的约定，将版本 `0.2.0` → `0.2.1`，同步 package.json 和锁文件两处项目版本；保留之前未提交工作、旧安装包，不创建 Git 提交或标签。
+- `HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 npm run package` 退出 0，包含完整构建、随包 npm 校验及 Windows x64 NSIS 打包；日志 `.tmp-agents-ui-package-0.2.1.log`。
+- 安装包 `release/Pi Desktop Setup 0.2.1.exe`，141488350 字节，修改时间 `2026-10-07T16:03:15.477Z`（UTC）；SHA-256 `086976ef607fcfd67802bc4a841f1d1a93c7182521ee3501587f932373fcab51`。`release/win-unpacked` 修改时间 `2026-10-07T16:02:12.368Z`。asar 元数据 `0.2.1`、渲染版本 `0.2.1-desktop`、原生 bundle 五套预设和独立内置目录、latest.yml 的版本/大小/SHA-512 均核对通过，结果 `.tmp-agents-ui-artifact-0.2.1.json`。首次只读核对脚本因 Bash 传递反斜线产生语法错误，改用不含反斜线的路径匹配后退出 0；未修改产物。
+- 打包版仓库外隔离副本 `%TEMP%/pi-desktop-check-AvE9xe/app`，独立用户数据与测试 cwd，窗口 22/22、后置 3/3，退出 0。日志 `.tmp-agents-ui-pkg-window-0.2.1.log` 含 `isolated copy:`；实际点击五套预设检查 ID 草稿编辑、删除按钮及新建默认内置与三个保存范围，不保存真实 Agent 配置。采样时无监听端口，采样的 7 个进程全部退出；自身 fixture、副本和外层临时目录已清理。
+- 先前源码类型检查、120/120 定向回归和开发版窗口证据沿用，不为版本号变化重跑全面验收。未运行打包版真实模型聊天/崩溃测试，未自动安装、关闭用户实例、发布或推送。
+
+## 子代理设置：内置优先、五套预设与可编辑 ID
+
+- 内置分组置顶，同名实际生效顺序改为内置 → 项目 → 工作区 → 全局。选中内置只编辑自身，不再自动跳到同名用户配置；原有全局/项目文件保留。
+- 默认只保留 `plan`、`review`、`work`、`scout`、`test`，沿用原五套提示词及运行设置。内置编辑、新建独立保存到 `desktop-agents/*.md`；新建默认内置，可选全局/项目。预设可删除，通过 `.deleted/` 持久标记防止重启复活；删除后低层同名用户配置仍可生效。
+- 内置/全局/项目 ID 可编辑，PUT 传递 `originalName`，保留未知元数据并删除旧源；拒绝覆盖同范围 ID 或占用的目标文件。创建传 `createOnly`，DELETE 传精确源路径。开关不提交草稿 ID。默认回退仅使用已启用的 `work`，不隐式恢复隐藏通用 Agent。
+- 只读审查发现 Windows 仅大小写改名会把旧 ID 的 deletion marker 当作新 ID 标记删除，已改用精确 ID 的 UTF-8 hex 文件名，并加 `work → Work → WORK` 回归，确认旧预设不复活、低层配置保留。
+- `npm run typecheck`、`npm run build` 退出 0；源码清单刷新并验证 63 个 Desktop 文件。定向命令 `node --test components/AgentsConfig.test.mjs lib/subagents.test.mjs app/api/subagents/profiles/route.test.mjs lib/subagent-extension.test.mjs lib/subagent-settings.test.mjs lib/rpc-manager.test.mjs`：120/120，退出 0；包含真实 SDK＋本地模拟 provider 运行五套新类型，不调用真实模型。构建前原生集成曾 7/8，因 dist 仍为旧类型；重新构建后 8/8。
+- 开发版真实窗口使用独立临时 cwd/用户数据，退出 0：22/22、后置 3/3。专项实际点击五套预设，验证 ID 草稿编辑、删除按钮、新建默认内置及三范围路径，不保存真实代理配置；日志 `.tmp-agents-ui-window.log`。采样时无监听端口，采样的 7 个进程全部退出；自己的 fixture 与临时数据清理完成。
+- 涉及文件差异检查与探针语法检查通过。全仓库 diff 检查仍报已有 package.json/package-lock.json 的 CRLF 差异，本轮未改它们。保留所有已有未提交工作；仅更新源码与 `dist/`，未打包、安装、提交、发布或改用户真实 Agent 配置。
+
+## 五套用户配置加入内置预设
+
+- 读取现有 `~/.pi/agent/agents/{planner,reviewer,scout,tester,worker}.md`，固化为 `builtin/pi-subagents/src/desktop-agent-presets.ts` 的原生配置；逐项与原生 parser 读出的配置比较通过，提示词、工具、模型/备用模型、思考级别、轮次、资源和运行选项完全保留，只将来源改成内置。未写入或删除原文件，不复制凭据。
+- `DEFAULT_AGENTS`、默认类型名单和原生菜单说明同步扩充为八套；UI 列表和运行时直接使用同一注册表，不另加展示专用名单。现有同名全局/工作区/项目文件仍覆盖默认值，原生关闭默认代理的设置覆盖全部八套，用户配置不受该设置影响。
+- 定向配置/UI/API 检查：59/59，退出 0；覆盖八套默认的双范围 CRUD 和启用保值、五套预设提示词 SHA-256、字段复刻、同名覆盖/禁用/删除恢复。首次同作用域冲突测试因 reviewer 新增内置源而统计 3 而非 2，补充断言内置＋两个项目源并保留原来的冲突和后文件胜出断言，复测通过。日志 `.tmp-five-presets-unit.log`。
+- 类型检查退出 0（`.tmp-five-presets-typecheck.log`）；来源清单刷新后验证 62 个 Desktop 文件通过。预设来源及原文件摘要记在 `builtin/pi-subagents/DESKTOP-PATCHES.md`，README 同步。
+- `npm run build`、`node --test lib/subagent-extension.test.mjs` 退出 0，原生集成 8/8；新增集成使用真实 SDK＋本地模拟 provider 实际运行全部五套内置类型，个人目录不含这五个文件，验证工具描述注册、模型/提示词和工具/资源快照；不调用真实模型。日志 `.tmp-five-presets-build.log`、`.tmp-five-presets-native.log`。
+- 独立临时 cwd/用户数据的开发版窗口退出 0：22/22、后置 3/3；专项点击全部八套内置项检查可编辑字段、类型名、双保存范围和保存按钮，不写真实配置。采样时无监听端口，采样的 7 个进程均退出；自己的夹具和临时目录已清理。日志 `.tmp-five-presets-dev-window.log`。本次涉及文件差异检查、探针语法检查、62 个 Desktop 文件及原始来源清单验证均通过。
+- 用户追加授权后已重新打包为 `0.2.0`；交付记录如下，不自动安装。
+
+## 0.2.0 安装包交付
+
+- 新增五套兼容预设功能升为 minor 版本 `0.2.0`，同步 package.json 和锁文件根版本。`HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 npm run package` 退出 0，日志 `.tmp-five-presets-package-0.2.0.log`；旧版安装包保留，不创建 Git 提交或标签。
+- 安装包 `release/Pi Desktop Setup 0.2.0.exe`，141489147 字节，修改时间 `2026-10-07T13:57:36.926Z`（UTC）；SHA-256 `2ba1bd3fab9d01366869b0cb4172a44ee059b9ff8268188b96a2ae57efe381a1`。`release/win-unpacked` 修改时间 `2026-10-07T13:56:21.269Z`。只读核对包元数据 `0.2.0`、渲染版本 `0.2.0-desktop`、latest.yml 版本/大小/SHA-512、原生 bundle 五套预设及后台 profiles API 共用预设均通过，退出 0。
+- 首次组合验收命令因显式 `rm -rf "$test_dir"` 命中 permissions.ask 被执行前拒绝，平行的产物核对也未执行；未改变安全设置或换工具执行被拒清理。用户要求继续后确认没有该轮日志/状态文件，重新运行不包含显式清理的验收与只读核对。
+- 打包版仓库外隔离副本 `%TEMP%/pi-desktop-check-LPAorV/app`，独立窗口数据；验收退出 0，窗口 22/22、后置 3/3。全部八套内置项可选择、编辑并显示原类型名、双保存范围、保存按钮；未保存真实配置。日志 `.tmp-five-presets-pkg-window-0.2.0.log` 包含 `isolated copy:`。采样时无监听端口，采样的 7 个进程均退出；脚本已清理自身 fixture 和隔离副本。
+- 外层测试 cwd/用户数据 `%TEMP%/pi-five-presets-pkg-window-87qu1D` 及定位文件 `.tmp-five-presets-pkg-userdata.txt` 留存，不重试被拒绝的清理动作。自动模式始终开启；未安装、关闭用户实例、调用真实模型、运行打包版聊天/崩溃验收、发布或推送。
+
+## 0.1.1 安装包交付
+
+- 按用户「重新打包」要求，将本轮内置代理配置可编辑的小幅调整升为补丁版本 `0.1.1`，同步 package.json 和锁文件的两处根版本；保留之前未提交源码与旧版安装包，不创建提交或标签。
+- `HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 npm run package` 退出 0，完整构建、随包 npm 校验、Windows x64 NSIS 打包通过；日志 `.tmp-builtin-agents-package-0.1.1.log`。
+- 安装包：`release/Pi Desktop Setup 0.1.1.exe`，141480874 字节，修改时间 `2026-10-07T12:57:25.626Z`（UTC）；SHA-256 `ebff2c2d99c6cb2594ef427113bd204ce82b5692d85b565e6bf328ed089d20e1`。`release/win-unpacked` 修改时间 `2026-10-07T12:56:19.107Z`。latest.yml 的版本、大小及 SHA-512 与安装包一致；按 electron-builder 的 URL 规则用连字符替换文件名空格。
+- asar 包版本 `0.1.1`、渲染包显示版本 `0.1.1-desktop`、内置可编辑设置文案和解包的原生 pi-subagents bundle 均核对通过；核对结果 `.tmp-builtin-agents-artifact-0.1.1.json`。最初两次临时核对脚本分别因 Bash 传递反斜线导致正则语法错误、把 latest.yml 的 URL 当原文件名而失败；改用无反斜线匹配和实际 URL 规则后退出 0，没有修改打包产物。
+- 仓库外隔离窗口检查退出 0：窗口 22/22、后置 3/3；副本 `%TEMP%/pi-desktop-check-b3cbVx/app`，日志 `.tmp-builtin-agents-pkg-window-0.1.1.log` 有 `isolated copy:`。包含实际点击全部三个内置项、可编辑字段、双保存范围及保存按钮的专项检查，不写真实代理配置；采样时无监听端口，采样的 7 个进程均退出。自己的 fixture 会话、隔离副本、临时 cwd 和用户数据目录均已清理。
+- 未自动安装、关闭用户实例、运行真实模型聊天/崩溃检查或推送。此前源码测试证据沿用，不因版本号变化重新做全面验收。
+
+## 内置代理与扩展共用配置链路
+
+- 内置 `Agent`、`Explore`、`Plan` 不再只读。沿用原生 `/agents` 的同名导出/编辑方式，直接编辑后通过既有 `/api/subagents/profiles` 的 GET/PUT/PATCH/DELETE 和同一 writer/loader，保存到全局 `agents/<name>.md` 或项目 `.pi/agents/<name>.md`；不另建内置专用存储或接口，不生成 `-copy`，不修改内置源码默认值。
+- 选中内置项时优先载入已有同名可写配置，按原生优先级和精确名称查找，保留已声明名称对应的源文件。切换保存范围只调整目标路径，不跨范围携带 `filePath`。内置启用开关仅保存现有源配置的 enabled，保留未提交草稿；保存/切换/删除都提示重载会话。
+- PATCH 开关改为复用完整源配置，保留备用模型、扩展工具、提示词模式、颜色、隔离和会话持久化等设置，仍保留不归页面管理的 frontmatter。三语说明、README 和真实窗口只读点击探针同步。
+- 定向检查 `node --test components/AgentsConfig.test.mjs lib/subagents.test.mjs app/api/subagents/profiles/route.test.mjs`：57/57，退出 0；涵盖全部三个内置项的双范围保存、原生加载、开关保值、删除恢复，以及已有配置选择与路径切换接线。日志 `.tmp-builtin-agents-unit.log`。
+- `npm run typecheck`、`npm run build` 退出 0；日志 `.tmp-builtin-agents-typecheck.log`、`.tmp-builtin-agents-build.log`。本次涉及文件的 `git diff --check` 通过；全仓库检查另报已有 package.json/package-lock.json 的 CRLF 差异，本轮未改它们。
+- 开发版窗口 `node scripts/smoke-window.mjs --project C:/Users/jch/pi-desktop` 使用独立临时 cwd 和用户数据目录，退出 0：窗口 22/22，后置 3/3。新增专项检查实际点击三个内置项，确认提示词、工具、资源及运行字段可编辑、原生类型名不变、两种保存范围和保存按钮可用；切换范围显示项目目标，未点保存或启用开关。日志 `.tmp-builtin-agents-window.log`。采样时无监听端口，采样到的 7 个进程均已退出；自己的 fixture 会话和临时数据目录已清理。
+- 只更新开发源码及 `dist/`；未打包、安装、调用真实模型、修改用户真实代理配置或提交，保留原有未提交工作。
+
+## 0.1.0 安装包交付
+
+- 根据本轮新增原生子代理实现及备用模型 UI，将项目版本从 `0.0.6` 自动升级为 `0.1.0`，同步 `package.json`、锁文件及锁文件根包版本，没有创建 Git 提交或标签。`HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 npm run package` 退出 0，包含完整构建、随包 npm 校验及 NSIS Windows x64 打包。
+- 安装包：`release/Pi Desktop Setup 0.1.0.exe`；141479760 字节；生成时间 `2026-10-07T11:13:51.546Z`（UTC）；SHA-256 `f19d39c207d81ff2a0fc55a0e6e0b0fbbd4c7bad1fdd55a342316744f730d8f5`。`release/latest.yml` 的版本与大小一致。
+- 已检查打包后的 asar 包元数据版本 `0.1.0`、前端显示版本 `0.1.0-desktop` 和备用模型选择器，以及解包的原生 `pi-subagents.mjs` 位于 backend 旁边。首次读取 asar 前端文件因 Windows 路径分隔符写成 `/` 导致检查脚本失败，改用 `path.join` 后通过；没有更改打包产物。
+- 仓库外窗口首测日志 `.tmp-acceptance/pkg-window-445a751f-3cd9-4ea1-a358-8efd394d0074.log`：退出 1、窗口 18/21、后置 2/3；三个失败均为请求窗口尺寸与实际视口不一致，实际视口始终为 1226x635，启动/IPC/终端/npx 等检查通过。按照维护文档对这一已知偶发 resize 症状重试一次，没有修改源码、断言或重新打包。
+- 复查：`npm run test:window:packaged`，隔离副本 `%TEMP%/pw-recheck-d825or/pi-desktop-check-bEInh4/app`；窗口 21/21、后置 3/3，测试真实退出 0。日志 `.tmp-acceptance/pkg-window-recheck-c14db630-730a-4cea-985e-d147962b62d3.log` 包含 `isolated copy:`、有效统计及退出码。采样时无监听端口、采样的 7 个进程均退出；仅代表这一采样快照。
+- 两次均使用独立窗口数据目录；自己的测试副本、数据与 fixture 会话均清理。复查包装器最初将进程查询自身误计为残留并退出 1，已排除查询 PID 后确认自己的进程残留为 0、清理完成；窗口测试命令自身退出码为 0，不能混淆二者。
+- 本次未调用真实模型、运行打包版聊天/崩溃测试、安装到用户目录、关闭用户实例或推送。先前源码定向测试证据继续保留，不为仅改版本号重复全面验收。
+
+## 重新打包时自动升级版本号的项目约定
+
+- 按用户要求在 `README.md` 新增版本号与重新打包约定：源码更新后生成新安装包必须升级版本号，按 patch/minor/major 的改动性质自然递增；用户默认授权，无需逐次请示。
+- 打包前同步项目版本与锁文件，确保显示版本、文件名和元数据一致；同一源码的失败重试不重复升号。版本授权不扩大为自动打包、安装、发布、推送或创建提交/标签。
+- 本次只更新项目说明，未修改当前版本号或生成安装包；检查文档差异，不执行构建或模型测试。
+
+## 子代理备用模型设置 UI
+
+- `components/AgentsConfig.tsx` 在指定模型右侧新增备用模型的 `ModelSelector`，桌面双列、移动端单列；思考深度与最大轮次放到下一行。复用现有模型列表、搜索、收藏、渠道标签，沿用 readonly/加载中禁用规则，不可用的已选模型保留并标注。
+- 与原生单个 `fallback_model` 完整接线：列表读取、草稿、复制及开关保存均保留设置；明确清空后保存会删除 frontmatter 键。旧 API 调用省略字段时保留文件原值；拒绝非字符串设置且不覆盖原文件。没有修改原生切换规则或新增多备用模型执行功能。三个语言标签已补齐。
+- 定向检查 `node --test components/AgentsConfig.test.mjs lib/subagents.test.mjs app/api/subagents/profiles/route.test.mjs`：54/54，退出 0，覆盖双作用域与原生读取的保存/修改/清空、旧调用保值、无效值防覆盖、API 往返、编辑器序列化和 UI 接线。首次直接跑路由测试因没有 `next/server` 失败；测试现显式使用 Desktop 构建同一垫片，不安装 Next，不删除断言。
+- `npm run typecheck`、`npm run build` 退出 0；`npm run test:desktop` 76/76、`npm test` IPC 33/33，均退出 0。
+- 本轮新构建使用独立用户数据目录运行 `npm run test:window` 一次，退出 0：窗口 21/21，后置采样/退出检查 3/3；测试进程、数据目录和自己的 smoke 夹具已清理。窗口 smoke 证明开发版窗口/IPC 链路，不是备用模型选择、清空的专项点击测试；这些由定向配置/接口测试覆盖。下节保留上一轮窗口超时的当时记录，本轮该阻塞已解除。
+- 只更新开发源码及 `dist/`；未调用真实模型、打包、安装或提交。保留上一轮未提交修改。
+
+## 内置子代理替换为本地 pi-subagents 0.19.0
+
+- 完整搬入 `C:/Users/jch/.pi/agent/local/pi-subagents` 的 `src/`，保留 MIT 许可、本地备用模型修改及来源说明；来源核验共 60 个原始源码/说明文件，Desktop 库存 61 个文件（含新增 host 接口），SHA-256 核验退出 0。没有修改来源目录。
+- 删除旧 `subagent-runtime`、`subagent-queue`、`subagent-prompt`、`subagent-input` 执行实现及仅针对它们的测试，以原生 SDK 集成回归替代。工具、workflow、scheduler、nested agents、worktree、fallback 等源逻辑由搬入的实现提供；不再提供旧 `input_files` 参数。
+- 通过单文件 ESM bundle + 每个根会话的唯一 URL 隔离原生模块状态。启动前解析扩展路径，阻止重复 pi-subagents factory 和未受信任项目的显式扩展路径。子会话由 Desktop wrapper 唯一绑定、管理 IPC、停止与转向，保留宿主自动模式保护及资源快照。
+- 审查修复：创建中关闭根会话时关闭待绑定 child；提前记录停止终态；结果去重同时比较结果与错误，避免 worktree 收尾补充结果丢失；关闭后延迟 provider 结果不再调用失效的父 API；没有 worktree 的根会话不在退出时启动无关 git 进程。
+- 配置页复用原生单文件解析与默认代理提示词，保留未知 frontmatter 和原有设置存储。内置默认启用，已有显式关闭状态不变。标准工具结果同时识别新原生链接与旧历史链接。构建复制来源与许可证，原生 bundle 与 backend 一起配置 asarUnpack，未打包验收。
+- 定向回归：`node --test lib/subagent-extension.test.mjs lib/rpc-manager.test.mjs lib/subagents.test.mjs lib/subagent-settings.test.mjs components/AgentsConfig.test.mjs components/MessageView.test.mjs`，96/96，退出 0。原生集成用真实 SDK 和本地模拟 provider 验证双根会话隔离、运行与控制、信任过滤、待绑定 child 关闭和终态；不调用真实模型。
+- UI/家族关系：`node --test components/MessageView.test.mjs components/AgentSessionPanel.test.mjs lib/native-subagent-relation.test.mjs lib/session-family.test.mjs`，27/27，退出 0。`npm run test:desktop` 76/76、`npm test` 后台 IPC 33/33，均退出 0；`npm run typecheck`、`npm run build` 退出 0。差异检查按原有 CRLF 文件行尾规则通过。
+- **开发版窗口验收未完成**：`npm run test:window` 使用独立 `pi-subagents-window-WFdFOx` 数据目录，180 秒工具超时；启动日志出现 `UnknownVizError`，没有有效窗口检查统计，不能算通过，也不能得出端口/进程采样结论。已核对并终止本次隔离测试自己的进程树，删除自己的数据目录与 `--desktop-smoke-d787cc9c-13b4-4bf0-befd-b02f7af7554c--` 夹具。未重试、未修改图形/权限配置或用户已安装版本。
+- 未运行真实模型子代理、完整 workflow/调度/worktree 场景；未生成新安装包、安装或提交。
+
 ## 模型名称统一展示渠道
 
 - 新增 `components/ModelLabel.tsx`、`lib/model-label.ts`，统一展示「模型名 (渠道名)」，提供灰色渠道与完整悬停文字。普通行和收藏行均带渠道；收起按钮同样展示，保持收藏交互和 provider/modelId 身份不变。

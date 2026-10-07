@@ -48,7 +48,7 @@ export function readSubagentSettings(
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
   const stored = readStoredSettings(settingsPath);
-  return settingsValue(stored.builtInEnabled === true, readMaxConcurrent(stored.maxConcurrent));
+  return settingsValue(stored.builtInEnabled !== false, readMaxConcurrent(stored.maxConcurrent));
 }
 
 export function isBuiltInSubagentsEnabled(

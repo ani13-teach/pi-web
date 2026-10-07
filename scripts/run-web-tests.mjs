@@ -45,10 +45,6 @@ const SKIP_TESTS = [
     reason: "needs the Windows symlink privilege (Developer Mode or elevated shell): symlinkSync of a directory fails with EPERM here.",
   },
   {
-    name: "rejects files outside cwd, including symlink targets",
-    reason: "same symlink privilege: the test creates a file symlink, which has no unprivileged Windows equivalent (junctions only cover directories).",
-  },
-  {
     name: "direct bash updates the platform PATH key",
     reason: "upstream test builds the expected PATH with the host's path.delimiter while simulating platform: 'linux'; the implementation correctly uses ':' for that platform, so the expectation only holds on POSIX hosts.",
   },

@@ -1,309 +1,270 @@
-import { Type } from "@earendil-works/pi-ai";
-import {
-  defineTool,
-  type ExtensionContext,
-  type InlineExtension,
-  type LoadExtensionsResult,
-} from "@earendil-works/pi-coding-agent";
-import {
-  SUBAGENT_CONTROL_TOOL_NAMES,
-  type SubagentProfile,
-  type SubagentRunInfo,
-} from "./subagents";
-import { MAX_SUBAGENT_INPUT_FILES } from "./subagent-input";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { DefaultPackageManager, getAgentDir, type AgentSession, type InlineExtension, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import type { AgentManager } from "../builtin/pi-subagents/src/agent-manager";
+import type { AgentRecord } from "../builtin/pi-subagents/src/types";
+import type { DesktopChildInfo, DesktopHost, DefaultResourceLoaderOptions } from "../builtin/pi-subagents/src/desktop-host";
+import { createBuiltinAutomodeExtension, preferBuiltinAutomode } from "./automode-builtin";
+import { createBuiltinRpivTodoExtension, preferBuiltinRpivTodo } from "./rpiv-todo-builtin";
+import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
+import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
+import { registerSessionLivenessProvider } from "./session-liveness";
+import { readSubagentRun, SUBAGENT_META_TYPE, SUBAGENT_RESULT_TYPE, SUBAGENT_STATUS_TYPE, type SubagentRunInfo } from "./subagents";
+import type { SessionEntry } from "./types";
 
-export const HOST_SUBAGENT_EXTENSION_NAME = "pi-web-subagents";
-const HOST_SUBAGENT_EXTENSION_PATH = `<inline:${HOST_SUBAGENT_EXTENSION_NAME}>`;
-const SUBAGENT_TOOL_NAMES = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
-const LEGACY_SUBAGENT_PACKAGE_NAME = "pi-subagents";
-
+export const HOST_SUBAGENT_EXTENSION_NAME = "pi-subagents";
 export interface SubagentToolDetails {
-  kind: "pi-web-subagent";
+  kind: "pi-web-subagent" | "pi-subagents";
   sessionId: string;
+  agentId?: string;
   profile: string;
   description: string;
   status: SubagentRunInfo["status"];
-  runInBackground: boolean;
-  createdAt: string;
-  completedAt?: string;
-  error?: string;
-  worktreePath?: string;
-  worktreeBranch?: string;
-  worktreeCleanupError?: string;
 }
 
-export interface StartSubagentRequest {
-  parentContext: ExtensionContext;
-  parentToolCallId: string;
-  profile: string;
-  task: string;
-  inputFiles?: string[];
-  description: string;
-  runInBackground?: boolean;
-  model?: string;
-  thinking?: string;
-  maxTurns?: number;
-  inheritContext?: boolean;
-  isolation?: "worktree";
-  signal?: AbortSignal;
-  onUpdate?: (run: SubagentRunInfo) => void;
+/** Exclude another installation BEFORE its extension factory can execute. */
+export function isSubagentsSource(path: string, source = ""): boolean {
+  if (/(?:^|[/\\])pi-subagents(?:[/\\]|$)/i.test(path) || /(?:^|[/@])pi-subagents(?:@|$)/i.test(source.replace(/^npm:/, ""))) return true;
+  let dir = dirname(path);
+  while (dir !== dirname(dir)) {
+    const manifest = join(dir, "package.json");
+    if (existsSync(manifest)) {
+      try {
+        const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+        return typeof pkg.name === "string" && pkg.name.split("/").at(-1) === "pi-subagents";
+      } catch { return false; }
+    }
+    dir = dirname(dir);
+  }
+  return false;
 }
 
-export interface ResumeSubagentRequest {
-  parentContext: ExtensionContext;
-  parentToolCallId: string;
-  sessionId: string;
-  task: string;
-  description: string;
-  runInBackground?: boolean;
-  signal?: AbortSignal;
-  onUpdate?: (run: SubagentRunInfo) => void;
+/** The SDK's noExtensions mode still loads explicit paths and inline factories.
+ * Resolve without importing, filter duplicate packages and untrusted project
+ * paths, then hand only the allowed paths to that public SDK mode.
+ */
+export async function filteredSubagentLoaderOptions(
+  options: DefaultResourceLoaderOptions,
+  settingsManager: SettingsManager,
+): Promise<DefaultResourceLoaderOptions> {
+  const manager = new DefaultPackageManager({ cwd: options.cwd, agentDir: options.agentDir, settingsManager });
+  const trusted = getProjectTrustStatus(options.cwd, options.agentDir).trusted;
+  const discovered = options.noExtensions ? [] : (await manager.resolve(async () => "skip")).extensions;
+  const explicit = options.additionalExtensionPaths?.length
+    ? (await manager.resolveExtensionSources(options.additionalExtensionPaths, { temporary: true })).extensions
+    : [];
+  const insideProject = (path: string) => {
+    const local = relative(options.cwd, resolve(path));
+    return local === "" || (!local.startsWith("..") && !isAbsolute(local));
+  };
+  // Explicit paths are labelled "temporary" by the SDK, even when the
+  // project supplied them. Preserve their original source when gating trust.
+  const safeExplicit = trusted ? explicit : explicit.filter((entry) =>
+    ![entry.path, entry.metadata.source, entry.metadata.baseDir].some((path) => path && insideProject(path)));
+  const paths = [...discovered, ...safeExplicit].filter((entry) => entry.enabled
+    && (entry.metadata.scope !== "project" || trusted)
+    && !isSubagentsSource(entry.path, entry.metadata.source));
+  return { ...options, noExtensions: true, additionalExtensionPaths: [...new Set(paths.map((entry) => entry.path))] };
 }
 
-export interface SubagentExecution {
-  run: SubagentRunInfo;
-  completion: Promise<SubagentRunInfo>;
+export interface SubagentHostDependencies {
+  bindChild(session: AgentSession, info: DesktopChildInfo): Promise<void>;
+  shutdownChild(session: AgentSession): Promise<void>;
+  invalidate(): void;
+}
+type Activation = { closed: boolean; manager?: AgentManager; parentId?: string; children: Map<string, { session: AgentSession; info: DesktopChildInfo; unsubscribe?: () => void }> };
+const activations = new Set<Activation>();
+
+function mapStatus(status: AgentRecord["status"]): SubagentRunInfo["status"] {
+  if (status === "error") return "failed";
+  if (status === "stopped" || status === "aborted") return "aborted";
+  if (status === "steered") return "completed";
+  return status;
 }
 
-export interface SubagentExtensionRuntime {
-  start(request: StartSubagentRequest): Promise<SubagentExecution>;
-  resume(request: ResumeSubagentRequest): Promise<SubagentExecution>;
-  get(sessionId: string): Promise<SubagentRunInfo | null>;
-  steer(sessionId: string, message: string): Promise<void>;
-  notifyParent(run: SubagentRunInfo): Promise<void>;
+function findRecord(ref: string): { activation: Activation; record: AgentRecord } | undefined {
+  for (const activation of activations) {
+    const record = activation.manager?.listAgents().find((entry) => entry.id === ref || entry.session?.sessionId === ref || activation.children.get(entry.id)?.session.sessionId === ref);
+    if (record) return { activation, record };
+  }
 }
 
-export type SubagentProfileProvider = () => readonly SubagentProfile[];
-export type SubagentEnabledProvider = () => boolean;
-
-function agentTypeDescription(profiles: readonly SubagentProfile[]): string {
-  const available = profiles.filter((profile) => profile.enabled);
-  if (available.length === 0) return "No subagent profiles are currently enabled.";
-  return available.map((profile) => {
-    const details = [`Tools: ${profile.tools.length > 0 ? profile.tools.join(", ") : "none"}`];
-    if (profile.model) details.push(`Model: ${profile.model}`);
-    return `- ${profile.name}: ${profile.description} (${details.join("; ")})`;
-  }).join("\n");
-}
-
-export function subagentToolDetails(run: SubagentRunInfo): SubagentToolDetails {
+function runInfo(activation: Activation, record: AgentRecord): SubagentRunInfo {
+  const child = activation.children.get(record.id);
   return {
-    kind: "pi-web-subagent",
-    sessionId: run.sessionId,
-    profile: run.profile,
-    description: run.description,
-    status: run.status,
-    runInBackground: run.runInBackground,
-    createdAt: run.createdAt,
-    ...(run.completedAt ? { completedAt: run.completedAt } : {}),
-    ...(run.error ? { error: run.error } : {}),
-    ...(run.worktreePath ? { worktreePath: run.worktreePath } : {}),
-    ...(run.worktreeBranch ? { worktreeBranch: run.worktreeBranch } : {}),
-    ...(run.worktreeCleanupError ? { worktreeCleanupError: run.worktreeCleanupError } : {}),
+    sessionId: record.session?.sessionId ?? child?.session.sessionId ?? record.id,
+    sessionPath: record.session?.sessionFile ?? child?.session.sessionFile ?? "",
+    parentSessionId: child?.info.parentContext.sessionManager.getSessionId() ?? activation.parentId ?? "",
+    parentToolCallId: record.toolCallId ?? "",
+    profile: record.type,
+    description: record.description,
+    task: child?.info.task ?? "",
+    runInBackground: !record.blocking,
+    status: mapStatus(record.status),
+    createdAt: new Date(record.startedAt).toISOString(),
+    ...(record.completedAt ? { completedAt: new Date(record.completedAt).toISOString() } : {}),
+    ...(record.result !== undefined ? { result: record.result } : {}),
+    ...(record.error ? { error: record.error } : {}),
+    ...(record.worktree ? { worktreePath: record.worktree.path, worktreeBranch: record.worktree.branch } : {}),
   };
 }
 
-export function subagentFinalText(run: SubagentRunInfo): string {
-  if (run.status === "starting" || run.status === "running") {
-    return `Subagent ${run.sessionId} is ${run.status}.`;
-  }
-  if (run.status === "completed") return run.result?.trim() || "Subagent completed without text output.";
-  if (run.status === "aborted") return `Subagent ${run.sessionId} was stopped.`;
-  if (run.status === "interrupted") return `Subagent ${run.sessionId} was interrupted before completion.`;
-  return `Subagent ${run.sessionId} failed: ${run.error ?? "Unknown error"}`;
+export function getNativeSubagentRun(ref: string): SubagentRunInfo | null {
+  const found = findRecord(ref);
+  return found ? runInfo(found.activation, found.record) : null;
+}
+export function steerNativeSubagent(ref: string, message: string): void {
+  const found = findRecord(ref);
+  if (!found || !found.activation.manager?.steer(found.record.id, message)) throw new Error(`Running subagent not found: ${ref}`);
+}
+export function abortNativeSubagent(ref: string): void {
+  const found = findRecord(ref);
+  if (!found || !found.activation.manager?.abort(found.record.id)) throw new Error(`Running subagent not found: ${ref}`);
 }
 
-export function createSubagentExtension(
-  runtime: SubagentExtensionRuntime,
-  getProfiles: SubagentProfileProvider,
-  isEnabled: SubagentEnabledProvider = () => true,
-): InlineExtension {
+function bundleUrl(): URL {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [join(dir, "pi-subagents.mjs"), resolve(dir, "../dist/main/pi-subagents.mjs")];
+  const file = candidates.find(existsSync);
+  if (!file) throw new Error("Built-in pi-subagents bundle missing. Run npm run build:desktop.");
+  const url = pathToFileURL(file);
+  url.searchParams.set("activation", randomUUID());
+  return url;
+}
+
+export function createSubagentExtension(cwd: string, dependencies: SubagentHostDependencies): InlineExtension {
   return {
     name: HOST_SUBAGENT_EXTENSION_NAME,
     hidden: true,
-    factory: (pi) => {
-      if (!isEnabled()) return;
-      const profiles = getProfiles().filter((profile) => profile.enabled);
-      const profileNames = profiles.map((profile) => profile.name);
-      const availableTypes = profileNames.length > 0 ? profileNames.join(", ") : "none";
-      pi.registerTool(defineTool({
-        name: "Agent",
-        label: "Agent",
-        description: `Delegate a focused task to a configured subagent. Each subagent runs as a full, inspectable Pi session. Use background mode for independent work and foreground mode when the result is needed immediately.\n\nAvailable agent types:\n${agentTypeDescription(profiles)}`,
-        promptSnippet: "Delegate a focused task to an inspectable subagent session",
-        promptGuidelines: [
-          "Use Agent for a focused task that benefits from an isolated context.",
-          "Use multiple background Agent calls in the same response for independent parallel work.",
-          "Do not duplicate work already delegated to a running subagent.",
-        ],
-        executionMode: "parallel",
-        parameters: Type.Object({
-          subagent_type: Type.Optional(Type.String({ description: `Configured agent profile. Available types: ${availableTypes}. Default: general-purpose.` })),
-          prompt: Type.String({ description: "The complete task for the subagent." }),
-          resume: Type.Optional(Type.String({ description: "Existing subagent session ID to continue instead of creating a new session." })),
-          input_files: Type.Optional(Type.Array(Type.String(), {
-            description: "UTF-8 text files under the session cwd to include with the task.",
-            maxItems: MAX_SUBAGENT_INPUT_FILES,
-          })),
-          description: Type.String({ description: "Short activity label shown in the UI." }),
-          run_in_background: Type.Optional(Type.Boolean({ description: "Return immediately and notify this session when complete." })),
-          model: Type.Optional(Type.String({ description: "Optional provider/modelId override." })),
-          thinking: Type.Optional(Type.String({ description: "Optional thinking level override." })),
-          max_turns: Type.Optional(Type.Number({ description: "Optional positive agent turn limit." })),
-          inherit_context: Type.Optional(Type.Boolean({ description: "Include the parent session's active conversation context." })),
-          isolation: Type.Optional(Type.String({ description: "Run the subagent in an isolated git worktree." })),
-        }),
-        async execute(toolCallId, params, signal, onUpdate, ctx) {
-          try {
-            const resume = params.resume?.trim();
-            const execution = resume
-              ? await runtime.resume({
-                  parentContext: ctx,
-                  parentToolCallId: toolCallId,
-                  sessionId: resume,
-                  task: params.prompt,
-                  description: params.description,
-                  ...(params.run_in_background !== undefined ? { runInBackground: params.run_in_background } : {}),
-                  signal,
-                  onUpdate: (run) => onUpdate?.({
-                    content: [{ type: "text", text: `${run.profile}: ${run.description} (${run.status})` }],
-                    details: subagentToolDetails(run),
-                  }),
-                })
-              : await runtime.start({
-              parentContext: ctx,
-              parentToolCallId: toolCallId,
-              profile: params.subagent_type ?? "general-purpose",
-              task: params.prompt,
-              ...(params.input_files ? { inputFiles: params.input_files } : {}),
-              description: params.description,
-              ...(params.run_in_background !== undefined ? { runInBackground: params.run_in_background } : {}),
-              ...(params.model ? { model: params.model } : {}),
-              ...(params.thinking ? { thinking: params.thinking } : {}),
-              ...(params.max_turns ? { maxTurns: params.max_turns } : {}),
-              ...(params.inherit_context !== undefined ? { inheritContext: params.inherit_context } : {}),
-              ...(params.isolation === "worktree" ? { isolation: "worktree" as const } : {}),
-              signal,
-              onUpdate: (run) => onUpdate?.({
-                content: [{ type: "text", text: `${run.profile}: ${run.description} (${run.status})` }],
-                details: subagentToolDetails(run),
-              }),
-                });
-
-            if (execution.run.runInBackground) {
-              void execution.completion
-                .then((run) => runtime.notifyParent(run))
-                .catch((error) => {
-                  console.error(
-                    "[pi-web] failed to deliver subagent completion:",
-                    error instanceof Error ? error.message : error,
-                  );
-                });
-              return {
-                content: [{ type: "text", text: `Subagent started in background. Session ID: ${execution.run.sessionId}. You will be notified when it completes.` }],
-                details: subagentToolDetails(execution.run),
-              };
-            }
-
-            const run = await execution.completion;
-            return {
-              content: [{ type: "text", text: subagentFinalText(run) }],
-              details: subagentToolDetails(run),
-              ...(run.status === "failed" ? { isError: true } : {}),
-            };
-          } catch (error) {
-            return {
-              content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-              details: undefined,
-              isError: true,
-            };
-          }
-        },
-      }));
-
-      pi.registerTool(defineTool({
-        name: "get_subagent_result",
-        label: "Get agent result",
-        description: "Check an inspectable subagent session and retrieve its latest result.",
-        parameters: Type.Object({
-          agent_id: Type.String({ description: "Subagent session ID." }),
-          wait: Type.Optional(Type.Boolean({ description: "Wait until the subagent finishes." })),
-        }),
-        async execute(_toolCallId, params, signal) {
-          let run = await runtime.get(params.agent_id);
-          if (!run) return { content: [{ type: "text", text: `Subagent not found: ${params.agent_id}` }], details: undefined, isError: true };
-          while (params.wait && (run.status === "starting" || run.status === "running")) {
-            await new Promise<void>((resolve, reject) => {
-              const onAbort = () => {
-                clearTimeout(timer);
-                reject(new Error("Result wait aborted"));
-              };
-              const timer = setTimeout(() => {
-                signal?.removeEventListener("abort", onAbort);
-                resolve();
-              }, 500);
-              if (signal?.aborted) onAbort();
-              else signal?.addEventListener("abort", onAbort, { once: true });
-            });
-            run = await runtime.get(params.agent_id);
-            if (!run) return { content: [{ type: "text", text: `Subagent not found: ${params.agent_id}` }], details: undefined, isError: true };
-          }
+    async factory(pi) {
+      if (!isBuiltInSubagentsEnabled()) return;
+      // No code splitting: every relative module (and its mutable globals) is
+      // inside this file, so the unique URL isolates the ENTIRE extension graph.
+      const native = await import(/* @vite-ignore */ bundleUrl().href);
+      const activation: Activation = { closed: false, children: new Map() };
+      activations.add(activation);
+      let releaseLiveness: (() => void) | undefined;
+      const childShutdowns = new WeakMap<AgentSession, Promise<void>>();
+      const persistTerminal = () => {
+        for (const [id, child] of activation.children) {
+          const record = activation.manager?.getRecord(id);
+          if (!record || record.status === "queued" || record.status === "running") continue;
+          const run = runInfo(activation, record);
+          const entries = child.session.sessionManager.getEntries() as unknown as SessionEntry[];
+          const last = readSubagentRun(entries, run.sessionId, run.sessionPath);
+          if (last?.completedAt === run.completedAt && last?.status === run.status && last?.result === run.result && last?.error === run.error) continue;
+          child.session.sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, {
+            version: 1, status: run.status, completedAt: run.completedAt ?? new Date().toISOString(), result: run.result, error: run.error,
+          });
+        }
+        dependencies.invalidate();
+      };
+      const host: DesktopHost = {
+        cwd,
+        get maxConcurrent() { return readSubagentSettings().maxConcurrent; },
+        onManager(manager) { activation.manager = manager; },
+        async resourceLoaderOptions(configCwd, options) {
+          const base = await filteredSubagentLoaderOptions(options, options.settingsManager!);
+          const policy = options.extensionsOverride;
           return {
-            content: [{ type: "text", text: subagentFinalText(run) }],
-            details: subagentToolDetails(run),
-            ...(run.status === "failed" ? { isError: true } : {}),
+            ...base,
+            extensionFactories: [createBuiltinAutomodeExtension(), createBuiltinRpivTodoExtension()],
+            extensionsOverride: (loaded) => {
+              // User extension scoping never removes host safety handlers.
+              const guards = loaded.extensions.filter((entry) => entry.path.startsWith("<inline:"));
+              const scoped = policy ? policy({ ...loaded, extensions: loaded.extensions.filter((entry) => !guards.includes(entry)) }) : loaded;
+              return preferBuiltinRpivTodo(preferBuiltinAutomode({ ...scoped, extensions: [...new Set([...scoped.extensions, ...guards])] }));
+            },
           };
         },
-      }));
-
-      pi.registerTool(defineTool({
-        name: "steer_subagent",
-        label: "Steer agent",
-        description: "Send a steering message to a currently running subagent session.",
-        parameters: Type.Object({
-          agent_id: Type.String({ description: "Subagent session ID." }),
-          message: Type.String({ description: "Instruction to inject after the current tool execution." }),
-        }),
-        async execute(_toolCallId, params) {
-          try {
-            await runtime.steer(params.agent_id, params.message);
-            return { content: [{ type: "text", text: `Steering message sent to ${params.agent_id}.` }], details: undefined };
-          } catch (error) {
-            return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], details: undefined, isError: true };
+        reloadOptions(configCwd) { return projectTrustReloadOptions(configCwd, getAgentDir()) ?? {}; },
+        async bindChild(session, info) {
+          if (activation.closed) {
+            await host.shutdownChild(session);
+            throw new Error("Parent subagent activation is closed");
           }
+          if (info.agentId) activation.children.set(info.agentId, { session, info });
+          const record = info.agentId ? activation.manager?.getRecord(info.agentId) : undefined;
+          const parentManager = info.parentContext.sessionManager;
+          session.sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, {
+            version: 1, parentSessionId: parentManager.getSessionId(), parentSessionPath: parentManager.getSessionFile() ?? "",
+            parentToolCallId: record?.toolCallId ?? "", profile: info.profile, description: info.description, task: info.task,
+            runInBackground: !record?.blocking, createdAt: new Date(record?.startedAt ?? Date.now()).toISOString(),
+            resourceSnapshot: { version: 1, appendSystemPrompt: [], tools: info.tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt },
+          });
+          session.sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
+          const unsubscribe = session.subscribe((event) => {
+            if (event.type === "agent_start") {
+              session.sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
+              // Capture the actual live extension-tool scope AFTER original
+              // pi-subagents installed its allow/deny policy.
+              const tools = session.getActiveToolNames().filter((name) => !["Agent", "SubagentWorkflow", "get_subagent_result", "steer_subagent"].includes(name));
+              const entries = session.sessionManager.getEntries() as unknown as SessionEntry[];
+              const meta = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
+              if (meta?.type === "custom") session.sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, { ...meta.data as object, resourceSnapshot: { version: 1, appendSystemPrompt: [], tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt } });
+            }
+            if (event.type === "agent_settled") setImmediate(persistTerminal);
+          });
+          if (info.agentId) activation.children.get(info.agentId)!.unsubscribe = unsubscribe;
+          await dependencies.bindChild(session, info);
+          if (activation.closed) {
+            await host.shutdownChild(session);
+            throw new Error("Parent subagent activation closed while child was binding");
+          }
+          dependencies.invalidate();
         },
-      }));
+        shutdownChild(session) {
+          const existing = childShutdowns.get(session);
+          if (existing) return existing;
+          const shutdown = (async () => {
+            try { await dependencies.shutdownChild(session); }
+            finally {
+              for (const [id, child] of activation.children) {
+                if (child.session !== session) continue;
+                child.unsubscribe?.();
+                activation.children.delete(id);
+              }
+            }
+          })();
+          childShutdowns.set(session, shutdown);
+          return shutdown;
+        },
+      };
+      native.configureDesktopHost(host);
+      // Own even the children whose session_start has not returned yet. This
+      // runs BEFORE native dispose clears records, and writes final stop state.
+      pi.on("session_shutdown", async () => {
+        activation.closed = true;
+        activation.manager?.abortAll();
+        persistTerminal();
+      });
+      // Native handlers initialize and dispose the manager. Host handlers only
+      // bridge UI/history; they do not implement agent execution a second time.
+      native.default(pi);
+      const releases = [pi.events.on("subagents:completed", persistTerminal), pi.events.on("subagents:failed", persistTerminal)];
+      pi.on("session_start", (_event, ctx) => {
+        activation.parentId = ctx.sessionManager.getSessionId();
+        releaseLiveness = registerSessionLivenessProvider({ name: "pi-subagents", sessionId: activation.parentId, isActive: () => activation.manager?.hasRunning() ?? false });
+      });
+      pi.on("session_shutdown", async () => {
+        await Promise.all([...activation.children.values()].map(({ session }) => host.shutdownChild(session)));
+        releases.forEach((release) => release());
+        releaseLiveness?.();
+        activations.delete(activation);
+        activation.children.clear();
+        native.configureDesktopHost(undefined);
+      });
+      // Keep upstream result fields unchanged; add only a Desktop session link.
+      pi.on("tool_result", (event) => {
+        if (!["Agent", "get_subagent_result"].includes(event.toolName)) return;
+        const details = event.details as { agentId?: string } | undefined;
+        const record = details?.agentId ? activation.manager?.getRecord(details.agentId) : undefined;
+        if (!record?.session) return;
+        persistTerminal();
+        return { details: { ...event.details as object, kind: "pi-subagents", sessionId: record.session.sessionId, profile: record.type } };
+      });
     },
-  };
-}
-
-/** Keep Pi Web's integrated implementation when the legacy package is loaded. */
-export function preferPiWebSubagentExtension(base: LoadExtensionsResult): LoadExtensionsResult {
-  const host = base.extensions.find((extension) => extension.path === HOST_SUBAGENT_EXTENSION_PATH);
-  if (!host?.tools.has("Agent")) return base;
-  const legacyPaths = new Set(base.extensions
-    .filter((extension) => extension.path !== HOST_SUBAGENT_EXTENSION_PATH)
-    .filter((extension) => {
-      const source = extension.sourceInfo?.source ?? "";
-      const sourcePackage = source.replace(/^npm:/, "").split("@")[0];
-      const pathSegments = extension.path.replaceAll("\\", "/").split("/");
-      return sourcePackage === LEGACY_SUBAGENT_PACKAGE_NAME
-        || pathSegments.some((segment) => segment === LEGACY_SUBAGENT_PACKAGE_NAME);
-    })
-    .filter((extension) => [...SUBAGENT_TOOL_NAMES].some((name) => extension.tools.has(name)))
-    .map((extension) => extension.path));
-  if (legacyPaths.size === 0) return base;
-  return {
-    ...base,
-    extensions: base.extensions.filter((extension) => !legacyPaths.has(extension.path)),
-    errors: base.errors.filter((error) => {
-      if (legacyPaths.has(error.path)) return false;
-      if (error.path !== HOST_SUBAGENT_EXTENSION_PATH) return true;
-      return ![...legacyPaths].some((legacyPath) =>
-        [...SUBAGENT_TOOL_NAMES].some((name) =>
-          error.error === `Tool "${name}" conflicts with ${legacyPath}`
-        )
-      );
-    }),
   };
 }

@@ -32,16 +32,16 @@ import type {
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS, type HeadlessCustomUiTui } from "./custom-ui-terminal";
 import {
   createSubagentExtension,
-  preferPiWebSubagentExtension,
+  filteredSubagentLoaderOptions,
+  getNativeSubagentRun,
+  steerNativeSubagent,
+  abortNativeSubagent,
 } from "./subagent-extension";
 import {
-  listSubagentProfiles,
   readSubagentRun,
   readSubagentSessionResources,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
-import { createSubagentController } from "./subagent-runtime";
-import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import {
@@ -117,6 +117,7 @@ type AgentSessionWrapperOptions = {
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
+  managedSubagent?: boolean;
 };
 
 const IDLE_RESET_EVENT_TYPES = new Set([
@@ -240,6 +241,7 @@ export class AgentSessionWrapper {
   private readonly chatOnly: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
+  private readonly managedSubagent: boolean;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
@@ -256,6 +258,7 @@ export class AgentSessionWrapper {
     this.chatOnly = options.chatOnly ?? false;
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
+    this.managedSubagent = options.managedSubagent ?? false;
     this.installExactSystemPromptContinuation();
     this.applyExactSystemPrompt();
   }
@@ -468,7 +471,7 @@ export class AgentSessionWrapper {
 
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    if (!this._alive) return;
+    if (!this._alive || this.managedSubagent) return;
     // A resolved timeout of 0 disables idle shutdown entirely.
     if (SESSION_IDLE_TIMEOUT_MS === 0) return;
     if (!this.isRunning()) this.forceShutdownOnIdle = false;
@@ -1087,7 +1090,7 @@ export class AgentSessionWrapper {
     this.shutdownPromise = (async () => {
       try {
         try {
-          await this.waitForExtensionsBound();
+          await this.boundedSubagentShutdown(this.waitForExtensionsBound());
         } catch (error) {
           console.error(
             "[pi-web] extension binding failed before session shutdown:",
@@ -1096,13 +1099,21 @@ export class AgentSessionWrapper {
         }
         if (!this.sessionShutdownEmitted) {
           this.sessionShutdownEmitted = true;
-          await this.inner.extensionRunner.emit?.({ type: "session_shutdown", reason: "quit" });
+          await this.boundedSubagentShutdown(Promise.resolve(this.inner.extensionRunner.emit?.({ type: "session_shutdown", reason: "quit" })));
         }
       } finally {
         this.destroy();
       }
     })();
     return this.shutdownPromise;
+  }
+
+  private async boundedSubagentShutdown(operation: Promise<unknown>): Promise<void> {
+    if (!this.managedSubagent) { await operation; return; }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([operation, new Promise<void>((resolve) => { timer = setTimeout(resolve, 3000); })]);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   private resolveExtensionUiResponse(response: ExtensionUiResponse): void {
@@ -1704,35 +1715,39 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
   if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
 }
 
-const SUBAGENT_CONTROLLER = createSubagentController({
-  getSession: (sessionId) => getRegistry().get(sessionId),
-  registerSession: (inner, options) => {
+const SUBAGENT_HOST_DEPENDENCIES = {
+  async bindChild(inner: import("@earendil-works/pi-coding-agent").AgentSession) {
     const wrapper = new AgentSessionWrapper(inner, {
-      ...(options?.exactSystemPrompt !== undefined
-        ? { exactSystemPrompt: () => options.exactSystemPrompt! }
-        : {}),
-      chatOnly: options?.chatOnly,
       suppressCompletionNotifications: true,
+      managedSubagent: true,
     });
     registerRpcWrapper(wrapper);
+    // This is the child's ONLY bind; the native runner awaits this hook.
+    await wrapper.waitUntilReady();
   },
-  reopenSession: async (sessionId, sessionFile) =>
-    (await startRpcSession(sessionId, sessionFile, undefined)).session,
-  resolveSessionPath,
-  invalidateSessionList: invalidateSessionListCache,
-  isBuiltInSubagentsEnabled,
-});
+  async shutdownChild(inner: import("@earendil-works/pi-coding-agent").AgentSession) {
+    const wrapper = getRegistry().get(inner.sessionId);
+    if (wrapper?.inner === inner) await wrapper.shutdown();
+    else inner.dispose();
+  },
+  invalidate: invalidateSessionListCache,
+};
 
-export function getSubagentRun(sessionId: string) {
-  return SUBAGENT_CONTROLLER.get(sessionId);
+export async function getSubagentRun(sessionId: string) {
+  const live = getNativeSubagentRun(sessionId);
+  if (live) return live;
+  const path = await resolveSessionPath(sessionId);
+  if (!path) return null;
+  const manager = SessionManager.open(path);
+  return readSubagentRun(manager.getEntries() as unknown as SessionEntry[], sessionId, path);
 }
 
-export function steerSubagent(sessionId: string, message: string) {
-  return SUBAGENT_CONTROLLER.steer(sessionId, message);
+export async function steerSubagent(sessionId: string, message: string) {
+  steerNativeSubagent(sessionId, message);
 }
 
-export function abortSubagent(sessionId: string) {
-  return SUBAGENT_CONTROLLER.abort(sessionId);
+export async function abortSubagent(sessionId: string) {
+  abortNativeSubagent(sessionId);
 }
 
 function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
@@ -2036,7 +2051,11 @@ export async function startRpcSession(
       cwd: sessionCwd,
       agentDir,
       settingsManager,
-      resourceLoaderOptions: subagentResources
+      resourceLoaderOptions: await filteredSubagentLoaderOptions({
+        cwd: sessionCwd,
+        agentDir,
+        settingsManager,
+        ...(subagentResources
         ? {
             noExtensions: !subagentResources.loadExtensions,
             noSkills: !subagentResources.loadSkills,
@@ -2067,18 +2086,15 @@ export async function startRpcSession(
                 cwd: sessionCwd,
                 settings: settingsManager,
               }),
-              createSubagentExtension(
-                SUBAGENT_CONTROLLER.extensionRuntime,
-                () => listSubagentProfiles(sessionCwd),
-                isBuiltInSubagentsEnabled,
-              ),
+              createSubagentExtension(sessionCwd, SUBAGENT_HOST_DEPENDENCIES),
               createBuiltinAutomodeExtension(),
               createBuiltinRpivTodoExtension(),
             ],
             extensionsOverride: (base) => preferBuiltinRpivTodo(preferBuiltinAutomode(
-              preferUserBashExtension(preferPiWebSubagentExtension(base)),
+              preferUserBashExtension(base),
             )),
-          },
+          }),
+      }, settingsManager),
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
     const scope = await resolveVisibleModels(
@@ -2118,7 +2134,7 @@ export async function startRpcSession(
       ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
       ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-      ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
+      ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES, "SubagentWorkflow"] } : {}),
     });
 
     const persistedPreferences = await persistExplicitStartupPreferences(

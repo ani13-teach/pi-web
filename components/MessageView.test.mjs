@@ -187,6 +187,14 @@ test("renders subagents as standard tool calls with only an extra session button
   assert.doesNotMatch(html, />completed</);
   assert.doesNotMatch(html, />Find parser</);
 
+  const nativeHtml = renderMessage({
+    role: "assistant", provider: "anthropic", model: "claude-test", content: [block],
+  }, {
+    toolResults: new Map([[block.toolCallId, { ...result, details: { ...result.details, kind: "pi-subagents", agentId: "native-run" } }]]),
+    onOpenSession() {},
+  });
+  assert.match(nativeHtml, /aria-label="Open sub-agent session"/);
+
   const ordinaryHtml = renderMessage({
     role: "assistant",
     provider: "anthropic",

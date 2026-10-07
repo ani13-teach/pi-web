@@ -93,6 +93,30 @@ await build({
   },
 });
 
+// One self-contained module graph per root session: Desktop imports this ESM
+// bundle with a unique query, so all extension-local state stays root-local.
+// Only the SDK is external; third-party dependencies must be inlined too.
+await build({
+  ...common,
+  entryPoints: [join(root, "builtin", "pi-subagents", "src", "index.ts")],
+  outfile: join(root, "dist", "main", "pi-subagents.mjs"),
+  format: "esm",
+  splitting: false,
+  external: ["@earendil-works/*"],
+  banner: {
+    js: [
+      'import { createRequire as __piDesktopCreateRequire } from "node:module";',
+      "globalThis.require = __piDesktopCreateRequire(import.meta.url);",
+    ].join("\n"),
+  },
+});
+
+const subagentsOutput = join(root, "dist", "main", "pi-subagents");
+await mkdir(subagentsOutput, { recursive: true });
+for (const name of ["LICENSE", "LOCAL-CHANGES.md", "package.json", "SOURCE.md", "DESKTOP-PATCHES.md", "SOURCE-MANIFEST.json"]) {
+  await copyFile(join(root, "builtin", "pi-subagents", name), join(subagentsOutput, name));
+}
+
 // Retain the MIT notice for the embedded todo implementation in packaged apps.
 const todoOutput = join(root, "dist", "main", "rpiv-todo");
 await mkdir(todoOutput, { recursive: true });

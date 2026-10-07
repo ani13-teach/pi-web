@@ -7,7 +7,6 @@ import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/a
 import { sendAgentCommand } from "@/lib/agent-client";
 import { formatModelSpecLabel } from "@/lib/model-label";
 import type { ModelsData } from "@/lib/models-cache";
-import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
 import {
   getLastSettingsSelection,
@@ -39,7 +38,7 @@ import { ModelSelector } from "./ModelSelector";
 const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
-type EditableProfile = Omit<SubagentProfile, "scope" | "filePath">;
+type EditableProfile = Omit<SubagentProfile, "scope">;
 type EditorMode = "view" | "edit" | "create";
 
 const EMPTY_PROFILE: EditableProfile = {
@@ -48,11 +47,12 @@ const EMPTY_PROFILE: EditableProfile = {
   description: "",
   systemPrompt: "",
   tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
-  loadSkills: false,
-  loadExtensions: false,
-  promptMode: "append",
+  loadSkills: true,
+  loadExtensions: true,
+  promptMode: "replace",
   inheritContext: false,
-  runInBackground: false,
+  runInBackground: true,
+  fallbackModel: "",
   enabled: true,
 };
 
@@ -86,21 +86,51 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     loadExtensions: profile.loadExtensions,
     promptMode: profile.promptMode,
     ...(profile.model ? { model: profile.model } : {}),
+    fallbackModel: profile.fallbackModel ?? "",
     ...(profile.thinking ? { thinking: profile.thinking } : {}),
-    ...(profile.maxTurns ? { maxTurns: profile.maxTurns } : {}),
+    ...(profile.maxTurns !== undefined ? { maxTurns: profile.maxTurns } : {}),
+    extensionTools: profile.extensionTools ? [...profile.extensionTools] : undefined,
+    color: profile.color,
+    isolation: profile.isolation,
+    persistSession: profile.persistSession,
+    filePath: profile.filePath,
     inheritContext: profile.inheritContext,
     runInBackground: profile.runInBackground,
     enabled: profile.enabled,
   };
 }
 
-function profileKey(profile: Pick<SubagentProfile, "scope" | "name">): string {
-  return `${profile.scope}:${profile.name}`;
+function modelSelectorValue(spec?: string): { provider: string; modelId: string } | null {
+  if (!spec) return null;
+  const separator = spec.indexOf("/");
+  return separator < 0
+    ? { provider: "", modelId: spec }
+    : { provider: spec.slice(0, separator), modelId: spec.slice(separator + 1) };
+}
+
+function profileKey(profile: Pick<SubagentProfile, "scope" | "name" | "filePath">): string {
+  return `${profile.scope}:${profile.filePath ?? profile.name}`;
+}
+
+function isSubagentProfileOverridden(profile: SubagentProfile, profiles: readonly SubagentProfile[]): boolean {
+  // Sources arrive in native load order. Only an exact identity is replaced;
+  // case variants remain separate, and later files in the same scope win too.
+  const index = profiles.indexOf(profile);
+  return profiles.slice(index + 1).some((candidate) => candidate.name === profile.name);
+}
+
+function isEditableProfile(profile: SubagentProfile): boolean {
+  return isWritableScope(profile.scope) && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(profile.name);
+}
+
+/** Editing always stays with the selected source, including built-in presets. */
+function profileEditTarget(profile: SubagentProfile): { profile: SubagentProfile; scope: SubagentWritableScope } {
+  return { profile, scope: isWritableScope(profile.scope) ? profile.scope : "global" };
 }
 
 function duplicateProfileName(name: string, profiles: readonly SubagentProfile[]): string {
   const existing = new Set(profiles.map((profile) => profile.name.toLowerCase()));
-  const base = `${name}-copy`;
+  const base = `${/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) ? name : "custom-agent"}-copy`;
   let candidate = base;
   let suffix = 2;
   while (existing.has(candidate.toLowerCase())) candidate = `${base}-${suffix++}`;
@@ -108,7 +138,7 @@ function duplicateProfileName(name: string, profiles: readonly SubagentProfile[]
 }
 
 function isWritableScope(scope: SubagentScope): scope is SubagentWritableScope {
-  return scope === "global" || scope === "project";
+  return scope === "builtin" || scope === "global" || scope === "project";
 }
 
 function shortenPath(path: string): string {
@@ -159,13 +189,13 @@ export function AgentsConfig({
   const [selectedKey, setSelectedKey] = useState<string | null>(() => getLastSettingsSelection("agents", cwd));
   const [draft, setDraft] = useState<EditableProfile>(EMPTY_PROFILE);
   const [mode, setMode] = useState<EditorMode>("view");
-  const [targetScope, setTargetScope] = useState<SubagentWritableScope>("global");
+  const [targetScope, setTargetScope] = useState<SubagentWritableScope>("builtin");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [builtInEnabled, setBuiltInEnabled] = useState(false);
+  const [builtInEnabled, setBuiltInEnabled] = useState(true);
   const [maxConcurrent, setMaxConcurrent] = useState(10);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -194,15 +224,18 @@ export function AgentsConfig({
       setProfiles(next);
       const rememberedKey = preferredKey ?? getLastSettingsSelection("agents", cwd);
       const chosen = next.find((profile) => profileKey(profile) === rememberedKey)
+        ?? next.find((profile) => profile.scope === "builtin")
         ?? next.find((profile) => profile.scope === "project")
+        ?? next.find((profile) => profile.scope === "workspace")
         ?? next.find((profile) => profile.scope === "global")
         ?? next[0]
         ?? null;
       setSelectedKey(chosen ? profileKey(chosen) : null);
       if (chosen) {
-        setDraft(editableProfile(chosen));
-        setMode(isWritableScope(chosen.scope) ? "edit" : "view");
-        if (isWritableScope(chosen.scope)) setTargetScope(chosen.scope);
+        const target = profileEditTarget(chosen);
+        setDraft(editableProfile(target.profile));
+        setMode(isEditableProfile(chosen) ? "edit" : "view");
+        setTargetScope(target.scope);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -268,9 +301,10 @@ export function AgentsConfig({
 
   const selectProfile = (profile: SubagentProfile) => {
     setSelectedKey(profileKey(profile));
-    setDraft(editableProfile(profile));
-    setMode(isWritableScope(profile.scope) ? "edit" : "view");
-    if (isWritableScope(profile.scope)) setTargetScope(profile.scope);
+    const target = profileEditTarget(profile);
+    setDraft(editableProfile(target.profile));
+    setMode(isEditableProfile(profile) ? "edit" : "view");
+    setTargetScope(target.scope);
     setError(null);
   };
 
@@ -281,7 +315,7 @@ export function AgentsConfig({
     setSelectedKey(null);
     setDraft({ ...EMPTY_PROFILE, name, displayName: name });
     setMode("create");
-    setTargetScope("global");
+    setTargetScope("builtin");
     setError(null);
   };
 
@@ -291,12 +325,20 @@ export function AgentsConfig({
     setSelectedKey(null);
     setDraft({
       ...editableProfile(selected),
+      filePath: undefined,
       name,
       displayName: t("agents.copyName", { name: selected.displayName }),
     });
     setMode("create");
-    setTargetScope(isWritableScope(selected.scope) ? selected.scope : "global");
+    setTargetScope(isWritableScope(selected.scope) ? selected.scope : "builtin");
     setError(null);
+  };
+
+  const changeTargetScope = (scope: SubagentWritableScope) => {
+    setTargetScope(scope);
+    // Creation and duplication never carry a source path into a save scope.
+    setDraft((current) => ({ ...current, filePath: undefined }));
+    setSavedOk(false);
   };
 
   const save = async () => {
@@ -307,11 +349,18 @@ export function AgentsConfig({
       const response = await fetch("/api/subagents/profiles", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope: targetScope, profile: draft }),
+        body: JSON.stringify({
+          cwd,
+          scope: targetScope,
+          profile: draft,
+          originalName: !creating && selected?.scope === targetScope ? selected.name : undefined,
+          createOnly: creating,
+        }),
       });
       const data = await response.json() as { profile?: SubagentProfile; error?: string };
       if (!response.ok || data.error || !data.profile) throw new Error(data.error ?? `HTTP ${response.status}`);
       await loadProfiles(profileKey(data.profile));
+      setReloadNeeded(Boolean(sessionId));
       setSavedOk(true);
       setTimeout(() => setSavedOk(false), 2000);
     } catch (cause) {
@@ -322,7 +371,7 @@ export function AgentsConfig({
   };
 
   const remove = async () => {
-    if (!selected || !isWritableScope(selected.scope)) return;
+    if (!selected || !isWritableScope(selected.scope) || !isEditableProfile(selected)) return;
     if (!window.confirm(t("agents.deleteConfirm", { name: selected.displayName }))) return;
     setSaving(true);
     setError(null);
@@ -330,11 +379,12 @@ export function AgentsConfig({
       const response = await fetch("/api/subagents/profiles", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope: selected.scope, name: selected.name }),
+        body: JSON.stringify({ cwd, scope: selected.scope, name: selected.name, filePath: selected.filePath }),
       });
       const data = await response.json() as { error?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       await loadProfiles();
+      setReloadNeeded(Boolean(sessionId));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -344,24 +394,23 @@ export function AgentsConfig({
 
   const editing = mode !== "view";
   const creating = mode === "create";
+  const editingBuiltin = !creating && selected?.scope === "builtin";
   const disabled = !editing || saving || toggling;
-  const displayedScope = creating ? targetScope : selected?.scope;
-  const displayedPath = creating
-    ? targetScope === "global"
-      ? `~/.pi/agent/agents/${draft.name || "..."}.md`
-      : `./.pi/agents/${draft.name || "..."}.md`
+  const displayedScope = creating || editingBuiltin ? targetScope : selected?.scope;
+  const displayedPath = (creating || editingBuiltin) && !draft.filePath
+    ? targetScope === "builtin"
+      ? `~/.pi/agent/desktop-agents/${draft.name || "..."}.md`
+      : targetScope === "global"
+        ? `~/.pi/agent/agents/${draft.name || "..."}.md`
+        : `./.pi/agents/${draft.name || "..."}.md`
     : selected
-      ? displayProfilePath(selected, cwd) ?? t("agents.builtinPath")
+      ? displayProfilePath(editingBuiltin ? { ...selected, scope: targetScope, filePath: draft.filePath } : selected, cwd) ?? t("agents.builtinPath")
       : "";
-  const fullPath = creating ? displayedPath : selected?.filePath ?? displayedPath;
+  const fullPath = draft.filePath ?? displayedPath;
   const selectedModelAvailable = !draft.model || modelOptions.some((model) => `${model.provider}/${model.id}` === draft.model);
-  const selectedModel = (() => {
-    if (!draft.model) return null;
-    const separator = draft.model.indexOf("/");
-    return separator < 0
-      ? { provider: "", modelId: draft.model }
-      : { provider: draft.model.slice(0, separator), modelId: draft.model.slice(separator + 1) };
-  })();
+  const selectedModel = modelSelectorValue(draft.model);
+  const selectedFallbackModel = modelSelectorValue(draft.fallbackModel);
+  const fallbackModelAvailable = !draft.fallbackModel || modelOptions.some((model) => `${model.provider}/${model.id}` === draft.fallbackModel);
   const controlStyle = disabled ? { ...inputStyle, ...disabledInputStyle } : inputStyle;
   const update = <K extends keyof EditableProfile>(key: K, value: EditableProfile[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -372,20 +421,23 @@ export function AgentsConfig({
       update("enabled", enabled);
       return;
     }
-    if (!selected || !isWritableScope(selected.scope)) return;
+    if (!selected || !isEditableProfile(selected)) return;
+    const source = profileEditTarget(selected).profile;
     setToggling(true);
     setError(null);
     try {
       const response = await fetch("/api/subagents/profiles", {
-        method: "PATCH",
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope: selected.scope, name: selected.name, enabled }),
+        body: JSON.stringify({ cwd, scope: targetScope, profile: { ...editableProfile(source), enabled } }),
       });
       const data = await response.json() as { profile?: SubagentProfile; error?: string };
       if (!response.ok || data.error || !data.profile) throw new Error(data.error ?? `HTTP ${response.status}`);
       const saved = data.profile;
-      setProfiles((current) => current.map((profile) => profileKey(profile) === profileKey(saved) ? saved : profile));
-      setDraft((current) => ({ ...current, enabled: saved.enabled }));
+      setProfiles((current) => current.map((profile) => profileKey(profile) === profileKey(selected) ? saved : profile));
+      setSelectedKey(profileKey(saved));
+      setDraft((current) => ({ ...current, enabled: saved.enabled, filePath: saved.filePath }));
+      setReloadNeeded(Boolean(sessionId));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -488,7 +540,7 @@ export function AgentsConfig({
           <ConfigSidebarList>
               {loading ? (
                 <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</div>
-              ) : (["project", "global", "workspace", "builtin"] as const).map((scope) => {
+              ) : (["builtin", "project", "workspace", "global"] as const).map((scope) => {
                 const scopedProfiles = profiles.filter((profile) => profile.scope === scope);
                 if (scopedProfiles.length === 0) return null;
                 return (
@@ -544,15 +596,17 @@ export function AgentsConfig({
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
 
+                  {editingBuiltin && <span role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.builtinEditHint")}</span>}
                   {creating && (
                     <Field label={t("agents.saveScope")}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
-                        {(["global", "project"] as const).map((scope) => (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
+                        {(["builtin", "global", "project"] as const).map((scope) => (
                           <button
                             key={scope}
                             type="button"
-                            onClick={() => setTargetScope(scope)}
-                            disabled={saving}
+                            aria-pressed={targetScope === scope}
+                            onClick={() => changeTargetScope(scope)}
+                            disabled={disabled}
                             style={{ height: 28, border: "none", borderRadius: 4, background: targetScope === scope ? "var(--bg-selected)" : "transparent", color: targetScope === scope ? "var(--text)" : "var(--text-muted)", cursor: saving ? "default" : "pointer", fontSize: 11, fontWeight: targetScope === scope ? 600 : 400 }}
                           >
                             {t(`agents.scope.${scope}`)}
@@ -564,18 +618,15 @@ export function AgentsConfig({
 
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
                     <Field label={t("agents.name")}>
-                      {creating ? (
-                        <input aria-label={t("agents.name")} value={draft.name} disabled={disabled} onChange={(event) => update("name", event.target.value)} style={inputStyle} />
-                      ) : (
-                        <code style={{ minHeight: 34, display: "flex", alignItems: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12 }}>
-                          {draft.name}
-                        </code>
-                      )}
+                      <input aria-label={t("agents.name")} title={t("agents.nameRules")} value={draft.name} disabled={disabled} onChange={(event) => update("name", event.target.value)} style={controlStyle} />
                     </Field>
                     <Field label={t("agents.displayName")}>
                       <input aria-label={t("agents.displayName")} value={draft.displayName} disabled={disabled} onChange={(event) => update("displayName", event.target.value)} style={controlStyle} />
                     </Field>
                   </div>
+                  {(creating || (selected && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(selected.name))) && (
+                    <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.nameRules")}</span>
+                  )}
                   <Field label={t("agents.description")}>
                     <input aria-label={t("agents.description")} value={draft.description} disabled={disabled} onChange={(event) => update("description", event.target.value)} style={controlStyle} />
                   </Field>
@@ -598,7 +649,7 @@ export function AgentsConfig({
                     </div>
                   </Field>
 
-                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 12 }}>
                     <Field label={t("agents.model")}>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                         <ModelSelector
@@ -616,13 +667,33 @@ export function AgentsConfig({
                         {modelsError && <span style={{ color: "#ef4444", fontSize: 10 }}>{modelsError}</span>}
                       </div>
                     </Field>
+                    <Field label={t("agents.fallbackModel")}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <ModelSelector
+                          options={modelSelectorOptions}
+                          value={selectedFallbackModel}
+                          onChange={(provider, modelId) => update("fallbackModel", `${provider}/${modelId}`)}
+                          onClear={() => update("fallbackModel", "")}
+                          emptyLabel={modelsLoading ? t("agents.modelsLoading") : t("agents.noFallback")}
+                          selectedLabel={draft.fallbackModel && !fallbackModelAvailable ? t("agents.modelUnavailable", { model: formatModelSpecLabel(draft.fallbackModel) }) : undefined}
+                          disabled={disabled || modelsLoading || (modelOptions.length === 0 && !draft.fallbackModel)}
+                          ariaLabel={t("agents.fallbackModel")}
+                          variant="field"
+                          placement="auto"
+                        />
+                        <span style={{ color: "var(--text-muted)", fontSize: 10 }}>{t("agents.fallbackHint")}</span>
+                      </div>
+                    </Field>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 12 }}>
                     <Field label={t("agents.thinking")}>
                       <select aria-label={t("agents.thinking")} value={draft.thinking ?? ""} disabled={disabled} onChange={(event) => update("thinking", (event.target.value || undefined) as EditableProfile["thinking"])} style={controlStyle}>
                         {THINKING_OPTIONS.map((value) => <option key={value || "default"} value={value}>{value || t("agents.inherit")}</option>)}
                       </select>
                     </Field>
                     <Field label={t("agents.maxTurns")}>
-                      <input aria-label={t("agents.maxTurns")} type="number" min={1} value={draft.maxTurns ?? ""} disabled={disabled} onChange={(event) => update("maxTurns", event.target.value ? Number(event.target.value) : undefined)} style={controlStyle} />
+                      <input aria-label={t("agents.maxTurns")} type="number" min={0} value={draft.maxTurns ?? ""} disabled={disabled} onChange={(event) => update("maxTurns", event.target.value ? Number(event.target.value) : undefined)} style={controlStyle} />
                     </Field>
                   </div>
 
