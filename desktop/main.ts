@@ -773,75 +773,163 @@ async function runSmokeChecks(window: BrowserWindow): Promise<void> {
   const fixtureId = randomUUID();
   const fixtureDir = join(runtime.agentDir, "sessions", `--desktop-smoke-${fixtureId}--`);
   const fixtureFile = join(fixtureDir, `${fixtureId}.jsonl`);
-  mkdirSync(fixtureDir, { recursive: true });
+  const childId = randomUUID();
+  const childFile = join(fixtureDir, `${childId}.jsonl`);
+  const subagentFixture = {
+    childId,
+    childTitle: `Smoke child session ${childId}`,
+    description: `Smoke child task ${childId}`,
+    legacyControl: `SMOKE_LEGACY_CONTROL_${fixtureId}`,
+    nativeControl: `SMOKE_NATIVE_CONTROL_${fixtureId}`,
+    notification: `SMOKE_NOTIFICATION_${fixtureId}`,
+    ordinaryTool: `SMOKE_MAIN_READ_${fixtureId}`,
+    ordinaryResult: `SMOKE_MAIN_READ_RESULT_${fixtureId}`,
+    childProcess: `SMOKE_CHILD_PROCESS_${childId}`,
+    childControl: `SMOKE_CHILD_CONTROL_${childId}`,
+    childControlResult: `SMOKE_CHILD_CONTROL_RESULT_${childId}`,
+    childTool: `SMOKE_CHILD_READ_${childId}`,
+    childToolResult: `SMOKE_CHILD_READ_RESULT_${childId}`,
+    childNotification: `SMOKE_CHILD_NOTIFICATION_${childId}`,
+    childAnswer: `SMOKE_CHILD_ANSWER_${childId}`,
+  };
   const timestamp = new Date().toISOString();
+  const assistantFields = {
+    provider: "test", model: "fixture", api: "openai-responses", stopReason: "stop", timestamp: Date.now(),
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  };
   const fixture = [
     { type: "session", version: 3, id: fixtureId, timestamp, cwd: scenarioWorkspace() },
     { type: "message", id: "smoke-user", parentId: null, timestamp,
       message: { role: "user", content: `Desktop smoke session ${fixtureId}` } },
-    { type: "message", id: "smoke-answer", parentId: "smoke-user", timestamp,
-      message: { role: "assistant", content: [{ type: "text", text: `Desktop fixture answer ${fixtureId}` }],
-        provider: "test", model: "fixture", api: "openai-responses", stopReason: "stop", timestamp: Date.now(),
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } },
+    { type: "message", id: "smoke-controls", parentId: "smoke-user", timestamp,
+      message: { ...assistantFields, role: "assistant", content: [
+        // Deliberately omit displayOrigin here: persisted result provenance must hide old cards.
+        { type: "toolCall", id: "smoke-legacy-agent", name: "Agent", arguments: { prompt: subagentFixture.legacyControl } },
+        { type: "toolCall", id: "smoke-native-agent", name: "Agent", arguments: { prompt: subagentFixture.nativeControl } },
+        { type: "toolCall", id: "smoke-main-read", name: "read", arguments: { path: subagentFixture.ordinaryTool } },
+      ] } },
+    { type: "custom", id: "smoke-native-origin", parentId: "smoke-controls", timestamp,
+      customType: "pi-web:subagent-display", data: { version: 1, assistantEntryId: "smoke-controls", toolCallId: "smoke-native-agent", toolName: "Agent" } },
+    { type: "message", id: "smoke-legacy-result", parentId: "smoke-native-origin", timestamp,
+      message: { role: "toolResult", toolCallId: "smoke-legacy-agent", toolName: "Agent", timestamp: Date.now(),
+        content: [{ type: "text", text: subagentFixture.legacyControl }], isError: false,
+        details: { kind: "pi-subagents", sessionId: childId, status: "completed" } } },
+    { type: "message", id: "smoke-native-result", parentId: "smoke-legacy-result", timestamp,
+      message: { role: "toolResult", toolCallId: "smoke-native-agent", toolName: "Agent", timestamp: Date.now(),
+        content: [{ type: "text", text: subagentFixture.nativeControl }], isError: false } },
+    { type: "message", id: "smoke-main-read-result", parentId: "smoke-native-result", timestamp,
+      message: { role: "toolResult", toolCallId: "smoke-main-read", toolName: "read", timestamp: Date.now(),
+        content: [{ type: "text", text: subagentFixture.ordinaryResult }], isError: false } },
+    { type: "custom_message", id: "smoke-notification", parentId: "smoke-main-read-result", timestamp,
+      customType: "subagent-notification", content: subagentFixture.notification, display: true, details: { displayOrigin: "pi-subagents" } },
+    { type: "message", id: "smoke-answer", parentId: "smoke-notification", timestamp,
+      message: { ...assistantFields, role: "assistant", content: [{ type: "text", text: `Desktop fixture answer ${fixtureId}` }] } },
   ];
-  writeFileSync(fixtureFile, fixture.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
-  for (const cwd of new Set([scenarioWorkspace(), app.getPath("home")])) {
-    const access = await api("/api/cwd/validate", { method: "POST", body: { cwd } });
-    if (access.status !== 200) throw new Error(`Smoke workspace validation failed (${access.status})`);
-  }
-  await api("/api/sessions?force=1");
-  await window.loadURL(`${APP_ORIGIN}/index.html?session=${fixtureId}`);
-  const source = `window.__piSmokeKeepTerminal = ${keepTerminal}; window.__piSmokeSessionId = ${JSON.stringify(fixtureId)}; window.__piSmokeWorkspace = ${JSON.stringify(scenarioWorkspace())};\n${probeSource}`;
-
-  // Renderer console output is the only place some failures show up.
-  window.webContents.on("console-message", (_event, level, message) => {
-    console.log(`[renderer:${level}] ${message}`);
-  });
-
-  let outcomes: { name: string; ok: boolean; detail?: string }[] = [];
+  const childFixture = [
+    { type: "session", version: 3, id: childId, timestamp, cwd: scenarioWorkspace(), parentSession: fixtureFile },
+    { type: "custom", id: "smoke-child-meta", parentId: null, timestamp, customType: "pi-web:subagent",
+      data: { version: 1, parentSessionId: fixtureId, parentSessionPath: fixtureFile, parentToolCallId: "smoke-legacy-agent",
+        profile: "work", description: subagentFixture.description, task: subagentFixture.childTitle,
+        runInBackground: true, createdAt: timestamp,
+        resourceSnapshot: { version: 1, appendSystemPrompt: [], tools: [], loadSkills: false, loadExtensions: false } } },
+    { type: "message", id: "smoke-child-user", parentId: "smoke-child-meta", timestamp,
+      message: { role: "user", content: subagentFixture.childTitle } },
+    { type: "message", id: "smoke-child-process", parentId: "smoke-child-user", timestamp,
+      message: { ...assistantFields, role: "assistant", content: [
+        { type: "text", text: subagentFixture.childProcess },
+        // This must render in the child even though the same native origin is hidden in the parent.
+        { type: "toolCall", id: "smoke-child-agent", name: "Agent", arguments: { prompt: subagentFixture.childControl } },
+        { type: "toolCall", id: "smoke-child-read", name: "read", arguments: { path: subagentFixture.childTool } },
+      ] } },
+    { type: "custom", id: "smoke-child-origin", parentId: "smoke-child-process", timestamp,
+      customType: "pi-web:subagent-display", data: { version: 1, assistantEntryId: "smoke-child-process", toolCallId: "smoke-child-agent", toolName: "Agent" } },
+    { type: "message", id: "smoke-child-control-result", parentId: "smoke-child-origin", timestamp,
+      message: { role: "toolResult", toolCallId: "smoke-child-agent", toolName: "Agent", timestamp: Date.now(),
+        content: [{ type: "text", text: subagentFixture.childControlResult }], isError: false, details: { kind: "pi-subagents" } } },
+    { type: "message", id: "smoke-child-read-result", parentId: "smoke-child-control-result", timestamp,
+      message: { role: "toolResult", toolCallId: "smoke-child-read", toolName: "read", timestamp: Date.now(),
+        content: [{ type: "text", text: subagentFixture.childToolResult }], isError: false } },
+    { type: "custom_message", id: "smoke-child-notification", parentId: "smoke-child-read-result", timestamp,
+      customType: "subagent-notification", content: subagentFixture.childNotification, display: true, details: { displayOrigin: "pi-subagents" } },
+    { type: "message", id: "smoke-child-answer", parentId: "smoke-child-notification", timestamp,
+      message: { ...assistantFields, role: "assistant", content: [{ type: "text", text: subagentFixture.childAnswer }] } },
+    { type: "custom", id: "smoke-child-completed", parentId: "smoke-child-answer", timestamp,
+      customType: "pi-web:subagent-result", data: { version: 1, status: "completed", completedAt: timestamp, result: subagentFixture.childAnswer } },
+  ];
   try {
-    outcomes = (await window.webContents.executeJavaScript(source, true)) as typeof outcomes;
-  } catch (error) {
-    outcomes = [
-      { name: "probe script ran", ok: false, detail: error instanceof Error ? error.message : String(error) },
-    ];
-  }
-
-  const layoutSource = await readFile(join(here, "layout-probe.js"), "utf8");
-  const shotDirectory = join(process.cwd(), ".tmp-shot");
-  mkdirSync(shotDirectory, { recursive: true });
-  for (const [width, height] of [[1080, 600], [900, 560], [760, 500]] as const) {
-    const name = `chat layout fits ${width}x${height}`;
-    try {
-      const viewport = await resizeContent(window, width, height);
-      if (viewport[0] !== width || viewport[1] !== height) {
-        throw new Error(`requested ${width}x${height}, actual viewport ${viewport.join("x")}`);
-      }
-      const detail = await window.webContents.executeJavaScript(layoutSource, true) as string;
-      outcomes.push({ name, ok: true, detail });
-    } catch (error) {
-      outcomes.push({ name, ok: false, detail: String(error) });
+    mkdirSync(fixtureDir, { recursive: true });
+    writeFileSync(fixtureFile, fixture.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    writeFileSync(childFile, childFixture.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    for (const cwd of new Set([scenarioWorkspace(), app.getPath("home")])) {
+      const access = await api("/api/cwd/validate", { method: "POST", body: { cwd } });
+      if (access.status !== 200) throw new Error(`Smoke workspace validation failed (${access.status})`);
     }
-    const image = await window.webContents.capturePage();
-    writeFileSync(join(shotDirectory, `ui-${width}.png`), image.toPNG());
-  }
+    await api("/api/sessions?force=1");
+    await window.loadURL(`${APP_ORIGIN}/index.html?session=${fixtureId}`);
+    const source = `window.__piSmokeKeepTerminal = ${keepTerminal}; window.__piSmokeSessionId = ${JSON.stringify(fixtureId)}; window.__piSmokeSubagentFixture = ${JSON.stringify(subagentFixture)}; window.__piSmokeWorkspace = ${JSON.stringify(scenarioWorkspace())};\n${probeSource}`;
 
-  for (const outcome of outcomes) {
-    console.log(`${outcome.ok ? "PASS" : "FAIL"}  ${outcome.name}${outcome.detail ? ` — ${outcome.detail}` : ""}`);
-  }
-  const failed = outcomes.filter((outcome) => !outcome.ok).length;
-  console.log(`\n${outcomes.length - failed}/${outcomes.length} window checks passed`);
+    // Renderer console output is the only place some failures show up.
+    window.webContents.on("console-message", (_event, level, message) => {
+      console.log(`[renderer:${level}] ${message}`);
+    });
 
-  if (holdMs > 0) {
-    console.log(`holding the app open for ${holdMs}ms (pid ${process.pid}) for external checks`);
-    await new Promise((resolve) => setTimeout(resolve, holdMs));
-  }
+    let outcomes: { name: string; ok: boolean; detail?: string }[] = [];
+    try {
+      outcomes = (await window.webContents.executeJavaScript(source, true)) as typeof outcomes;
+    } catch (error) {
+      outcomes = [
+        { name: "probe script ran", ok: false, detail: error instanceof Error ? error.message : String(error) },
+      ];
+    }
 
-  await discardSession(fixtureId);
-  rmSync(fixtureDir, { recursive: true, force: true });
-  process.exitCode = failed === 0 ? 0 : 1;
-  app.quit();
+    const layoutSource = await readFile(join(here, "layout-probe.js"), "utf8");
+    const shotDirectory = join(process.cwd(), ".tmp-shot");
+    mkdirSync(shotDirectory, { recursive: true });
+    for (const [width, height] of [[1080, 600], [900, 560], [760, 500]] as const) {
+      const name = `chat layout fits ${width}x${height}`;
+      try {
+        const viewport = await resizeContent(window, width, height);
+        if (viewport[0] !== width || viewport[1] !== height) {
+          throw new Error(`requested ${width}x${height}, actual viewport ${viewport.join("x")}`);
+        }
+        const detail = await window.webContents.executeJavaScript(layoutSource, true) as string;
+        outcomes.push({ name, ok: true, detail });
+      } catch (error) {
+        outcomes.push({ name, ok: false, detail: String(error) });
+      }
+      const image = await window.webContents.capturePage();
+      writeFileSync(join(shotDirectory, `ui-${width}.png`), image.toPNG());
+    }
+
+    for (const outcome of outcomes) {
+      console.log(`${outcome.ok ? "PASS" : "FAIL"}  ${outcome.name}${outcome.detail ? ` — ${outcome.detail}` : ""}`);
+    }
+    const failed = outcomes.filter((outcome) => !outcome.ok).length;
+    console.log(`\n${outcomes.length - failed}/${outcomes.length} window checks passed`);
+
+    if (holdMs > 0) {
+      console.log(`holding the app open for ${holdMs}ms (pid ${process.pid}) for external checks`);
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+    }
+
+    process.exitCode = failed === 0 ? 0 : 1;
+  } catch (error) {
+    process.exitCode = 1;
+    throw error;
+  } finally {
+    // Both fixtures live under this unique directory. Also clean up on probe/setup failure.
+    try {
+      await discardSession(childId);
+    } finally {
+      try {
+        await discardSession(fixtureId);
+      } finally {
+        rmSync(fixtureDir, { recursive: true, force: true });
+        app.quit();
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

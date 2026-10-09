@@ -30,6 +30,7 @@ import { SkillsConfig } from "./SkillsConfig";
 import { AgentsConfig } from "./AgentsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { AutomodeConfig } from "./AutomodeConfig";
+import { CodemodeSettings } from "./CodemodeSettings";
 import { BackupSettings } from "./BackupSettings";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 
@@ -271,6 +272,8 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
           </div>
         </div>
       </section>
+
+      <CodemodeSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} />
 
       {shellSettings?.isWindows && (
         <section className="settings-general-section">

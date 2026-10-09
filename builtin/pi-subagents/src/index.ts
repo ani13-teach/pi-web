@@ -230,6 +230,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
 
   return {
+    displayOrigin: "pi-subagents",
     id: record.id,
     description: record.description,
     status: record.status,
@@ -2394,6 +2395,7 @@ Terse command-style prompts produce shallow, generic work.
         content: formatWorkflowNotification(task),
         display: true,
         details: {
+          displayOrigin: "pi-subagents",
           id: task.id,
           description: `Workflow ${task.workflowName ?? task.id}`,
           status: task.status === "completed" ? "completed" : task.status === "killed" ? "stopped" : "error",

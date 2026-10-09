@@ -1,8 +1,89 @@
 # 本轮审阅修复与验收
 
-本轮按「优先修日常会遇到的问题」执行。桌面内部仍用 Electron IPC，不加本地 HTTP 服务。
-`lib/`、`components/`、`hooks/`、`app/api/`、`public/` 和两份上游 CSS 在当时保持逐字节一致
-（后来的自动模式一轮改动了其中 5 个文件，见本文最后一段）。
+本文汇集多个阶段的改动与验收，旧结果只代表当时的源码/产物；当前行为和维护规则以 README 为准。
+桌面内部仍用 Electron IPC，不加本地 HTTP 服务。早期逐字节一致、固定差异清单与旧版本递增规则都是历史记录，不应当成当前约束。
+
+## 子代理运行设置 UI 与配置来源统一（源码，未打包）
+
+- 设置 → 子代理左侧增加「运行设置」，全局／项目两层可编辑 18 个原生运行字段，展示继承来源、项目覆盖、真实配置路径与保存后重载提示。保存只提交修改过的键，恢复继承用 `null` 删除该层键，保留未知 JSON；不会写入整份 effective 默认值。终端 FleetView 等专用选项不放入桌面 UI。
+- 后台并发优先级统一为项目 native → 全局 native → 旧 Desktop 显式值 → 默认 10。修复旧宿主把默认 10 覆盖用户 native 4 的问题；旧文件不迁移、不改写。严格编辑校验与原生容错运行时并发解析分离，避免其他错误字段中断 `session_start`。
+- 单个代理增加提示词追加／替换、worktree／off／调用默认、保存会话、扩展工具白名单及颜色。显式选择器列表可替换／清空已有值，旧客户端省略时继续保留；拒绝 `ext:/read`、`ext:foo/` 等会扩大原生工具范围的空名称。
+- 审查首轮发现三个阻塞：选择器校验过宽、严格编辑读取连带阻断启动、运行设置保存后 profile 投影陈旧；已按调用链修正并补回归。运行设置保存／会话重载后刷新 profiles；启用切换保留 `effective`；运行设置页也显示顶部开关／重载失败。严格解析文案明确原生目前不覆盖 `desktop-agents` 容错加载。
+- `npm run typecheck`、`npm run build` 退出 0，日志 `.tmp-subagent-runtime-build.log`。最终 9 文件定向批次 **181/181**、退出 0，日志 `.tmp-subagent-runtime-tests.log`；包含真实 SDK＋本地模拟 provider 验证 global 1 覆盖 legacy 10、第二任务排队，project 2 允许双任务，以及无效的非并发字段不阻断启动。桌面通用回归 **76/76**、退出 0，日志 `.tmp-subagent-runtime-desktop-tests.log`。
+- 新增 `tests/subagent-runtime-ipc.mjs`：构建后真实后台 IPC **6/6**、退出 0，临时目录验证 native 4、补丁落盘、项目覆盖、零／false、恢复继承、非法字段无修改、旧文件保留。没有真实模型、联网服务或个人配置。
+- 首轮高级选项测试的正则误匹配 `inherit_context:`，修正为准确词／行边界后通过；扩大批次时原 profiles route 四个断言未包含已有 `effective:true`，更新准确返回形状后通过，未删除或跳过用例。
+- 新增 `tests/subagent-settings-browser.mjs`，当前最终源码复跑 **67/67**、Electron 退出 0，日志 `.tmp-subagent-runtime-browser.log`。真实组件＋独立窗口＋内存 API 验证点击、键盘输入、补丁保存、全局／项目覆盖／恢复继承、四个高级字段保存回显；1100×800、760×500 均无水平溢出，可滚动并点击底部保存。21 次 mock 请求、运行设置保存 4 次、profile 保存 1 次；原生 select 使用明确记录的 8 次 change 事件注入，其他点击／文本输入使用 Chromium 真实输入事件。不是完整应用 IPC／打包版验收；没有网络、后台、真实模型或个人数据。专项截图与独立 profile 成功后清理。
+- 二轮复核指出刷新失败时仍可能保留旧表单：新增 `profilesReady` 状态，刷新开始即阻止编辑／保存；刷新失败显示错误与重新读取入口。`loadProfiles` 返回成功与否，`reloadSession` 失败时保留重载提示，不调用成功回调。新增执行真实处理逻辑的失败／重试回归；真实窗口也故意模拟一次 profile GET 500，确认旧表单不可保存、重试恢复编辑。窗口异常场景首跑 66/67，因为仍处于原有 2 秒“已保存”暂时禁用状态；改为等待该正常状态结束后断言，所有断言保留，重跑 67/67。
+- 本次验收均为源码／开发态，不作为打包版窗口通过。未打包、安装、修改用户当前配置、关闭用户实例、提交或推送。保留已有及并发出现的其他源码改动。
+
+## Code Mode：0.2.4 打包与待完成的窗口验收
+
+- 按用户「开始」授权打包，将项目 `0.2.3` → `0.2.4`，同步 package.json 与锁文件两处；保留已有及并发出现的工作区修改，不提交、安装、关闭用户实例或推送。
+- 打包前 `npm run typecheck` 退出 0；Code Mode、RPC、子代理、消息回归批次 159/159、退出 0，日志 `.tmp-codemode-0.2.4-preflight.log`。对四个已有子代理源码变化仅同步 Desktop SHA-256，原来源信息/摘要不变，打包前 63 文件清单通过。打包之后 `src/settings.ts` 又有并发改动，当前源码不再等同已打包快照，不将后续变化算进此包或悄悄重打。
+- `HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 npm run package` 退出 0；日志 `.tmp-codemode-0.2.4-package.log`。安装包 `release/Pi Desktop Setup 0.2.4.exe`，140579431 字节，修改时间 `2026-10-09T12:30:41.039Z`，SHA-256 `9814c3e0c37488f911ed2d01771d90e370b29edf644afc76f35154ea7318587c`。
+- 新增 `scripts/verify-packaged-codemode.mjs`：把包复制至仓库外，清除 NODE_PATH，使用该包 Electron 的 Node、包内 SDK、内存凭据/本地 mock provider 和临时工作区；7/7、退出 0，日志 `.tmp-codemode-0.2.4-packaged-runtime.log`。验证官方 worker/WASM 执行并行读取、保留传统工具、中间全文不进入模型上下文、跨调用 store、沙箱无 Node process，以及嵌套 tool_call 的 SDK deny 阻止写文件。该包内检查不是完整 Desktop automode 端到端验证；其真实守卫由此前 SDK 定向测试覆盖。
+- asar 项目版本、前端 `0.2.4-desktop`、Code Mode 路由、四个 Pi `1.1.0` 包及 latest.yml 文件大小/SHA-512 核对通过、退出 0；记录 `.tmp-codemode-artifact-0.2.4.json`。首次只读核验因命令转义、electron-builder 的 URL 空格转连字符及 Windows asar 路径格式失败，按真实格式修正核验后通过，未修改产物。
+- **窗口验收尚未通过**：前两次使用仓库外副本和独立 userdata，Electron 报 `UnknownVizError`；首轮被中断，重试退出 1、没有有效窗口统计。只读调查定位最可能是 `desktop/main.ts` 的 `capturePage()`，该调用在错误捕获之外，且结果汇总在其后；没有 tally 不等于断言未执行。日志 `.tmp-codemode-0.2.4-packaged-window.log`、`.tmp-codemode-0.2.4-packaged-window-retry.log`。
+- 测试启动器 `scripts/smoke-window.mjs` 新增可重复 `--electron-arg` 诊断选项，仅传给测试实例，未改安装包。脚本语法和 tally 反例检查退出 0；第三次加 `--trace-warnings --disable-gpu`，保留所有断言、三尺寸截图、端口和进程检查，仍报同错并在 200 秒超时，日志 `.tmp-codemode-0.2.4-packaged-software-window.log`。软件渲染没有解决问题，图形合成环境仍仅是怀疑而非已证实根因；停止重复盲测。不能声明 23/23 或端口/退出采样通过，不能沿用旧 0.2.3 结果。未运行本包真实服务商聊天/恢复检查，未安装；窗口阻塞未解决。
+
+## Pi 1.1 升级后单次发送重复显示用户消息
+
+- 根因：新内核按 system → user 发出初始消息事件；界面将不可见的 system 追加到聊天数组，打断只检查末尾用户消息的乐观显示确认，随后再次追加同一条 user。代码路径复现，不读取用户实际会话；真实 SDK mock 回归核对单次 prompt 只投递一条 user、调用一次 provider。
+- 修复：`hooks/useAgentSession.ts` 显式接纳 SDK `SystemMessage` 事件类型，但忽略其 start/end 对聊天数组、流式状态、阶段和滚动的修改；上下文持久化仍由内核处理。保留原来只消费当前乐观消息的规则，不按全文全局去重。
+- 新增 `hooks/useAgentSession.messages.test.mjs`，转译执行实际 hook 消息事件分支，覆盖真实 agent loop 的 system → user、普通提示词、扩展改写、图片格式、历史同文与连续同文队列、工具更新和晚到事件。修复前该回归命令退出 1、6/8 失败；修复后首轮相关批次 84/84、退出 0。测试使用内存消息与隔离 mock，不调用真实模型或修改用户数据。
+- 验证：`npm run typecheck`、`npm run build` 退出 0；加入 SDK 单次投递断言后，hook/消息 key/流式 reducer/SDK/事件线/消息组件定向批次 85/85、退出 0，日志 `.tmp-duplicate-message-tests.log`。Vite 保留已有无效动态分块提示。新增消息回归已被 `test:web` 自动收集，不运行/宣称整套通过。
+- 开发版 `dist/` 窗口检查使用临时独立用户数据与工作目录：23/23、后置 3/3、退出 0，日志 `.tmp-duplicate-message-window.log`；自己的 fixture 会话和临时目录已清理。采样时没有监听端口、采样的 7 个进程全部退出；不代表全时段监控。窗口检查证明应用/IPC 正常，不是实际发送消息的 UI 专项；重复消息由上述实际事件分支回归覆盖。
+- 未打包、安装、关闭用户实例、调用真实模型、提交或推送；修复仅覆盖源码与开发版 `dist/`，已安装版本/旧安装包未修改。已有未提交修改保留。
+
+## 项目说明完整性核查与补齐（仅文档）
+
+- 用户授权核查当前项目说明并补齐。确认已有 README 和备份规划，但缺少集中入门指南，且启动、上游同步、备份现状、测试范围有过时或混淆内容。
+- 新增 `docs/project-guide.md`：开发环境、首次启动、源码地图、配置/数据位置、环境变量、修改/测试流程、备份实际范围、打包交付、排错、安全与许可边界。
+- README 增加文档导航及备份入口；更正 `npm start` 会先构建/复制 npm、界面含本地修改、出网不限模型服务；替换已过时的“五文件同步”清单，明确测试排除与历史结果的区别。
+- `docs/backup-plan.md` 将已实现首版与规划分开，补密码/令牌/大小限制、不覆盖和隔离恢复规则，列明内置 Agent 编辑/删除记录、记忆、浏览器偏好等当前遗漏项。
+- 核验为只读源码与文档检查：3份说明的10个本地链接/锚点、41处 npm 命令引用、51处已有源码引用，以及版本/启动链/隔离参数/备份常量一致性检查通过，命令退出0。初版核验将外置 Skill 脚本和规划中待创建模块误当成仓库现有文件而失败；按文档明确的来源/规划作用域区分后复查通过，未改源码或降低应用测试断言。
+- `node scripts/run-web-tests.mjs --list` 退出0，本次列出155文件、排除9文件/过滤5条用例；仅列清单，没有运行该套件。文档差异空白检查通过，新指南无尾部空白。
+- 本次仅修改说明文件，保留已有及期间出现的其他工作区改动；未构建、运行应用/模型测试、修改用户数据、改变版本、生成安装包、安装、提交或推送。现有交付包记录不作为本次新验收。
+
+## Code Mode：官方 SDK 接入与常规页开关
+
+- 新增 `lib/codemode.ts`，以 `builtin:codemode` 工厂加载内核 1.1.0 官方实现，保持 `on` 模式及原始工具声明；遵守禁用扩展/替换内置扩展机制。仅根会话增加工厂，不扩大子代理的资源快照，不接入 `tool_search`，不增加放行规则或改权限配置。
+- 设置 → 常规增加 Code Mode 开关，默认关闭；`/api/tools/codemode` 读写全局 `defaultTools`，校验来源、JSON 类型和布尔值，锁内保留未知配置及工具选择语义。保存后重载当前会话，其他会话需重载；项目设置仍可覆盖全局值。用户真实配置未被本轮测试启用/停用。
+- `withExtensionTools` 排除未经配置启用的 codemode，避免“保留全部扩展”意外开启。重载既保留真实 Chat-only 无工具策略，也允许 codemode-only 普通会话在关闭后从空工具列表重新启用。只读预设下脚本找不到 bash/edit/write，不能借脚本恢复写权限。
+- PowerShell 设置解析内核 `+name/-name` 后再替换 shell，防止 Code Mode 的 `+codemode` 配置造成默认 read/edit/write 丢失。Code Mode 关闭时也避免把仅剩修饰符的白名单误当成增量列表，恢复不该启用的默认工具。
+- 定向回归 `node --test lib/codemode-settings.test.mjs lib/codemode-sdk.test.mjs app/api/tools/codemode/route.test.mjs lib/powershell-settings.test.mjs lib/rpc-manager*.test.mjs lib/subagent-extension.test.mjs`：111/111，退出 0，日志 `.tmp-codemode-tests.log`。真实 SDK + 官方 QuickJS + 本地模拟 provider 验证并行读取仅返回筛选结果、内层真实 automode deny 阻止 bash/edit/write 实现执行、外层分类器拒绝阻止脚本启动、重载/纯聊天/只读/禁用扩展；临时配置与凭据完全隔离，不调用真实模型。
+- Electron 后台同款运行时检查 `ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test lib/codemode-sdk.test.mjs`：9/9，退出 0，日志 `.tmp-codemode-electron-sdk.log`。`npm run typecheck`、`npm run build`、`npm run test:desktop`（76/76）、`npm test`（33/33，新增 Code Mode GET 路由到面板读取清单）、`npm run test:gate` 均退出 0；日志 `.tmp-codemode-build.log`、`.tmp-codemode-desktop-tests.log`、`.tmp-codemode-ipc.log`。
+- 开发版窗口初测在截图阶段报 Electron `UnknownVizError` 并超时，没有窗口结论；核对独立 userdata 路径后仅终止自身测试树，未改变产品或测试断言。标准隔离重试窗口 23/23、后置 3/3，退出 0，日志 `.tmp-codemode-window-retry.log`。新增实际界面读取检查验证常规页开关与 IPC 返回值一致，不点击保存真实配置。采样时无监听端口，采样的 7 个进程均退出；自己的中断 fixture 和两次临时 userdata 已清理。
+- README 同步入口、配置共享、范围与使用示例。本轮只更新源码和开发版 `dist/`，未打包或安装；保留已有未提交改动，未修改已安装版或关闭用户实例。未验证真实服务商的 codemode 工具调用或打包产物。
+
+## Pi 1.1.0 升级与 0.2.3 安装包交付
+
+- npm `dist-tags.latest` 查询为 `1.1.0`，四个 `@earendil-works/pi-*` 包全部以 `--save-exact --include=dev` 升级；项目版本 `0.2.2` → `0.2.3`，同步锁文件。保留任务开始时已有 Adaptive、文档和版本号未提交改动，未升级 Electron、同步界面上游、安装、提交或推送。
+- SDK 适配：`lib/pi-types.ts` 和 `lib/rpc-manager.ts` 使用 `started/queued/handled` 提交结果；handled 及时清理计数，不留假运行或虚假完成通知。精确系统提示词通过公开 `agent.transformContext` 请求投影覆盖，首轮、工具后继续、队列 follow-up 和 reload 均保留 SDK 消息变换及工具声明，不修改只读 Agent 状态。
+- `builtin/pi-subagents/src/mention-clone.ts` 将父会话已投影历史写入克隆 SessionManager，保留 compaction/branch summary/context edit 后上下文；原生 hook 提供实时提示词，保留父会话归属、单次强制后台 Agent 调用及新工具 context 能力。只更新 Desktop 源码摘要，原来源 SHA-256 不变，库存 63 个文件验证通过。
+- 内置自动模式仅将 simple completion 改用公开 `ctx.modelRegistry.streamSimple()`，由 SDK 归一化 TranscriptContext 与解析请求认证；规则、配置、决策和 fail-closed 行为不变。未改全局插件或权限设置。子代理 mock provider 与标题测试按新增 transcript system 消息适配，保留原业务断言并补系统提示词校验。
+- 验证：`npm run typecheck`、`npm run build` 退出 0；`node --test lib/rpc-manager*.test.mjs` 75/75（代理执行）、`lib/mention-clone.test.mjs` 3/3（代理执行）、`tests/automode-classifier-sdk.test.mjs` 2/2，均退出 0。真实 SDK 回归使用本地 mock 和隔离/内存凭据。SDK 扩展、事件线、自适应思考、模型配置、思考映射、标题定向批次首测 39/42，三个标题断言仍期待旧无 system 消息；按新真实上下文适配后单独重跑标题 9/9、退出 0，其他 33 项首测通过。没有删除断言或改动标题功能。
+- 快速验收：`acceptance.mjs --fast --only test:desktop,test,test:smoke,test:gate,test:window --timeout 180`，5/5 步骤通过，每步退出 0：桌面 76/76、IPC 33/33、原生 6/6、门槛反例检查通过、开发版窗口 22/22 + 后置 3/3。日志 `.tmp-acceptance/2026-10-09T11-15-48/`。
+- `HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 npm run package` 退出 0；日志 `.tmp-pi-upgrade-0.2.3-package.log`。安装包 `release/Pi Desktop Setup 0.2.3.exe`，140576270 字节，SHA-256 `d09d7fecee3ef827f5801dfd803e341845d50b3ab6ed072bb533cabd85e74350`；修改时间 `2026-10-09T11:19:43.086Z`，`release/win-unpacked` 时间 `2026-10-09T11:18:34.958Z`。
+- 仓库外打包版验收：`acceptance.mjs --model --packaged --only test:window:packaged,test:chat:packaged,test:resilience:packaged --timeout 360`，3/3 步骤通过，每步退出 0；窗口 22/22 + 后置 3/3、真实聊天 10/10、刷新 4/4、后台崩溃恢复 11/11。三个日志均有 `isolated copy:`，使用独立窗口数据与自身 fixture，不关闭用户实例；日志 `.tmp-acceptance/2026-10-09T11-20-10/`。端口结论仅限采样时刻，退出检查仅覆盖采样进程。
+- 核对 asar 项目版本、前端 `0.2.3-desktop`/`1.1.0`、解包四个内核版本及 latest.yml 的版本/字节数/SHA-512，通过，退出 0；证据 `.tmp-pi-upgrade-artifact-0.2.3.json`。首次只读核对因 js-yaml 无 default export 失败，改用 namespace import 后成功，未修改产物。安装依赖报告 19 项审计告警，未自动运行 audit fix 或扩大依赖升级。Vite 保留已有无效动态分块提示。
+
+## 0.2.2 安装包交付
+
+- 按用户打包要求，将版本 `0.2.1` → `0.2.2`，同步 package.json 和锁文件两处项目版本；包含本轮 Adaptive 能力选项，保留旧安装包和已有源码改动。锁文件首次精确替换因匹配不唯一被拒，补充项目名称上下文后成功，未改依赖版本。
+- `HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 npm run package` 退出 0，完整构建、随包 npm 校验、Windows x64 NSIS 打包完成；日志 `.tmp-adaptive-package-0.2.2.log`。
+- 安装包 `release/Pi Desktop Setup 0.2.2.exe`，141488810 字节，修改时间 `2026-10-08T15:24:06.000Z`（UTC）；SHA-256 `7dbee63a25af06bcd90d03ad16001e9acbf6ba34753fc9750035affae2229e47`。`release/win-unpacked` 修改时间 `2026-10-08T15:23:02.070Z`。核对 asar 版本 `0.2.2`、渲染版本 `0.2.2-desktop`、Adaptive 标签与 compat 接线、解包 pi-ai `0.85.1` 的兼容字段、latest.yml 版本/大小/SHA-512 通过，退出 0；记录 `.tmp-adaptive-artifact-0.2.2.json`。
+- 打包版仓库外隔离副本 `%TEMP%/pi-desktop-check-KPF6xm/app` 使用独立用户数据与测试 cwd，窗口 22/22、后置 3/3，退出 0；日志 `.tmp-adaptive-pkg-window-0.2.2.log` 含 `isolated copy:`。采样时无监听端口，采样的 7 个进程均退出；自身 fixture、副本、测试 cwd 和用户数据已清理。该检查不是 Adaptive 专项点击或真实 relay 测试。
+- 沿用上一轮源码类型检查、31/31 定向测试与开发版窗口证据，不因版本号变化重跑全面验收。原始 `git diff --check` 将版本行的既有 CRLF 报为尾部空白；保留文件行尾，`git -c core.whitespace=cr-at-eol diff --check` 退出 0。README 最新交付信息同步；未安装、关闭用户实例、调用真实模型、提交、发布或推送。
+
+## 模型能力：自适应思考（Adaptive）
+
+- `components/ModelsConfig.tsx` 在能力区「推理 / 思考」和「图片输入」之间增加 Adaptive；按模型 API 覆盖优先于渠道 API 的顺序，仅对 `anthropic-messages` 显示。勾选读取渠道与模型合并后的 compat，开启同时启用 reasoning，关闭写显式 `false` 覆盖渠道继承值并保留普通 reasoning 与其他配置。
+- 复用内核 0.85.1 已有 `compat.forceAdaptiveThinking`，未修改 pi-ai 或新增请求改写层。思考强度继续使用聊天等级与已有 `thinkingLevelMap`；简体、繁体、英文均提示保存后新建或重载会话。
+- `node --test components/ModelsConfig.test.mjs lib/adaptive-thinking.test.mjs lib/models-config-store.test.mjs lib/thinking-level-map.test.mjs`：31/31，退出 0。新增测试用临时 models.json → 真实 ModelRuntime → mock fetch 截获请求体，覆盖 adaptive、low/medium/high effort、自定义 max 映射、渠道继承、显式关闭恢复 budget，以及聊天关闭思考时不强制 adaptive。未调用真实模型或读取用户凭据；只读审查无阻塞。
+- `npm run typecheck`、`npm run build`、`git diff --check` 退出 0。构建更新开发版 `dist/`，Vite 保留已有 dynamic import 无效分块提示，不影响构建结果。
+- 开发版窗口检查使用独立临时 cwd/用户数据，22/22、后置 3/3，退出 0；日志 `.tmp-adaptive-window.log`。采样的 7 个进程全部退出，采样时无监听端口；自身 fixture 和临时目录已清理。窗口检查覆盖通用启动/IPC/布局，不声称已实测 Adaptive 复选框点击或真实 relay。
+- README 同步。未打包、安装、提交、发布、修改用户真实模型配置或关闭用户正在使用的实例；原有三个未跟踪 `.tmp` 文件保留。
 
 ## 0.2.1 安装包交付
 

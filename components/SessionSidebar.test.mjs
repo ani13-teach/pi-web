@@ -5,6 +5,8 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { getSessionListIndices } = await jiti.import("./SessionSidebar.tsx");
+const { filterOrdinarySessions, listSessionFamilies } = await jiti.import("../lib/session-family.ts");
+const { getProjectActivity, getRecentProjects, otherWorkspaceActivityIndicator, sessionsForProject } = await jiti.import("../lib/project-groups.ts");
 
 const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
 const sessionItemSource = source.slice(source.indexOf("function SessionItem("));
@@ -129,21 +131,43 @@ test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
 });
 
-test("renders collapsible subagent rows while keeping family activity on the root", () => {
+test("uses ordinary sessions throughout the sidebar while preserving the shell catalog", () => {
+  assert.match(source, /const ordinarySessions = useMemo\(\(\) => filterOrdinarySessions\(allSessions\), \[allSessions\]\)/);
+  assert.match(source, /setAllSessions\(data\.sessions\)/);
+  assert.match(source, /onSessionsChange\?\.\(allSessions\)/);
+  assert.match(source, /const projects = getRecentProjects\(ordinarySessions\)/);
+  assert.match(source, /const recentProjects = getRecentProjects\(ordinarySessions\)/);
+  assert.match(source, /getProjectActivity\(ordinarySessions, runningSessionIds, unreadSessionIds\)/);
+  assert.match(source, /const filteredSessions = selectedProject\s*\? sessionsForProject\(ordinarySessions, selectedProject\.key\)\s*: ordinarySessions/);
   assert.match(source, /const sessionFamilies = listSessionFamilies\(filteredSessions\)/);
-  assert.match(source, /const visibleRows = listVisibleSessionRows\(sessionFamilies, expandedSessionIds\)/);
-  assert.match(source, /useState<Set<string>>\(\(\) => new Set\(\)\)/);
-  assert.match(source, /height: visibleRows\.length \* SESSION_LIST_ITEM_HEIGHT/);
-  assert.match(source, /visibleRows\.findIndex\(\(row\) => row\.session\.id === focusedSessionId\)/);
-  assert.match(source, /const selectedAncestors = includeSubagentAncestors\(filteredSessions/);
-  assert.match(source, /const runningAncestors = includeSubagentAncestors\(filteredSessions, runningSessionIds\)/);
-  assert.match(source, /const unreadAncestors = includeSubagentAncestors\(filteredSessions, unreadSessionIds\)/);
-  assert.match(source, /collapsed && selectedAncestors\.has\(session\.id\)/);
-  assert.match(source, /isRunning=\{runningAncestors\.has\(session\.id\)\}/);
-  assert.match(source, /isUnread=\{unreadAncestors\.has\(session\.id\)\}/);
+  assert.match(source, /const visibleSessions = sessionFamilies\.map\(\(family\) => family\.root\)/);
+  assert.match(source, /!loading && !error && sessionFamilies\.length === 0/);
+  assert.match(source, /height: visibleSessions\.length \* SESSION_LIST_ITEM_HEIGHT/);
+  assert.match(source, /visibleSessions\.findIndex\(\(session\) => session\.id === focusedSessionId\)/);
+  assert.match(source, /session=\{session\}\s*isSelected=\{session\.id === selectedSessionId\}\s*isRunning=\{runningSessionIds\.has\(session\.id\)\}\s*isUnread=\{unreadSessionIds\.has\(session\.id\)\}/);
   assert.match(source, /onClick=\{\(\) => handleSelectSessionFromList\(session\)\}/);
-  assert.match(source, /depth=\{depth\}[\s\S]*?hasChildren=\{hasChildren\}[\s\S]*?collapsed=\{collapsed\}[\s\S]*?onToggleCollapse=\{\(\) => toggleSession\(session\.id\)\}/);
-  assert.match(sessionItemSource, /e\.stopPropagation\(\); onToggleCollapse\?\.\(\)/);
-  assert.match(sessionItemSource, /aria-label=\{t\(collapsed \? "sidebar\.expandSubagents" : "sidebar\.collapseSubagents"\)\}/);
-  assert.match(sessionItemSource, /aria-expanded=\{!collapsed\}/);
+  assert.doesNotMatch(source, /includeSubagentAncestors|expandedSessionIds|onToggleCollapse|latestModified|expandSubagents|collapseSubagents/);
+  assert.doesNotMatch(sessionItemSource, /\b(?:hasChildren|collapsed|depth)\??:/);
+});
+
+test("ordinary project lists, activity counts and empty states exclude hidden subagents", () => {
+  const session = (id, cwd, modified, relation) => ({
+    id, cwd, projectRoot: cwd, projectKey: cwd, modified, created: modified,
+    path: `/tmp/${id}.jsonl`, firstMessage: id, messageCount: 1,
+    ...(relation ? { relation } : {}),
+  });
+  const root = session("root", "/main", "2026-01-01");
+  const fork = session("fork", "/other", "2026-01-03", { kind: "fork", originSessionId: root.id });
+  const child = session("child", "/main", "2026-01-05", { kind: "subagent", parentSessionId: root.id });
+  const orphan = session("orphan", "/hidden-only", "2026-01-06", { kind: "subagent", parentSessionId: "missing" });
+  const ordinary = filterOrdinarySessions([child, root, orphan, fork]);
+  assert.deepEqual(getRecentProjects(ordinary).map(({ root }) => root), ["/other", "/main"]);
+  const activity = getProjectActivity(ordinary, new Set([child.id, orphan.id, fork.id]), new Set([child.id, orphan.id, root.id]));
+  assert.deepEqual(activity.get("/main"), { running: 0, unread: 1 });
+  assert.deepEqual(activity.get("/other"), { running: 1, unread: 0 });
+  assert.equal(activity.has("/hidden-only"), false);
+  const hiddenActivity = getProjectActivity(ordinary, new Set([child.id, orphan.id]), new Set([child.id, orphan.id]));
+  assert.equal(otherWorkspaceActivityIndicator(hiddenActivity, "/main"), null);
+  assert.deepEqual(listSessionFamilies(sessionsForProject(ordinary, "/hidden-only")), []);
+  assert.deepEqual(listSessionFamilies(filterOrdinarySessions([child, orphan])), []);
 });

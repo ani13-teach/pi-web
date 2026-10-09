@@ -138,7 +138,9 @@ export function resolveAgentInvocationConfig(
     thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
     maxTurns: agentConfig?.maxTurns ?? params.max_turns,
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
-    runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? opts?.defaultRunInBackground ?? false,
+    // Execution mode is a per-call choice; unlike model/tool restrictions,
+    // a saved default must never veto an explicit background/foreground request.
+    runInBackground: params.run_in_background ?? agentConfig?.runInBackground ?? opts?.defaultRunInBackground ?? false,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,
     isolation,
     // Undefined rather than an empty object when nothing was overridden: callers

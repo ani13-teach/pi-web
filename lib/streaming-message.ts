@@ -88,6 +88,7 @@ function applyDelta(
             toolCallId: event.id ?? current.toolCallId,
             toolName: event.toolName ?? current.toolName,
             rawInput: current.rawInput ?? "",
+            ...(event.displayOrigin ? { displayOrigin: event.displayOrigin } : {}),
           };
         }
         if (typeof event.toolName !== "string") return null;
@@ -97,6 +98,7 @@ function applyDelta(
           toolName: event.toolName,
           input: {},
           rawInput: "",
+          ...(event.displayOrigin ? { displayOrigin: event.displayOrigin } : {}),
         };
       });
     case "toolcall_delta":
@@ -107,6 +109,7 @@ function applyDelta(
             toolCallId: event.id || current.toolCallId,
             toolName: event.toolName || current.toolName,
             rawInput: (current.rawInput ?? "") + event.delta,
+            ...(event.displayOrigin ? { displayOrigin: event.displayOrigin } : {}),
           }
           : null
       ));
@@ -116,6 +119,7 @@ function applyDelta(
         toolCallId: event.toolCall.id,
         toolName: event.toolCall.name,
         input: event.toolCall.arguments,
+        ...(event.displayOrigin ? { displayOrigin: event.displayOrigin } : {}),
       }));
     default:
       return state;

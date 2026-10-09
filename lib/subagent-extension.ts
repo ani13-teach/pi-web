@@ -9,10 +9,12 @@ import type { DesktopChildInfo, DesktopHost, DefaultResourceLoaderOptions } from
 import { createBuiltinAutomodeExtension, preferBuiltinAutomode } from "./automode-builtin";
 import { createBuiltinRpivTodoExtension, preferBuiltinRpivTodo } from "./rpiv-todo-builtin";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
-import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
+import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import { resolveSubagentRuntimeMaxConcurrent } from "./subagent-runtime-settings";
 import { registerSessionLivenessProvider } from "./session-liveness";
 import { readSubagentRun, SUBAGENT_META_TYPE, SUBAGENT_RESULT_TYPE, SUBAGENT_STATUS_TYPE, type SubagentRunInfo } from "./subagents";
 import type { SessionEntry } from "./types";
+import { SUBAGENT_DISPLAY_TOOLS, nativeSubagentToolNames } from "./subagent-display";
 
 export const HOST_SUBAGENT_EXTENSION_NAME = "pi-subagents";
 export interface SubagentToolDetails {
@@ -163,7 +165,7 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
       };
       const host: DesktopHost = {
         cwd,
-        get maxConcurrent() { return readSubagentSettings().maxConcurrent; },
+        get maxConcurrent() { return resolveSubagentRuntimeMaxConcurrent(cwd); },
         onManager(manager) { activation.manager = manager; },
         async resourceLoaderOptions(configCwd, options) {
           const base = await filteredSubagentLoaderOptions(options, options.settingsManager!);
@@ -258,10 +260,10 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
       });
       // Keep upstream result fields unchanged; add only a Desktop session link.
       pi.on("tool_result", (event) => {
-        if (!["Agent", "get_subagent_result"].includes(event.toolName)) return;
+        if (!SUBAGENT_DISPLAY_TOOLS.has(event.toolName) || !nativeSubagentToolNames(pi.getAllTools()).includes(event.toolName)) return;
         const details = event.details as { agentId?: string } | undefined;
         const record = details?.agentId ? activation.manager?.getRecord(details.agentId) : undefined;
-        if (!record?.session) return;
+        if (!record?.session) return { details: { ...event.details as object, kind: "pi-subagents" } };
         persistTerminal();
         return { details: { ...event.details as object, kind: "pi-subagents", sessionId: record.session.sessionId, profile: record.type } };
       });

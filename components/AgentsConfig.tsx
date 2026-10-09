@@ -34,6 +34,7 @@ import {
   ConfigSwitch,
 } from "./SettingsUi";
 import { ModelSelector } from "./ModelSelector";
+import { SubagentRuntimeSettings } from "./SubagentRuntimeSettings";
 
 const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -113,6 +114,7 @@ function profileKey(profile: Pick<SubagentProfile, "scope" | "name" | "filePath"
 }
 
 function isSubagentProfileOverridden(profile: SubagentProfile, profiles: readonly SubagentProfile[]): boolean {
+  if (profile.effective !== undefined) return !profile.effective;
   // Sources arrive in native load order. Only an exact identity is replaced;
   // case variants remain separate, and later files in the same scope win too.
   const index = profiles.indexOf(profile);
@@ -190,13 +192,14 @@ export function AgentsConfig({
   const [draft, setDraft] = useState<EditableProfile>(EMPTY_PROFILE);
   const [mode, setMode] = useState<EditorMode>("view");
   const [targetScope, setTargetScope] = useState<SubagentWritableScope>("builtin");
+  const [profilesReady, setProfilesReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(true);
-  const [maxConcurrent, setMaxConcurrent] = useState(10);
+  const [runtimeSettingsOpen, setRuntimeSettingsOpen] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -213,8 +216,9 @@ export function AgentsConfig({
     name: model.name,
   })), [modelOptions]);
 
-  const loadProfiles = useCallback(async (preferredKey?: string) => {
+  const loadProfiles = useCallback(async (preferredKey?: string): Promise<boolean> => {
     setLoading(true);
+    setProfilesReady(false);
     setError(null);
     try {
       const response = await fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
@@ -237,8 +241,11 @@ export function AgentsConfig({
         setMode(isEditableProfile(chosen) ? "edit" : "view");
         setTargetScope(target.scope);
       }
+      setProfilesReady(true);
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setLoading(false);
     }
@@ -263,7 +270,6 @@ export function AgentsConfig({
           throw new Error(data.error ?? `HTTP ${response.status}`);
         }
         setBuiltInEnabled(data.enabled);
-        if (typeof data.maxConcurrent === "number") setMaxConcurrent(data.maxConcurrent);
       } catch (cause) {
         if (controller.signal.aborted) return;
         setSettingsError(cause instanceof Error ? cause.message : String(cause));
@@ -300,6 +306,7 @@ export function AgentsConfig({
   }, [cwd]);
 
   const selectProfile = (profile: SubagentProfile) => {
+    setRuntimeSettingsOpen(false);
     setSelectedKey(profileKey(profile));
     const target = profileEditTarget(profile);
     setDraft(editableProfile(target.profile));
@@ -309,6 +316,7 @@ export function AgentsConfig({
   };
 
   const beginCreate = () => {
+    setRuntimeSettingsOpen(false);
     let name = "custom-agent";
     let suffix = 2;
     while (profiles.some((profile) => profile.name === name)) name = `custom-agent-${suffix++}`;
@@ -342,6 +350,7 @@ export function AgentsConfig({
   };
 
   const save = async () => {
+    if (!profilesReady || loading) return;
     setSaving(true);
     setError(null);
     setSavedOk(false);
@@ -359,9 +368,9 @@ export function AgentsConfig({
       });
       const data = await response.json() as { profile?: SubagentProfile; error?: string };
       if (!response.ok || data.error || !data.profile) throw new Error(data.error ?? `HTTP ${response.status}`);
-      await loadProfiles(profileKey(data.profile));
+      const refreshed = await loadProfiles(profileKey(data.profile));
       setReloadNeeded(Boolean(sessionId));
-      setSavedOk(true);
+      setSavedOk(refreshed);
       setTimeout(() => setSavedOk(false), 2000);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -395,7 +404,7 @@ export function AgentsConfig({
   const editing = mode !== "view";
   const creating = mode === "create";
   const editingBuiltin = !creating && selected?.scope === "builtin";
-  const disabled = !editing || saving || toggling;
+  const disabled = !editing || saving || toggling || loading || !profilesReady;
   const displayedScope = creating || editingBuiltin ? targetScope : selected?.scope;
   const displayedPath = (creating || editingBuiltin) && !draft.filePath
     ? targetScope === "builtin"
@@ -407,6 +416,9 @@ export function AgentsConfig({
       ? displayProfilePath(editingBuiltin ? { ...selected, scope: targetScope, filePath: draft.filePath } : selected, cwd) ?? t("agents.builtinPath")
       : "";
   const fullPath = draft.filePath ?? displayedPath;
+  const effectiveProfile = !creating && selected
+    ? profiles.find((profile) => profile.name === selected.name && profile.effective === true)
+    : undefined;
   const selectedModelAvailable = !draft.model || modelOptions.some((model) => `${model.provider}/${model.id}` === draft.model);
   const selectedModel = modelSelectorValue(draft.model);
   const selectedFallbackModel = modelSelectorValue(draft.fallbackModel);
@@ -434,7 +446,7 @@ export function AgentsConfig({
       const data = await response.json() as { profile?: SubagentProfile; error?: string };
       if (!response.ok || data.error || !data.profile) throw new Error(data.error ?? `HTTP ${response.status}`);
       const saved = data.profile;
-      setProfiles((current) => current.map((profile) => profileKey(profile) === profileKey(selected) ? saved : profile));
+      setProfiles((current) => current.map((profile) => profileKey(profile) === profileKey(selected) ? { ...saved, effective: profile.effective } : profile));
       setSelectedKey(profileKey(saved));
       setDraft((current) => ({ ...current, enabled: saved.enabled, filePath: saved.filePath }));
       setReloadNeeded(Boolean(sessionId));
@@ -467,29 +479,14 @@ export function AgentsConfig({
     }
   };
 
-  const updateMaxConcurrent = async (value: number) => {
-    setMaxConcurrent(value);
-    setSettingsError(null);
-    try {
-      const response = await fetch("/api/subagents/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxConcurrent: value }),
-      });
-      const data = await response.json() as Partial<SubagentSettingsResponse> & { error?: string };
-      if (!response.ok || data.error || typeof data.maxConcurrent !== "number") throw new Error(data.error ?? `HTTP ${response.status}`);
-      setMaxConcurrent(data.maxConcurrent);
-    } catch (cause) {
-      setSettingsError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
-
   const reloadSession = async () => {
     if (!sessionId) return;
     setReloading(true);
     setSettingsError(null);
     try {
       await sendAgentCommand(sessionId, { type: "reload" });
+      const refreshed = await loadProfiles(selectedKey ?? undefined);
+      if (!refreshed) throw new Error(t("agents.refreshFailed"));
       setReloadNeeded(false);
       onReloaded?.();
     } catch (cause) {
@@ -505,27 +502,16 @@ export function AgentsConfig({
         <div className="agents-feature-copy">
           <strong>{t("agents.builtInTitle")}</strong>
           <span>{t("agents.builtInDescription")}</span>
+          {runtimeSettingsOpen && (settingsError || error) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error}</span>}
           {reloadNeeded && <span role="status" className="agents-feature-reload-notice">{t("agents.reloadRequired")}</span>}
         </div>
         <div className="agents-feature-actions">
+          {!profilesReady && !loading && <ConfigButton size="small" onClick={() => void loadProfiles(selectedKey ?? undefined)} disabled={saving || toggling || reloading}>{t("agents.refreshProfiles")}</ConfigButton>}
           {reloadNeeded && sessionId && (
             <ConfigButton size="small" onClick={() => void reloadSession()} disabled={reloading || settingsSaving}>
               {reloading ? t("agents.reloading") : t("agents.reloadSession")}
             </ConfigButton>
           )}
-          <label className="agents-concurrency-control" title={t("agents.maxConcurrentDescription")}>
-            <span>{t("agents.maxConcurrent")}</span>
-            <input
-              aria-label={t("agents.maxConcurrent")}
-              type="number"
-              min={1}
-              max={32}
-              value={maxConcurrent}
-              disabled={settingsLoading || settingsSaving}
-              onChange={(event) => setMaxConcurrent(Number(event.target.value))}
-              onBlur={() => void updateMaxConcurrent(maxConcurrent)}
-            />
-          </label>
           <ConfigSwitch
             checked={builtInEnabled}
             disabled={settingsLoading || reloading}
@@ -538,6 +524,9 @@ export function AgentsConfig({
       <ConfigSplitView>
         <ConfigSidebar>
           <ConfigSidebarList>
+              <ConfigSidebarItem active={runtimeSettingsOpen} onClick={() => setRuntimeSettingsOpen(true)}>
+                <ConfigSidebarText>{t("agents.runtime.title")}</ConfigSidebarText>
+              </ConfigSidebarItem>
               {loading ? (
                 <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</div>
               ) : (["builtin", "project", "workspace", "global"] as const).map((scope) => {
@@ -551,7 +540,7 @@ export function AgentsConfig({
                       return (
                         <ConfigSidebarItem
                           key={profileKey(profile)}
-                          active={selectedKey === profileKey(profile) && !creating}
+                          active={selectedKey === profileKey(profile) && !creating && !runtimeSettingsOpen}
                           onClick={() => selectProfile(profile)}
                         >
                           <ConfigStatusDot active={profile.enabled} />
@@ -565,7 +554,7 @@ export function AgentsConfig({
               })}
           </ConfigSidebarList>
           <ConfigListAction
-                active={creating}
+                active={creating && !runtimeSettingsOpen}
                 onClick={beginCreate}
               >
                 {t("agents.new")}
@@ -573,6 +562,12 @@ export function AgentsConfig({
         </ConfigSidebar>
 
         <ConfigDetail>
+          {runtimeSettingsOpen ? (
+            <SubagentRuntimeSettings cwd={cwd} onSaved={() => {
+              setReloadNeeded(Boolean(sessionId));
+              void loadProfiles(selectedKey ?? undefined);
+            }} />
+          ) : (
           <ConfigDetailStack className="is-fill">
               {!selected && !creating ? (
                 <ConfigEmptyState>{t("agents.empty")}</ConfigEmptyState>
@@ -590,12 +585,23 @@ export function AgentsConfig({
                       </span>
                     </ConfigDetailHeaderInfo>
                     <ConfigDetailActions>
-                      {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
-                      {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling}>{t("agents.delete")}</ConfigButton>}
+                      {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling || loading || !profilesReady}>{t("agents.duplicate")}</ConfigButton>}
+                      {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={disabled}>{t("agents.delete")}</ConfigButton>}
                       <ConfigSwitch checked={draft.enabled} disabled={disabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
 
+                  {!creating && (
+                    <span role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                      {effectiveProfile
+                        ? t("agents.effectiveSource", { source: displayProfilePath(effectiveProfile, cwd) ?? t("agents.builtinPath") })
+                        : t("agents.noEffectiveSource")}
+                      {effectiveProfile && ` · ${!effectiveProfile.enabled
+                        ? t("agents.modeDisabled")
+                        : effectiveProfile.runInBackground ? t("agents.modeBackground") : t("agents.modeForeground")}`}
+                      {` · ${t("agents.callModeOverride")}`}
+                    </span>
+                  )}
                   {editingBuiltin && <span role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.builtinEditHint")}</span>}
                   {creating && (
                     <Field label={t("agents.saveScope")}>
@@ -701,17 +707,52 @@ export function AgentsConfig({
                     <Toggle label={t("agents.inheritContext")} disabled={disabled} checked={draft.inheritContext} onChange={(checked) => update("inheritContext", checked)} />
                     <Toggle label={t("agents.background")} disabled={disabled} checked={draft.runInBackground} onChange={(checked) => update("runInBackground", checked)} />
                   </div>
+                  <details>
+                    <summary style={{ cursor: "pointer", color: "var(--text-muted)", fontSize: 12 }}>{t("agents.advanced")}</summary>
+                    <ConfigDetailStack>
+                      <Field label={t("agents.promptMode")}>
+                        <select aria-label={t("agents.promptMode")} value={draft.promptMode} disabled={disabled} onChange={(event) => update("promptMode", event.target.value as EditableProfile["promptMode"])} style={controlStyle}>
+                          <option value="append">{t("agents.promptAppend")}</option>
+                          <option value="replace">{t("agents.promptReplace")}</option>
+                        </select>
+                        <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.promptModeHint")}</span>
+                      </Field>
+                      <Field label={t("agents.isolation")}>
+                        <select aria-label={t("agents.isolation")} value={draft.isolation ?? ""} disabled={disabled} onChange={(event) => update("isolation", (event.target.value || undefined) as EditableProfile["isolation"])} style={controlStyle}>
+                          <option value="">{t("agents.callerDefault")}</option>
+                          <option value="off">{t("agents.isolationOff")}</option>
+                          <option value="worktree">{t("agents.isolationWorktree")}</option>
+                        </select>
+                        <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.isolationHint")}</span>
+                      </Field>
+                      <Field label={t("agents.persistSession")}>
+                        <select aria-label={t("agents.persistSession")} value={draft.persistSession === undefined ? "" : String(draft.persistSession)} disabled={disabled} onChange={(event) => update("persistSession", event.target.value === "" ? undefined : event.target.value === "true")} style={controlStyle}>
+                          <option value="">{t("agents.runtimeDefault")}</option>
+                          <option value="true">{t("agents.persistSessionOn")}</option>
+                          <option value="false">{t("agents.persistSessionOff")}</option>
+                        </select>
+                      </Field>
+                      <Field label={t("agents.extensionTools")}>
+                        <input aria-label={t("agents.extensionTools")} value={(draft.extensionTools ?? []).join(",")} disabled={disabled} onChange={(event) => update("extensionTools", event.target.value.split(","))} style={controlStyle} />
+                        <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.extensionToolsHint")}</span>
+                      </Field>
+                      <Field label={t("agents.color")}>
+                        <input aria-label={t("agents.color")} value={draft.color ?? ""} disabled={disabled} onChange={(event) => update("color", event.target.value || undefined)} style={controlStyle} />
+                      </Field>
+                    </ConfigDetailStack>
+                  </details>
                 </ConfigDetailStack>
               )}
           </ConfigDetailStack>
+          )}
         </ConfigDetail>
       </ConfigSplitView>
-      <ConfigFooter status={(settingsError || error) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error}</span>}>
+      {!runtimeSettingsOpen && <ConfigFooter status={(settingsError || error) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error}</span>}>
         {editing && (
           <ConfigButton
             variant="primary"
             onClick={() => void save()}
-            disabled={saving || savedOk || toggling || !draft.name.trim()}
+            disabled={saving || savedOk || toggling || loading || !profilesReady || !draft.name.trim()}
             className={savedOk ? "is-success" : undefined}
           >
             {savedOk && (
@@ -722,7 +763,7 @@ export function AgentsConfig({
             <span>{savedOk ? t("i18n.saved") : saving ? t("agents.saving") : t("agents.save")}</span>
           </ConfigButton>
         )}
-      </ConfigFooter>
+      </ConfigFooter>}
     </ConfigPanelShell>
   );
 }

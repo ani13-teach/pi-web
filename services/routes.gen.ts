@@ -51,13 +51,15 @@ import * as route45 from "../app/api/skills/search/route";
 import * as route46 from "../app/api/skills/update/route";
 import * as route47 from "../app/api/subagents/[id]/route";
 import * as route48 from "../app/api/subagents/profiles/route";
-import * as route49 from "../app/api/subagents/settings/route";
-import * as route50 from "../app/api/terminal/[id]/events/route";
-import * as route51 from "../app/api/terminal/[id]/route";
-import * as route52 from "../app/api/terminal/route";
-import * as route53 from "../app/api/tools/settings/route";
-import * as route54 from "../app/api/web-auth/route";
-import * as route55 from "../app/api/worktrees/route";
+import * as route49 from "../app/api/subagents/runtime-settings/route";
+import * as route50 from "../app/api/subagents/settings/route";
+import * as route51 from "../app/api/terminal/[id]/events/route";
+import * as route52 from "../app/api/terminal/[id]/route";
+import * as route53 from "../app/api/terminal/route";
+import * as route54 from "../app/api/tools/codemode/route";
+import * as route55 from "../app/api/tools/settings/route";
+import * as route56 from "../app/api/web-auth/route";
+import * as route57 from "../app/api/worktrees/route";
 
 export const ROUTES: { path: string; module: RouteModule }[] = [
   { path: "/api/agent/[id]/bash-output", module: route0 as RouteModule },
@@ -109,11 +111,13 @@ export const ROUTES: { path: string; module: RouteModule }[] = [
   { path: "/api/skills/update", module: route46 as RouteModule },
   { path: "/api/subagents/[id]", module: route47 as RouteModule },
   { path: "/api/subagents/profiles", module: route48 as RouteModule },
-  { path: "/api/subagents/settings", module: route49 as RouteModule },
-  { path: "/api/terminal/[id]/events", module: route50 as RouteModule },
-  { path: "/api/terminal/[id]", module: route51 as RouteModule },
-  { path: "/api/terminal", module: route52 as RouteModule },
-  { path: "/api/tools/settings", module: route53 as RouteModule },
-  { path: "/api/web-auth", module: route54 as RouteModule },
-  { path: "/api/worktrees", module: route55 as RouteModule },
+  { path: "/api/subagents/runtime-settings", module: route49 as RouteModule },
+  { path: "/api/subagents/settings", module: route50 as RouteModule },
+  { path: "/api/terminal/[id]/events", module: route51 as RouteModule },
+  { path: "/api/terminal/[id]", module: route52 as RouteModule },
+  { path: "/api/terminal", module: route53 as RouteModule },
+  { path: "/api/tools/codemode", module: route54 as RouteModule },
+  { path: "/api/tools/settings", module: route55 as RouteModule },
+  { path: "/api/web-auth", module: route56 as RouteModule },
+  { path: "/api/worktrees", module: route57 as RouteModule },
 ];

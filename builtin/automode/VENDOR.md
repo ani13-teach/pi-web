@@ -24,6 +24,15 @@ Upstream: https://github.com/czottmann/pi-automode (MIT).
   file-name protection, which treats any in-tree `*auto-mode*` file as a
   safety control and refuses agent writes to it.
 
+## Desktop Pi 1.1 compatibility
+
+The classifier's provider-neutral completion now uses the public
+`ctx.modelRegistry.streamSimple()` boundary. Pi 1.1 normalizes raw prompt context
+into transcript system messages there and resolves request-time authentication.
+Rules, configuration, classifier decisions and fail-closed behavior are unchanged.
+Regression: `node --test tests/automode-classifier-sdk.test.mjs` uses only an
+in-memory model runtime and a local mock provider.
+
 ## Re-vendoring
 
 From a checkout of the plugin (the local install is itself a git clone):

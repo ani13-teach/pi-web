@@ -15,6 +15,7 @@ import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import { listSessionsIncremental } from "./session-list-scanner";
 import { nativeSubagentRelation } from "./native-subagent-relation";
+import { SUBAGENT_DISPLAY_META_TYPE, SUBAGENT_DISPLAY_ORIGIN, SUBAGENT_DISPLAY_TOOLS } from "./subagent-display";
 
 export { getAgentDir };
 
@@ -474,11 +475,28 @@ export function buildSessionContext(
   );
   const hasMore = Boolean(tail && tail > 0 && sliced[0]?.parentId);
 
+  // Provenance lives in separate metadata, including denied/invalid tool calls.
+  // Read all metadata so a paginated page can still restore its exact call IDs.
+  const nativeCalls = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== SUBAGENT_DISPLAY_META_TYPE) continue;
+    const data = entry.data as { version?: number; assistantEntryId?: string; toolCallId?: string; toolName?: string } | undefined;
+    if (data?.version !== 1 || typeof data.assistantEntryId !== "string" || typeof data.toolCallId !== "string"
+      || !SUBAGENT_DISPLAY_TOOLS.has(data.toolName ?? "")) continue;
+    const ids = nativeCalls.get(data.assistantEntryId) ?? new Set<string>();
+    ids.add(data.toolCallId);
+    nativeCalls.set(data.assistantEntryId, ids);
+  }
   // Convert messages and their IDs together to keep fork/navigation targets aligned.
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
   for (const entry of sliced) {
-    const m = entryToUiMessage(entry, options);
+    let m = entryToUiMessage(entry, options);
+    const callIds = nativeCalls.get(entry.id);
+    if (m?.role === "assistant" && callIds) {
+      m = { ...m, content: m.content.map(block => block.type === "toolCall" && callIds.has(block.toolCallId)
+        ? { ...block, displayOrigin: SUBAGENT_DISPLAY_ORIGIN } : block) };
+    }
     if (m) {
       messages.push(m);
       entryIds.push(entry.id);

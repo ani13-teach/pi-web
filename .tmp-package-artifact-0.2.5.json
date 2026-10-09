@@ -1,0 +1,55 @@
+{
+  "version": "0.2.5",
+  "platform": "Windows x64",
+  "installer": "C:\\Users\\jch\\pi-desktop\\release\\Pi Desktop Setup 0.2.5.exe",
+  "sizeBytes": 140680229,
+  "sizeMiB": 134.16,
+  "builtAt": "2026-10-09T14:13:24.414Z",
+  "sha256": "36d09e5f5abc4ae119333bc0795d938d3809efce95ad9750261294be2d0f6788",
+  "validation": {
+    "subagentRegression": {
+      "passed": 72,
+      "failed": 0,
+      "exitCode": 0
+    },
+    "isolatedPackagedWindow": {
+      "passed": 27,
+      "failed": 0,
+      "exitCode": 0,
+      "processSnapshot": "no listeners; all 7 sampled processes exited"
+    },
+    "isolatedPackagedCodemode": {
+      "passed": 7,
+      "failed": 0,
+      "exitCode": 0
+    },
+    "typecheck": {
+      "exitCode": 0
+    },
+    "desktop": {
+      "passed": 76,
+      "failed": 0,
+      "exitCode": 0
+    },
+    "runtimeSettingsIpc": {
+      "passed": 6,
+      "failed": 0,
+      "exitCode": 0
+    },
+    "webRecheck": {
+      "passed": 1182,
+      "failed": 2,
+      "skipped": 2,
+      "exitCode": 1,
+      "failures": [
+        "hooks/useAgentSession.test.mjs:305 source regex mismatch",
+        "lib/session-list-scanner.test.mjs:52 SDK tie-order mismatch"
+      ]
+    }
+  },
+  "signature": "NotSigned",
+  "notes": [
+    "Initial missing subagent build artifact failure resolved on post-build recheck.",
+    "No real-model chat test or installer installation performed."
+  ]
+}

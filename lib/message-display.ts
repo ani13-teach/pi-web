@@ -1,7 +1,25 @@
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent, ToolResultMessage } from "./types";
+import { isSubagentControlBlock, isSubagentInternalMessage } from "./subagent-display";
 
-interface DisplayOptions {
+export interface DisplayOptions {
   isStreaming?: boolean;
+  hideSubagentActivity?: boolean;
+  toolResults?: ReadonlyMap<string, ToolResultMessage>;
+}
+
+export function isDisplayableAssistantBlock(block: AssistantContentBlock, options: DisplayOptions = {}): boolean {
+  return !(block.type === "text" && block.text.trim() === "")
+    && !isEmptyThinkingBlock(block, options)
+    && !(options.hideSubagentActivity && isSubagentControlBlock(block, options.toolResults));
+}
+
+/** A display projection only; never remove internal results from model context. */
+export function isDisplayableMessage(message: AgentMessage, options: DisplayOptions = {}): boolean {
+  if (options.hideSubagentActivity && isSubagentInternalMessage(message)) return false;
+  if (message.role === "assistant") {
+    return getDisplayableAssistantBlocks(message, options).length > 0 || !!getAssistantErrorMessage(message, options);
+  }
+  return message.role !== "toolResult";
 }
 
 export function getThinkingPreview(thinking: string): string {
@@ -21,7 +39,7 @@ export function getDisplayableAssistantBlocks(
   message: AssistantMessage,
   options: DisplayOptions = {},
 ): AssistantContentBlock[] {
-  return (message.content ?? []).filter((block) => !isEmptyThinkingBlock(block, options));
+  return (message.content ?? []).filter((block) => isDisplayableAssistantBlock(block, options));
 }
 
 export function getAssistantErrorMessage(
@@ -54,14 +72,14 @@ export function splitFinalAssistantBlocks(
 // A live turn with an Agent call should show its process group immediately,
 // rather than waiting for the parent agent's final answer. Use the last
 // assistant entry: an earlier commentary message is not the final answer.
-export function findLiveSubagentProcessEnd(messages: AgentMessage[], startIdx: number, endIdx: number): number {
+export function findLiveSubagentProcessEnd(messages: AgentMessage[], startIdx: number, endIdx: number, options: DisplayOptions = {}): number {
   let lastAssistantIdx = -1;
   let hasAgentCall = false;
   for (let i = startIdx + 1; i < endIdx; i++) {
     const message = messages[i];
-    if (message.role !== "assistant") continue;
+    if (message.role !== "assistant" || !isDisplayableMessage(message, options)) continue;
     lastAssistantIdx = i;
-    hasAgentCall ||= message.content.some((block) => block.type === "toolCall" && block.toolName === "Agent");
+    hasAgentCall ||= getDisplayableAssistantBlocks(message, options).some((block) => block.type === "toolCall" && block.toolName === "Agent");
   }
   return hasAgentCall ? lastAssistantIdx : -1;
 }

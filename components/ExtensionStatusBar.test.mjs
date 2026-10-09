@@ -93,3 +93,41 @@ test("renders widgets and status text in one footer", () => {
   assert.match(html, /usage/);
   assert.match(html, /connected/);
 });
+
+test("keeps agents and todos in the footer without the duplicate fleet panel", () => {
+  const widgets = [
+    { key: "rpiv-todos", lines: ["Todos", "task 1"], placement: "aboveEditor" },
+    { key: "fleet", lines: ["Main", "fleet-only content"], placement: "belowEditor" },
+    { key: "agents", lines: ["Agent status", "work running"], placement: "aboveEditor" },
+  ];
+  const html = renderStatusBar({
+    statuses: [{ key: "status", text: "1 running agent" }],
+    widgets,
+  });
+
+  assert.doesNotMatch(html, /fleet/);
+  assert.match(html, /extension-widget-key">agents</);
+  assert.match(html, /extension-widget-key">rpiv-todos</);
+  assert.match(html, /extension-widget-panel-heading">agents</);
+  assert.match(html, /work running/);
+  assert.match(html, /1 running agent/);
+  assert.equal(widgets.length, 3, "filtering must not mutate the session widgets");
+});
+
+test("does not leave an empty footer when only fleet is registered", () => {
+  assert.equal(renderStatusBar({
+    statuses: [],
+    widgets: [{ key: "fleet", lines: ["Main"], placement: "belowEditor" }],
+  }), "");
+});
+
+test("preserves statuses without widget layout when fleet is the only widget", () => {
+  const html = renderStatusBar({
+    statuses: [{ key: "status", text: "connected" }],
+    widgets: [{ key: "fleet", lines: ["Main"], placement: "belowEditor" }],
+  });
+
+  assert.match(html, /extension-status-shelf has-status/);
+  assert.match(html, /connected/);
+  assert.doesNotMatch(html, /fleet|has-widgets|extension-widget-triggers/);
+});

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer } from "react";
+import type { SystemMessage } from "@earendil-works/pi-ai";
 import type {
   AgentMessage,
   BlockingExtensionUiRequest,
@@ -114,7 +115,7 @@ type NoticeAction =
 export type AgentPhase =
   | { kind: "waiting_model" }
   | { kind: "running_command" }
-  | { kind: "running_tools"; tools: { id: string; name: string; progress?: string }[] }
+  | { kind: "running_tools"; tools: { id: string; name: string; progress?: string; displayOrigin?: "pi-subagents" }[] }
   | null;
 
 export interface CompactResultInfo {
@@ -1218,8 +1219,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // reconcile) — they would resurrect a ghost streaming bubble.
         if (!agentRunningRef.current) break;
         if (event.type === "message_start") {
-          const msg = event.message as AgentMessage | undefined;
-          if (msg?.role === "user") break;
+          const msg = event.message as AgentMessage | SystemMessage | undefined;
+          if (msg?.role === "user" || msg?.role === "system") break;
           if (msg?.role === "assistant") {
             dispatch({ type: "snapshot", message: msg });
             if (msg.content.length > 0) setAgentPhase(null);
@@ -1252,7 +1253,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // loadSession already loaded this message from the session file —
         // appending it again would duplicate it.
         if (!agentRunningRef.current) break;
-        const completed = event.message as AgentMessage | undefined;
+        const completed = event.message as AgentMessage | SystemMessage | undefined;
+        // Pi 1.1 emits system prompt/tool-loadout updates before the user prompt.
+        // They are transcript metadata, not chat bubbles. Appending a hidden
+        // system message would separate the optimistic user from its delivery
+        // and defeat the adjacent-message reconciliation below.
+        if (completed?.role === "system") break;
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
           // messages. The run's initial prompt also emits one, but handleSend
@@ -1283,7 +1289,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const name = event.toolName as string;
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
-          if (!tools.some((t) => t.id === id)) tools.push({ id, name });
+          if (!tools.some((t) => t.id === id)) tools.push({ id, name, ...(event.displayOrigin === "pi-subagents" ? { displayOrigin: "pi-subagents" as const } : {}) });
           return { kind: "running_tools", tools };
         });
         break;
@@ -1315,6 +1321,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             id,
             name: name || existing?.name || "tool",
             progress: progress ?? existing?.progress,
+            displayOrigin: event.displayOrigin === "pi-subagents" ? "pi-subagents" as const : existing?.displayOrigin,
           };
           return {
             kind: "running_tools",

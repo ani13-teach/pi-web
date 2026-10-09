@@ -1,16 +1,13 @@
 import type {
   AgentSessionEvent,
+  PromptOptions,
   BashOperations,
   SessionManager,
   SettingsManager,
   SlashCommandInfo,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import type {
-  AgentLoopTurnUpdate,
-  AgentMessage as PiAgentMessage,
-  PrepareNextTurnContext,
-} from "@earendil-works/pi-agent-core";
+import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
 export interface ContextUsage {
@@ -127,6 +124,9 @@ export interface ExtensionUiContextLike {
   setToolsExpanded(expanded: boolean): void;
 }
 
+export type PromptDisposition = Parameters<NonNullable<PromptOptions["preflightResult"]>>[0];
+type QueuedInputDisposition = Exclude<PromptDisposition, "started">;
+
 export interface AgentSessionLike {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
@@ -143,14 +143,14 @@ export interface AgentSessionLike {
   readonly settingsManager: SettingsManager;
   readonly agent: {
     state?: {
-      systemPrompt?: string;
+      readonly systemPrompt?: string;
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;
     };
-    prepareNextTurnWithContext?: (
-      context: PrepareNextTurnContext,
+    transformContext?: (
+      messages: PiAgentMessage[],
       signal?: AbortSignal,
-    ) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+    ) => Promise<PiAgentMessage[]>;
   };
   readonly extensionRunner: ExtensionRunnerLike;
   readonly promptTemplates: readonly PromptTemplateLike[];
@@ -164,7 +164,7 @@ export interface AgentSessionLike {
     images?: Array<{ type: "image"; data: string; mimeType: string }>;
     streamingBehavior?: "steer" | "followUp";
     source?: "interactive" | "rpc";
-    preflightResult?: (success: boolean) => void;
+    preflightResult?: (disposition: PromptDisposition) => void;
   }): Promise<void>;
   sendCustomMessage<T = unknown>(message: {
     customType: string;
@@ -191,8 +191,8 @@ export interface AgentSessionLike {
   getLastAssistantText(): string | undefined;
   setAutoCompactionEnabled(enabled: boolean): void;
   setAutoRetryEnabled(enabled: boolean): void;
-  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
-  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
+  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<QueuedInputDisposition>;
+  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<QueuedInputDisposition>;
   readonly pendingMessageCount: number;
   getSteeringMessages(): readonly string[];
   getFollowUpMessages(): readonly string[];

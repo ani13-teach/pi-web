@@ -9,6 +9,7 @@ const {
   modelCostToDraft,
   parseCompleteModelCost,
   serializeHeaderRows,
+  setAdaptiveThinking,
   setCompatBool,
   updateHeaderRow,
 } = await jiti.import("./models-config-helpers.ts");
@@ -64,6 +65,47 @@ test("disabling the developer role writes an explicit false override", () => {
     setCompatBool({ compat: { supportsStore: true } }, "supportsDeveloperRole", false),
     { compat: { supportsStore: true, supportsDeveloperRole: false } },
   );
+});
+
+test("adaptive thinking sits beside reasoning in capabilities for the effective Anthropic API", () => {
+  const capabilities = source.slice(
+    source.indexOf('t("models.capabilities")'),
+    source.indexOf('t("models.modelSpecs")'),
+  );
+  assert.match(source, /const usesAnthropicMessages = \(model\.api \?\? provider\.api\) === "anthropic-messages"/);
+  assert.match(capabilities, /usesAnthropicMessages &&/);
+  assert.match(capabilities, /effectiveCompat\(provider, model\)\["forceAdaptiveThinking"\] === true/);
+  assert.match(capabilities, /onChange\(setAdaptiveThinking\(model, v\)\)/);
+  assert.ok(capabilities.indexOf('t("models.adaptiveThinking")') > capabilities.indexOf('t("models.reasoning")'));
+  assert.ok(capabilities.indexOf('t("models.imageInput")') > capabilities.indexOf('t("models.adaptiveThinking")'));
+  assert.match(capabilities, /t\("models.adaptiveThinkingHelp"\)/);
+});
+
+test("enabling adaptive thinking enables reasoning without changing unrelated settings", () => {
+  const model = { id: "claude-opus-5-5", reasoning: false, compat: { supportsStore: true }, thinkingLevelMap: { max: "max" } };
+  assert.deepEqual(setAdaptiveThinking(model, true), {
+    ...model, reasoning: true, compat: { supportsStore: true, forceAdaptiveThinking: true },
+  });
+  assert.equal(model.reasoning, false);
+  assert.equal(model.compat.forceAdaptiveThinking, undefined);
+});
+
+test("disabling adaptive thinking overrides inherited true and keeps ordinary reasoning", () => {
+  const providerCompat = { forceAdaptiveThinking: true };
+  const model = { id: "claude-opus-5-5", reasoning: true, compat: { allowEmptySignature: true } };
+  const disabled = setAdaptiveThinking(model, false);
+  assert.equal({ ...providerCompat, ...disabled.compat }.forceAdaptiveThinking, false);
+  assert.equal(disabled.reasoning, true);
+  assert.equal(disabled.compat.allowEmptySignature, true);
+  assert.equal(setAdaptiveThinking({ id: "no-reasoning" }, false).reasoning, undefined);
+});
+
+test("adaptive thinking labels and reload guidance exist in all languages", async () => {
+  for (const locale of ["zh-CN", "zh-TW", "en"]) {
+    const messages = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    assert.match(messages, /"models.adaptiveThinking": ".+"/);
+    assert.match(messages, /"models.adaptiveThinkingHelp": ".+"/);
+  }
 });
 
 test("editing a header preserves row order and stable identities", () => {

@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { includeSubagentAncestors, listSessionFamilies, listVisibleSessionRows } from "@/lib/session-family";
+import { filterOrdinarySessions, listSessionFamilies } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -373,6 +373,8 @@ function PiWebTitle() {
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  // Keep the full catalog for the shell's Agents panel; ordinary UI uses this subset.
+  const ordinarySessions = useMemo(() => filterOrdinarySessions(allSessions), [allSessions]);
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
   const sessionListVersionRef = useRef<number | null>(null);
   const sessionLoadIdRef = useRef(0);
@@ -426,7 +428,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [listViewportH, setListViewportH] = useState(0);
   const [listScrollTop, setListScrollTop] = useState(0);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
-  const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
   const listScrollRafRef = useRef<number | null>(null);
   const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const top = e.currentTarget.scrollTop;
@@ -770,10 +771,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         // Session not found — notify parent so it can show the placeholder
         onInitialRestoreDone?.();
       }
-      const projects = getRecentProjects(allSessions);
+      const projects = getRecentProjects(ordinarySessions);
       if (projects.length > 0) setSelectedCwd(projects[0].root);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
+  }, [allSessions, ordinarySessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
 
   // Prefer an exact UI selection while a refetch is in flight. Once the
   // response catches up, the server-resolved path handles Windows case and
@@ -953,7 +954,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onNewSession?.(tempId, selectedCwd);
   }, [selectedCwd, onNewSession]);
 
-  const recentProjects = getRecentProjects(allSessions);
+  const recentProjects = getRecentProjects(ordinarySessions);
   const showProjectFilter = recentProjects.length > 8;
   const visibleProjects = projectFilter.trim()
     ? recentProjects.filter((project) => project.root.toLowerCase().includes(projectFilter.trim().toLowerCase()))
@@ -965,8 +966,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Per-project activity counts (running / unread) for the workspace selector.
   // Uses the same stable server key as the project list and filtering.
   const projectActivity = useMemo(
-    () => getProjectActivity(allSessions, runningSessionIds, unreadSessionIds),
-    [allSessions, runningSessionIds, unreadSessionIds],
+    () => getProjectActivity(ordinarySessions, runningSessionIds, unreadSessionIds),
+    [ordinarySessions, runningSessionIds, unreadSessionIds],
   );
 
   // Show completed unread work first; otherwise show an animated ring while
@@ -974,8 +975,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const otherWorkspaceIndicator = otherWorkspaceActivityIndicator(projectActivity, selectedProject?.key);
 
   const filteredSessions = selectedProject
-    ? sessionsForProject(allSessions, selectedProject.key)
-    : allSessions;
+    ? sessionsForProject(ordinarySessions, selectedProject.key)
+    : ordinarySessions;
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
     && worktreeState.isTopLevel
@@ -1006,24 +1007,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       : null);
 
   const sessionFamilies = listSessionFamilies(filteredSessions);
-  const visibleRows = listVisibleSessionRows(sessionFamilies, expandedSessionIds);
-  const selectedAncestors = includeSubagentAncestors(filteredSessions, new Set(selectedSessionId ? [selectedSessionId] : []));
-  const runningAncestors = includeSubagentAncestors(filteredSessions, runningSessionIds);
-  const unreadAncestors = includeSubagentAncestors(filteredSessions, unreadSessionIds);
-  const toggleSession = (id: string) => {
-    setExpandedSessionIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  const visibleSessions = sessionFamilies.map((family) => family.root);
 
   const virtualIndices = getSessionListIndices(
-    visibleRows.length,
+    visibleSessions.length,
     listScrollTop,
     listViewportH,
-    visibleRows.findIndex((row) => row.session.id === focusedSessionId),
+    visibleSessions.findIndex((session) => session.id === focusedSessionId),
   );
 
   return (
@@ -1735,18 +1725,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {t("sidebar.noSessions")}
           </div>
         )}
-        {visibleRows.length > 0 && (
+        {visibleSessions.length > 0 && (
           <div
             style={{
               position: "relative",
-              height: visibleRows.length * SESSION_LIST_ITEM_HEIGHT,
+              height: visibleSessions.length * SESSION_LIST_ITEM_HEIGHT,
             }}
           >
             {virtualIndices.map((index) => {
-              const { session, family, depth, hasChildren, collapsed } = visibleRows[index];
-              const displaySession = depth === 0 && family.latestModified !== session.modified
-                ? { ...session, modified: family.latestModified }
-                : session;
+              const session = visibleSessions[index];
               // Bubble blur after the input's save handler before unpinning the row.
               return (
                 <div
@@ -1756,14 +1743,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   style={{ position: "absolute", top: index * SESSION_LIST_ITEM_HEIGHT, left: 0, right: 0 }}
                 >
                   <SessionItem
-                    session={displaySession}
-                    isSelected={session.id === selectedSessionId || (collapsed && selectedAncestors.has(session.id))}
-                    isRunning={runningAncestors.has(session.id)}
-                    isUnread={unreadAncestors.has(session.id)}
-                    depth={depth}
-                    hasChildren={hasChildren}
-                    collapsed={collapsed}
-                    onToggleCollapse={() => toggleSession(session.id)}
+                    session={session}
+                    isSelected={session.id === selectedSessionId}
+                    isRunning={runningSessionIds.has(session.id)}
+                    isUnread={unreadSessionIds.has(session.id)}
                     onClick={() => handleSelectSessionFromList(session)}
                     onRenamed={loadSessions}
                     onDeleted={(id) => {
@@ -2043,10 +2026,6 @@ function SessionItem({
   onClick,
   onRenamed,
   onDeleted,
-  depth = 0,
-  hasChildren = false,
-  collapsed = false,
-  onToggleCollapse,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -2055,10 +2034,6 @@ function SessionItem({
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
-  depth?: number;
-  hasChildren?: boolean;
-  collapsed?: boolean;
-  onToggleCollapse?: () => void;
 }) {
   const { locale, t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -2167,7 +2142,7 @@ function SessionItem({
         height: SESSION_LIST_ITEM_HEIGHT,
         display: "flex",
         alignItems: "center",
-        paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
+        paddingLeft: 14,
         paddingRight: 8,
         cursor: confirmDelete || renaming ? "default" : "pointer",
         background: confirmDelete
@@ -2250,13 +2225,6 @@ function SessionItem({
       ) : (
         /* ── Normal view ── */
         <>
-          {/* Subagent indicator for child sessions */}
-          {depth > 0 && (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <rect x="5" y="7" width="14" height="11" rx="2" />
-              <path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
-            </svg>
-          )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
               style={{
@@ -2300,28 +2268,6 @@ function SessionItem({
               )}
             </div>
           </div>
-
-          {/* Collapse toggle — always visible when has children */}
-          {hasChildren && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
-              title={t(collapsed ? "sidebar.expandSubagents" : "sidebar.collapseSubagents")}
-              aria-label={t(collapsed ? "sidebar.expandSubagents" : "sidebar.collapseSubagents")}
-              aria-expanded={!collapsed}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 20, height: 20, padding: 0, flexShrink: 0,
-                background: "none", border: "none",
-                color: "var(--text-dim)", cursor: "pointer",
-                transform: collapsed ? "rotate(-90deg)" : "none",
-                transition: "transform 0.15s",
-              }}
-            >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="2 3.5 5 6.5 8 3.5" />
-              </svg>
-            </button>
-          )}
 
           {/* Action buttons — shown on hover */}
           {hovered && !session.transient && (

@@ -57,10 +57,13 @@ export function setFallbackSubagent(v: string | undefined): void { fallbackSubag
  * Build the registry with Desktop built-ins above project/workspace/global files.
  * Deletion markers and edits are reread on each registration, just like custom files.
  */
-export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
+export function buildAgentRegistry(
+  userAgents: Map<string, AgentConfig>,
+  options: { disableDefaults?: boolean } = {},
+): Map<string, AgentConfig> {
   const registry = new Map(userAgents);
-  if (!disableDefaults) {
-    for (const [name, config] of loadBuiltinAgents()) registry.set(name, config);
+  for (const [name, config] of loadBuiltinAgents(false, !(options.disableDefaults ?? disableDefaults))) {
+    registry.set(name, config);
   }
   return registry;
 }

@@ -178,6 +178,7 @@ try {
     ["/api/models-config", "the model configuration"],
     ["/api/models-config/catalog", "the model catalog"],
     ["/api/tools/settings", "the tool settings"],
+    ["/api/tools/codemode", "the Code Mode preference"],
     [`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, "the subagent profiles"],
     [`/api/subagents/settings?cwd=${encodeURIComponent(cwd)}`, "the subagent settings"],
     [`/api/skills?cwd=${encodeURIComponent(cwd)}`, "the installed skills"],

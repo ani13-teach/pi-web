@@ -40,11 +40,11 @@
     },
     "src/agent-types.ts": {
       "sourceSha256": "1ff6db2d657d78f57cf7619829b319835b9cf9cf7e22dae839239995b4cb6212",
-      "desktopSha256": "35d6301de740466959b289a2d829e44864e7f9e008d67a47830598a8b0082583"
+      "desktopSha256": "b5abb00c2aa64500470e2da7b923e354adefc891583ad163012b2e96c86d97cc"
     },
     "src/builtin-agents.ts": {
       "sourceSha256": null,
-      "desktopSha256": "f33c20eb346b0f436e87577af6ab6eb6f4dc2b431e035ba44b834ccf7b978b45"
+      "desktopSha256": "7080e46441780aa5be618f190d1b20b6561cee9fc14c1746be7e35bc8637f0e0"
     },
     "src/child-context.ts": {
       "sourceSha256": "72eaa951726bd406c829e0415f0f7beba8d5845cc594f2d3aaef15b4408f5d82",
@@ -68,7 +68,7 @@
     },
     "src/desktop-agent-presets.ts": {
       "sourceSha256": null,
-      "desktopSha256": "a4b9a0e1d289b76a639705a0719cc0cedbb4995387c2388f73c6bf39aa06bf55"
+      "desktopSha256": "78862f672868db7a40abad5f0bd4dd9ee75a880a80e9d331425579272429a211"
     },
     "src/desktop-host.ts": {
       "sourceSha256": null,
@@ -88,11 +88,11 @@
     },
     "src/index.ts": {
       "sourceSha256": "622d44b11e615ec0509f13e858dcad4a40789e4613c03583930327f15d9ec6a9",
-      "desktopSha256": "eab521dcdba342ba5745de7920dcb2ac9771a8f1661f66223f66e746d6d31939"
+      "desktopSha256": "c807a97b2cde146ca19125350283a4b75af313c3e5660601bef4e0b7a40c7341"
     },
     "src/invocation-config.ts": {
       "sourceSha256": "f0c651fecfc1721e1b55039e0dda78b4c5548c7ed0bbbaba8a442350b3cf16a8",
-      "desktopSha256": "f0c651fecfc1721e1b55039e0dda78b4c5548c7ed0bbbaba8a442350b3cf16a8"
+      "desktopSha256": "b5c1ef37131a6f7dfb5e170686b96654cb739353d3aee0374c1aa21b007e773c"
     },
     "src/memory.ts": {
       "sourceSha256": "d2a7684fa950a186705061d8e2903e464746b88d049a05d7e5a2c12523f378c3",
@@ -100,7 +100,7 @@
     },
     "src/mention-clone.ts": {
       "sourceSha256": "2f85e2bd428d80bb959576ac6431d50e9fdbbe04c92e5eec1a750135d2a8f91c",
-      "desktopSha256": "2f85e2bd428d80bb959576ac6431d50e9fdbbe04c92e5eec1a750135d2a8f91c"
+      "desktopSha256": "26e7330469a1bce4003930ed61f82dfc5ce5a1b205b160cd62e32751bc07b6fd"
     },
     "src/mention.ts": {
       "sourceSha256": "4264d3458d707a15d8f85860cd1111b510f453503cf276c0a9a2b0162bc0b642",
@@ -140,7 +140,7 @@
     },
     "src/settings.ts": {
       "sourceSha256": "141a17410bfc7632386779d1c599f511cdd7e95b502db35cf6d5a6ce7b6b4ac3",
-      "desktopSha256": "eb30d7dfddea60c16dc34e7fac306b08006943a2041cf5c36ebf6fe1523a5fda"
+      "desktopSha256": "d7c311eb1c63b2c4aacf6cdc0fc25e9cf336a196094993e4619ee6ea284f9aac"
     },
     "src/skill-loader.ts": {
       "sourceSha256": "64d0a915ba6cdef899894d330caf8539e222c67646d60da81fcb6a2ac0d90043",
@@ -156,7 +156,7 @@
     },
     "src/types.ts": {
       "sourceSha256": "8afd9b769677dbd42229fc7749bec22ed75e38d998cd8206709518e6afcaaf23",
-      "desktopSha256": "1a129d26e69ab1fc66e1b7a35eeb8598ab4904edffcfa63e35fee02fa7e8edbf"
+      "desktopSha256": "d934f3433b07260abc677c34891557fc738999f1c2c2f5b10b7ac28ac4885766"
     },
     "src/ui/agent-mention.ts": {
       "sourceSha256": "e7b4ce89739325e1b0fab3510b516b7d53463af8edeb17af185a6acce3759203",

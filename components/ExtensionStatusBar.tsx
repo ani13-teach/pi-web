@@ -30,16 +30,18 @@ export function ExtensionStatusBar({
   widgets?: ExtensionWidgetItem[];
   expandTodo?: boolean;
 }) {
-  if (statuses.length === 0 && widgets.length === 0) return null;
+  // Desktop uses the agents panel; the native fleet view duplicates it here.
+  const visibleWidgets = widgets.filter((widget) => widget.key !== "fleet");
+  if (statuses.length === 0 && visibleWidgets.length === 0) return null;
 
   const statusLine = formatExtensionStatusLine(statuses);
   const plainStatusLine = stripAnsi(statusLine);
 
   return (
     <div
-      className={`extension-status-shelf${widgets.length > 0 ? " has-widgets" : ""}${statuses.length > 0 ? " has-status" : ""}`}
+      className={`extension-status-shelf${visibleWidgets.length > 0 ? " has-widgets" : ""}${statuses.length > 0 ? " has-status" : ""}`}
     >
-      {widgets.length > 0 && <ExtensionWidgets widgets={widgets} expandTodo={expandTodo} />}
+      {visibleWidgets.length > 0 && <ExtensionWidgets widgets={visibleWidgets} expandTodo={expandTodo} />}
       {statuses.length > 0 && (
         <div
           role="status"

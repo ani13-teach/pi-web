@@ -15,8 +15,9 @@ export function builtinDeletionPath(name: string): string {
   return join(builtinAgentDirectory(), ".deleted", Buffer.from(name, "utf8").toString("hex"));
 }
 
-export function loadBuiltinAgents(strict = false): Map<string, AgentConfig> {
-  const agents = new Map([...DEFAULT_AGENTS].filter(([name]) => !existsSync(builtinDeletionPath(name))));
+/** Disabling factory presets must not discard profiles explicitly saved by the user. */
+export function loadBuiltinAgents(strict = false, includePresets = true): Map<string, AgentConfig> {
+  const agents = new Map((includePresets ? [...DEFAULT_AGENTS] : []).filter(([name]) => !existsSync(builtinDeletionPath(name))));
   const dir = builtinAgentDirectory();
   if (!existsSync(dir)) return agents;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {

@@ -25,7 +25,8 @@ test("offers a persisted built-in sub-agent switch with explicit session reload"
   assert.match(source, /<ConfigSwitch[\s\S]*?checked=\{builtInEnabled\}[\s\S]*?t\("agents\.builtInTitle"\)/);
   assert.match(source, /sendAgentCommand\(sessionId, \{ type: "reload" \}\)/);
   assert.match(source, /reloadNeeded && sessionId/);
-  assert.match(source, /className="agents-concurrency-control"[\s\S]*?t\("agents\.maxConcurrent"\)/);
+  assert.match(source, /<SubagentRuntimeSettings cwd=\{cwd\}/);
+  assert.doesNotMatch(source, /onBlur=\{\(\) => void updateMaxConcurrent/);
   assert.equal((source.match(/className="agents-feature-setting"/g) ?? []).length, 1);
   assert.match(cssSource, /\.agents-feature-setting \{[\s\S]*?border-bottom: 1px solid var\(--border\)/);
   assert.match(cssSource, /\.agents-concurrency-control \{[\s\S]*?white-space: nowrap;/);
@@ -53,7 +54,7 @@ test("offers three save scopes only when creating or duplicating a profile", () 
 });
 
 test("uses the shared sidebar action for new profiles", () => {
-  assert.match(source, /<ConfigListAction[\s\S]*?active=\{creating\}[\s\S]*?onClick=\{beginCreate\}/);
+  assert.match(source, /<ConfigListAction[\s\S]*?active=\{creating && !runtimeSettingsOpen\}[\s\S]*?onClick=\{beginCreate\}/);
   assert.match(source, /t\("agents\.new"\)[\s\S]*?<\/ConfigListAction>/);
 });
 
@@ -216,6 +217,21 @@ test("conflict badges use exact identities and native source order, not case fol
   assert.equal(overridden(first, profiles), true);
   assert.equal(overridden(last, profiles), true);
   assert.equal(overridden(last, [global, variant, first, last]), false);
+  assert.equal(overridden({ ...global, effective: true }, profiles), false, "runtime winner beats UI source order");
+  assert.equal(overridden({ ...builtin, effective: false }, profiles), true, "suppressed factory preset is not shown as active");
+});
+
+test("shows the actual winning source and default mode without presenting the draft as runtime state", async () => {
+  assert.match(source, /profile\.name === selected\.name && profile\.effective === true/);
+  assert.match(source, /t\("agents\.effectiveSource"/);
+  assert.match(source, /effectiveProfile\.runInBackground/);
+  assert.match(source, /t\("agents\.callModeOverride"\)/);
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const messages = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of ["effectiveSource", "noEffectiveSource", "modeBackground", "modeForeground", "modeDisabled", "callModeOverride"]) {
+      assert.ok(messages.includes(`"agents.${key}":`));
+    }
+  }
 });
 
 test("built-in editing keeps the selected source without hijacking a same-name global profile", async () => {
@@ -283,10 +299,10 @@ const { code: handlerCode } = await transform(`
   ${defaultsSource}
   export function handlers(context) {
     const {
-      cwd, sessionId, selected, profiles, draft, targetScope, creating,
+      cwd, sessionId, selected, profiles, draft, targetScope, creating, loading, profilesReady,
       fetch, window, t, setTimeout, loadProfiles, update,
       setSelectedKey, setDraft, setMode, setTargetScope, setError, setSavedOk,
-      setSaving, setReloadNeeded, setToggling, setProfiles,
+      setSaving, setReloadNeeded, setToggling, setProfiles, setRuntimeSettingsOpen,
     } = context;
     ${editingHandlers}
     ${toggleHandler}
@@ -296,7 +312,7 @@ const { code: handlerCode } = await transform(`
 const { handlers } = await import(`data:text/javascript;base64,${Buffer.from(handlerCode).toString("base64")}`);
 
 function editorHarness({ selected = null, profiles = selected ? [selected] : [], draft = selected, mode = "edit", targetScope = selected?.scope ?? "builtin", response } = {}) {
-  const state = { selected, profiles, draft: { ...draft }, mode, targetScope };
+  const state = { selected, profiles, draft: { ...draft }, mode, targetScope, profilesReady: true, loading: false };
   const requests = [];
   const loads = [];
   let confirmations = 0;
@@ -305,7 +321,7 @@ function editorHarness({ selected = null, profiles = selected ? [selected] : [],
     t: (key) => key,
     window: { confirm: () => { confirmations++; return true; } },
     setTimeout: () => {},
-    loadProfiles: async (key) => loads.push(key),
+    loadProfiles: async (key) => { loads.push(key); return true; },
     update: (key, value) => { state.draft = { ...state.draft, [key]: value }; },
     fetch: async (url, options) => {
       const body = JSON.parse(options.body);
@@ -316,7 +332,7 @@ function editorHarness({ selected = null, profiles = selected ? [selected] : [],
       return { ok: !data.error, status: data.error ? 409 : 200, json: async () => data };
     },
   };
-  for (const key of ["selectedKey", "draft", "mode", "targetScope", "error", "savedOk", "saving", "reloadNeeded", "toggling", "profiles"]) {
+  for (const key of ["selectedKey", "draft", "mode", "targetScope", "error", "savedOk", "saving", "reloadNeeded", "toggling", "profiles", "runtimeSettingsOpen"]) {
     context[`set${key[0].toUpperCase()}${key.slice(1)}`] = (value) => {
       state[key] = typeof value === "function" ? value(state[key]) : value;
     };
@@ -407,9 +423,134 @@ test("deleting a preset or stored builtin uses the selected ID and exact source,
   }
 });
 
+test("advanced editor controls expose prompt, file isolation, session persistence and extension selectors", async () => {
+  for (const key of ["promptMode", "isolation", "persistSession", "extensionTools", "color"]) {
+    assert.ok(source.includes(`aria-label={t("agents.${key}")}`), key);
+  }
+  assert.match(source, /update\("persistSession", event\.target\.value === "" \? undefined : event\.target\.value === "true"\)/);
+  assert.match(source, /update\("extensionTools", event\.target\.value\.split\(","\)\)/);
+  const editor = editorHarness({ selected: preset, draft: { ...preset, promptMode: "append", isolation: "worktree", persistSession: false, extensionTools: [], color: "cyan" } });
+  await editor.render().save();
+  const saved = editor.requests[0].body.profile;
+  assert.equal(saved.promptMode, "append");
+  assert.equal(saved.isolation, "worktree");
+  assert.equal(saved.persistSession, false);
+  assert.deepEqual(saved.extensionTools, []);
+  assert.equal(saved.color, "cyan");
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const messages = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of ["advanced", "promptMode", "promptAppend", "promptReplace", "isolation", "isolationHint", "persistSession", "extensionTools", "color"]) assert.ok(messages.includes(`"agents.${key}":`));
+  }
+});
+
+test("saving runtime defaults refreshes the actual profile projection before later profile saves", async () => {
+  const load = source.slice(source.indexOf("const loadProfiles ="), source.indexOf("useEffect(() =>"));
+  const callback = source.match(/onSaved=\{(\(\) => \{\s*setReloadNeeded[\s\S]*?\n\s*\})\} \/>/)?.[1];
+  assert.ok(callback);
+  const { code } = await transform(`
+    ${helperSource}
+    export function projection(context) {
+      const { cwd, selectedKey, sessionId, fetch, setLoading, setError, setProfiles,
+        setSelectedKey, setDraft, setMode, setTargetScope, setReloadNeeded, setProfilesReady } = context;
+      const getLastSettingsSelection = () => selectedKey;
+      const useCallback = fn => fn;
+      ${load}
+      return ${callback};
+    }
+  `, { loader: "tsx", format: "esm" });
+  const { projection } = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const updated = { ...preset, runInBackground: false, effective: false };
+  const state = { draft: { ...preset, runInBackground: true }, profiles: [preset] };
+  const done = Promise.withResolvers();
+  const context = {
+    cwd: "C:/fixture", selectedKey: "builtin:scout", sessionId: "parent",
+    fetch: async () => ({ ok: true, json: async () => ({ profiles: [updated] }) }),
+    setLoading: value => { if (!value) done.resolve(); },
+  };
+  for (const key of ["error", "profiles", "selectedKey", "draft", "mode", "targetScope", "reloadNeeded", "profilesReady"]) context[`set${key[0].toUpperCase()}${key.slice(1)}`] = value => { state[key] = value; };
+  projection(context)();
+  await done.promise;
+  assert.equal(state.reloadNeeded, true);
+  assert.equal(state.draft.runInBackground, false);
+  assert.equal(state.profiles[0].effective, false);
+  const editor = editorHarness({ selected: updated, draft: { ...state.draft, description: "new description" } });
+  await editor.render().save();
+  assert.equal(editor.requests[0].body.profile.runInBackground, false, "later edits cannot pin the obsolete background default");
+});
+
+test("failed refresh blocks stale profile saves, supports retry and does not clear reload notices", async () => {
+  const load = source.slice(source.indexOf("const loadProfiles ="), source.indexOf("useEffect(() =>"));
+  const reload = source.slice(source.indexOf("const reloadSession ="), source.indexOf("  return (\n    <ConfigPanelShell"));
+  const callback = source.match(/onSaved=\{(\(\) => \{\s*setReloadNeeded[\s\S]*?\n\s*\})\} \/>/)?.[1];
+  const { code } = await transform(`
+    ${helperSource}
+    export function projection(context) {
+      const { cwd, selectedKey, sessionId, fetch, setLoading, setError, setProfiles,
+        setSelectedKey, setDraft, setMode, setTargetScope, setReloadNeeded, setProfilesReady,
+        setReloading, setSettingsError, sendAgentCommand, onReloaded, t } = context;
+      const getLastSettingsSelection = () => selectedKey;
+      const useCallback = fn => fn;
+      ${load}
+      ${reload}
+      return { loadProfiles, reloadSession, onSaved: ${callback} };
+    }
+  `, { loader: "tsx", format: "esm" });
+  const { projection } = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const state = { draft: { ...preset, runInBackground: true }, profiles: [preset], profilesReady: true, reloadNeeded: true };
+  let fail = true;
+  let reloaded = 0;
+  let done = Promise.withResolvers();
+  const context = {
+    cwd: "C:/fixture", selectedKey: "builtin:scout", sessionId: "parent", t: key => key,
+    fetch: async () => fail ? { ok: false, status: 500, json: async () => ({ error: "Refresh unavailable" }) }
+      : { ok: true, json: async () => ({ profiles: [{ ...preset, runInBackground: false }] }) },
+    sendAgentCommand: async () => {}, onReloaded: () => reloaded++,
+    setLoading: value => { state.loading = value; if (!value) done.resolve(); },
+  };
+  for (const key of ["error", "profiles", "selectedKey", "draft", "mode", "targetScope", "reloadNeeded", "profilesReady", "reloading", "settingsError"]) context[`set${key[0].toUpperCase()}${key.slice(1)}`] = value => { state[key] = value; };
+  const callbacks = projection(context);
+  callbacks.onSaved();
+  await done.promise;
+  assert.equal(state.profilesReady, false);
+  assert.equal(state.error, "Refresh unavailable");
+  assert.equal(state.draft.runInBackground, true, "old values remain visible but cannot be saved");
+  const editor = editorHarness({ selected: preset, draft: state.draft });
+  editor.state.profilesReady = false;
+  await editor.render().save();
+  assert.equal(editor.requests.length, 0);
+  await callbacks.reloadSession();
+  assert.equal(state.reloadNeeded, true);
+  assert.equal(state.settingsError, "agents.refreshFailed");
+  assert.equal(reloaded, 0);
+  fail = false;
+  done = Promise.withResolvers();
+  assert.equal(await callbacks.loadProfiles("builtin:scout"), true);
+  assert.equal(state.profilesReady, true);
+  assert.equal(state.draft.runInBackground, false);
+  await callbacks.reloadSession();
+  assert.equal(state.reloadNeeded, false);
+  assert.equal(reloaded, 1);
+  assert.match(source, /disabled=\{saving \|\| savedOk \|\| toggling \|\| loading \|\| !profilesReady/);
+  assert.match(source, /!profilesReady && !loading && <ConfigButton/);
+});
+
+test("runtime settings share the sidebar and do not submit profiles when open", () => {
+  assert.match(source, /<ConfigSidebarItem active=\{runtimeSettingsOpen\}/);
+  assert.match(source, /runtimeSettingsOpen \? \(\s*<SubagentRuntimeSettings cwd=\{cwd\} onSaved=\{\(\) => \{\s*setReloadNeeded\(Boolean\(sessionId\)\);\s*void loadProfiles\(selectedKey \?\? undefined\)/);
+  assert.match(source, /!runtimeSettingsOpen && <ConfigFooter/);
+  const editor = editorHarness({ selected: preset });
+  editor.state.runtimeSettingsOpen = true;
+  editor.render().selectProfile(preset);
+  assert.equal(editor.state.runtimeSettingsOpen, false);
+  editor.state.runtimeSettingsOpen = true;
+  editor.render().beginCreate();
+  assert.equal(editor.state.runtimeSettingsOpen, false);
+});
+
 test("toggling a preset saves its original ID, preserves draft edits and replaces the preset source without duplicates", async () => {
+  const active = { ...preset, effective: true };
   const global = { ...preset, scope: "global", filePath: "global/scout.md", description: "global description" };
-  const editor = editorHarness({ selected: preset, profiles: [global, preset], draft: { ...preset, name: "unsaved-id", description: "unsaved description" } });
+  const editor = editorHarness({ selected: active, profiles: [global, active], draft: { ...active, name: "unsaved-id", description: "unsaved description" } });
   await editor.render().toggleEnabled(false);
   const body = editor.requests[0].body;
   assert.equal(body.scope, "builtin");
@@ -423,5 +564,6 @@ test("toggling a preset saves its original ID, preserves draft edits and replace
   assert.equal(editor.state.profiles.length, 2);
   assert.equal(editor.state.profiles[0], global);
   assert.equal(editor.state.profiles[1].filePath, "saved/builtin/scout.md");
+  assert.equal(editor.state.profiles[1].effective, true, "toggling preserves winner provenance, including disabled winners");
   assert.equal(editor.state.selectedKey, "builtin:saved/builtin/scout.md");
 });

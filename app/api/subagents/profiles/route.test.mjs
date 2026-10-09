@@ -355,7 +355,7 @@ for (const scope of ["builtin", "global", "project"]) {
     assert.equal(response.status, 200);
     const listed = (await response.json()).profiles;
     assert.equal(listed.some(p => p.name === original.name), false);
-    assert.deepEqual(listed.find(p => p.name === renamed.name && p.scope === scope), renamed);
+    assert.deepEqual(listed.find(p => p.name === renamed.name && p.scope === scope), { ...renamed, effective: true });
     response = await DELETE(jsonRequest("DELETE", { cwd, scope, name: renamed.name, filePath: renamed.filePath }));
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { ok: true });
@@ -470,7 +470,7 @@ test("builtin API renames embedded presets without reviving their old ID and ref
   assert.equal(response.status, 200);
   const listed = (await response.json()).profiles;
   assert.equal(listed.some(p => p.name === "review" && p.scope === "builtin"), false);
-  assert.deepEqual(listed.find(p => p.name === "custom-review"), renamed);
+  assert.deepEqual(listed.find(p => p.name === "custom-review"), { ...renamed, effective: true });
   const before = await readFile(renamed.filePath, "utf8");
   response = await PUT(jsonRequest("PUT", { cwd, scope: "builtin", originalName: "review", profile: { ...preset, name: "other-review" } }));
   assert.equal(response.status, 400);

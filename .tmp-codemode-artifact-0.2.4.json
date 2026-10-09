@@ -1,0 +1,14 @@
+{
+  "version": "0.2.4",
+  "file": "release/Pi Desktop Setup 0.2.4.exe",
+  "size": 140579431,
+  "modifiedUTC": "2026-10-09T12:30:41.039Z",
+  "sha256": "9814c3e0c37488f911ed2d01771d90e370b29edf644afc76f35154ea7318587c",
+  "kernels": {
+    "pi-coding-agent": "1.1.0",
+    "pi-agent-core": "1.1.0",
+    "pi-ai": "1.1.0",
+    "pi-tui": "1.1.0"
+  },
+  "metadataChecks": "asar, renderer version, Code Mode route, latest.yml size/SHA-512 passed"
+}

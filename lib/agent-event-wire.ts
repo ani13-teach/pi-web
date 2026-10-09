@@ -1,4 +1,5 @@
 import type { JsonAgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { markSubagentToolCallsForDisplay } from "./subagent-display";
 
 export interface AgentEventLike {
   type: string;
@@ -14,10 +15,11 @@ type JsonAssistantMessageEvent = JsonMessageUpdateEvent["assistantMessageEvent"]
 type JsonToolCallStartEvent = Extract<JsonAssistantMessageEvent, { type: "toolcall_start" }>;
 type JsonToolCallDeltaEvent = Extract<JsonAssistantMessageEvent, { type: "toolcall_delta" }>;
 
-export type ClientAssistantMessageEvent =
+export type ClientAssistantMessageEvent = (
   | Exclude<JsonAssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" }>
   | (JsonToolCallStartEvent & { id?: string; toolName?: string })
-  | (JsonToolCallDeltaEvent & { id?: string; toolName?: string });
+  | (JsonToolCallDeltaEvent & { id?: string; toolName?: string })
+) & { displayOrigin?: "pi-subagents" };
 
 export type ClientMessageUpdateEvent = Omit<JsonMessageUpdateEvent, "assistantMessageEvent"> & {
   assistantMessageEvent: ClientAssistantMessageEvent;
@@ -59,6 +61,15 @@ export function toClientAgentEvent(
   event: AgentEventLike,
 ): AgentEventLike | ClientMessageUpdateEvent | null {
   if (OMITTED_EVENT_TYPES.has(event.type)) return null;
+  const names = Array.isArray(event.nativeSubagentToolNames)
+    ? event.nativeSubagentToolNames.filter((name): name is string => typeof name === "string")
+    : [];
+
+  if ((event.type === "message_start" || event.type === "message_end") && names.length > 0) {
+    const { nativeSubagentToolNames: _names, ...rest } = event;
+    void _names;
+    return { ...rest, message: markSubagentToolCallsForDisplay(event.message, names) };
+  }
 
   if (event.type === "message_update") {
     const assistantMessageEvent = event.assistantMessageEvent;
@@ -68,19 +79,18 @@ export function toClientAgentEvent(
       || Array.isArray(assistantMessageEvent)
     ) return null;
 
-    if (!("partial" in assistantMessageEvent)) {
-      return {
-        type: "message_update",
-        assistantMessageEvent,
-      } as ClientMessageUpdateEvent;
-    }
-
     const metadata = toolCallMetadata(assistantMessageEvent as Record<string, unknown>);
-    const { partial: _partial, ...deltaEvent } = assistantMessageEvent;
+    const { partial: _partial, ...deltaEvent } = assistantMessageEvent as Record<string, unknown>;
     void _partial;
+    const toolName = metadata?.toolName
+      ?? (isObject(deltaEvent.toolCall) ? deltaEvent.toolCall.name : deltaEvent.toolName);
     return {
       type: "message_update",
-      assistantMessageEvent: metadata ? { ...deltaEvent, ...metadata } : deltaEvent,
+      assistantMessageEvent: {
+        ...deltaEvent,
+        ...(metadata ?? {}),
+        ...(typeof toolName === "string" && names.includes(toolName) ? { displayOrigin: "pi-subagents" } : {}),
+      },
     } as ClientMessageUpdateEvent;
   }
 
@@ -90,6 +100,7 @@ export function toClientAgentEvent(
       toolCallId: event.toolCallId,
       toolName: event.toolName,
       partialResult: event.partialResult,
+      ...(event.displayOrigin === "pi-subagents" ? { displayOrigin: event.displayOrigin } : {}),
     };
   }
 

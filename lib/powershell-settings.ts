@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
@@ -59,7 +59,8 @@ function configuredTools(settings: Record<string, unknown>): string[] | undefine
   ) {
     throw new Error("Invalid settings.json: defaultTools must be an array of strings");
   }
-  return settings.defaultTools as string[];
+  // Resolve +name/-name before replacing the shell, preserving the inherited tools.
+  return SettingsManager.inMemory({ defaultTools: settings.defaultTools as string[] }).getDefaultTools();
 }
 
 export async function readPowerShellToolEnabled(

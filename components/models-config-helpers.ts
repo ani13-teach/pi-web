@@ -54,6 +54,11 @@ export function setCompatBool<T extends CompatEntry>(entry: T, key: string, valu
   };
 }
 
+export function setAdaptiveThinking<T extends CompatEntry & { reasoning?: boolean }>(entry: T, value: boolean): T {
+  const next = setCompatBool(entry, "forceAdaptiveThinking", value);
+  return value ? { ...next, reasoning: true } : next;
+}
+
 export function updateHeaderRow(
   rows: readonly HeaderRow[],
   id: number,

@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, findLiveSubagentProcessEnd, getAssistantErrorMessage, getDisplayableAssistantBlocks, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, findLiveSubagentProcessEnd, getAssistantErrorMessage, getDisplayableAssistantBlocks, isDisplayableMessage, isMessageGroupAnchor, splitFinalAssistantBlocks, type DisplayOptions } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { MessageView } from "./MessageView";
@@ -69,13 +69,15 @@ interface Props {
   unlockAudio?: () => void;
 }
 
-function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string | null {
+function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string, hideSubagentActivity = false): string | null {
   if (phase?.kind === "running_tools") {
-    const latest = phase.tools[phase.tools.length - 1];
+    const tools = hideSubagentActivity ? phase.tools.filter((tool) => tool.displayOrigin !== "pi-subagents") : phase.tools;
+    if (hideSubagentActivity && tools.length === 0) return t("chat.runningTool");
+    const latest = tools[tools.length - 1];
     if (latest?.progress) {
       return `${t("chat.runningNamedTool", { name: latest.name })} ${latest.progress}`;
     }
-    const names = phase.tools.map((t) => t.name);
+    const names = tools.map((t) => t.name);
     if (names.length === 0) return t("chat.runningTool");
     if (names.length === 1) return t("chat.runningNamedTool", { name: names[0] });
     if (names.length <= 3) return t("chat.runningTools", { names: names.join(", ") });
@@ -157,19 +159,19 @@ function NewSessionUpdateLink({
   );
 }
 
-function hasFinalAssistantAnswer(message: AgentMessage): boolean {
+function hasFinalAssistantAnswer(message: AgentMessage, options: DisplayOptions = {}): boolean {
   if (message.role !== "assistant") return false;
-  return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
+  return splitFinalAssistantBlocks(message as AssistantMessage, options).answerBlocks.some((block) => (
     block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
   ));
 }
 
-function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number): number {
+function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number, options: DisplayOptions = {}): number {
   for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (hasFinalAssistantAnswer(messages[candidateIdx])) return candidateIdx;
+    if (hasFinalAssistantAnswer(messages[candidateIdx], options)) return candidateIdx;
   }
   for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (messages[candidateIdx]?.role === "assistant") return candidateIdx;
+    if (messages[candidateIdx]?.role === "assistant" && isDisplayableMessage(messages[candidateIdx], options)) return candidateIdx;
   }
   return -1;
 }
@@ -857,7 +859,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     return history.reverse();
   }, [messages]);
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
-  const hasStreamingContent = Boolean(streamState.streamingMessage?.content.length);
+  const hideSubagentActivity = session?.relation?.kind !== "subagent";
+  const displayOptions: DisplayOptions = { hideSubagentActivity, toolResults: toolResultsMap };
+  const hasStreamingContent = Boolean(streamState.streamingMessage
+    && isDisplayableMessage(streamState.streamingMessage, { ...displayOptions, isStreaming: true }));
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const promptAnchorSpacerRef = useRef<HTMLDivElement | null>(null);
   const promptAnchorSpacerHeightRef = useRef(0);
@@ -1115,6 +1120,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
               const renderMessage = (idx: number, options: { keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[] } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
+                if (!isDisplayableMessage(msg, displayOptions)) return null;
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const keyPrefix = options.keyPrefix ?? "message";
                 const messageKey = entryIds[idx] ?? idx;
@@ -1124,7 +1130,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   for (let j = idx + 1; j < messages.length; j++) {
                     const r = messages[j].role;
                     if (r === "user") break;
-                    if (r === "assistant") { showTimestamp = false; break; }
+                    if (r === "assistant" && isDisplayableMessage(messages[j], displayOptions)) { showTimestamp = false; break; }
                   }
                   // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
                   if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
@@ -1137,6 +1143,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     key={`${keyPrefix}-view-${messageKey}`}
                     message={msg}
                     toolResults={toolResultsMap}
+                    hideSubagentActivity={hideSubagentActivity}
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
@@ -1184,10 +1191,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 while (endIdx < messages.length && !isMessageGroupAnchor(messages[endIdx])) endIdx += 1;
 
                 const isLiveTail = (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
-                const liveSubagentEnd = isLiveTail ? findLiveSubagentProcessEnd(messages, userIdx, endIdx) : -1;
+                const liveSubagentEnd = isLiveTail ? findLiveSubagentProcessEnd(messages, userIdx, endIdx, displayOptions) : -1;
                 const finalAssistantIdx = liveSubagentEnd >= 0
                   ? liveSubagentEnd
-                  : findFinalAssistantIndex(messages, userIdx, endIdx);
+                  : findFinalAssistantIndex(messages, userIdx, endIdx, displayOptions);
 
                 if (finalAssistantIdx === -1) {
                   for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
@@ -1208,7 +1215,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 rendered.push(renderMessage(userIdx));
 
                 const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
-                const finalSplit = splitFinalAssistantBlocks(finalAssistant);
+                const finalSplit = splitFinalAssistantBlocks(finalAssistant, displayOptions);
                 const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || getAssistantErrorMessage(finalAssistant)
                   ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
                   : null;
@@ -1224,6 +1231,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 for (let processIdx = userIdx + 1; processIdx <= finalAssistantIdx; processIdx++) {
                   const processMessage = messages[processIdx];
                   if (processMessage.role === "custom") {
+                    if (!isDisplayableMessage(processMessage, displayOptions)) continue;
                     revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
                     processViews.push(renderMessage(processIdx, { keyPrefix: "process" }));
                     continue;
@@ -1232,8 +1240,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   const message = processIdx === finalAssistantIdx
                     ? withAssistantBlocks(processMessage, finalProcessBlocks, { omitUsage: Boolean(finalAnswerMessage) })
                     : processMessage;
-                  const blocks = getDisplayableAssistantBlocks(message);
-                  if (blocks.length === 0) continue;
+                  const blocks = getDisplayableAssistantBlocks(message, displayOptions);
+                  // The final answer owns its provider error; earlier failures
+                  // still need a process entry even when every tool is hidden.
+                  if (blocks.length === 0 && (processIdx === finalAssistantIdx || !getAssistantErrorMessage(message))) continue;
                   processToolCount += countToolCallBlocks(blocks);
                   revealProcess ||= Boolean(pendingSearchScroll && entryIds[processIdx] === pendingSearchScroll.entryId && (!searchBlock || blocks.includes(searchBlock)));
                   processViews.push(renderMessage(processIdx, {
@@ -1248,9 +1258,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 // as a separate bubble below the group.
                 const streamingMessage = streamState.streamingMessage as AssistantMessage | null;
                 if (liveSubagentEnd >= 0 && streamState.isStreaming && hasStreamingContent && streamingMessage?.role === "assistant") {
-                  const streamingSplit = splitFinalAssistantBlocks(streamingMessage, { isStreaming: true });
+                  const streamingSplit = splitFinalAssistantBlocks(streamingMessage, { ...displayOptions, isStreaming: true });
                   if (streamingSplit.processBlocks.length > 0) {
-                    processViews.push(<MessageView key="live-process" message={withAssistantBlocks(streamingMessage, streamingSplit.processBlocks)} toolResults={toolResultsMap} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />);
+                    processViews.push(<MessageView key="live-process" message={withAssistantBlocks(streamingMessage, streamingSplit.processBlocks)} toolResults={toolResultsMap} hideSubagentActivity={hideSubagentActivity} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />);
                     streamingInProcess = true;
                     if (streamingSplit.answerBlocks.length > 0) {
                       streamingProcessAnswer = withAssistantBlocks(streamingMessage, streamingSplit.answerBlocks);
@@ -1291,7 +1301,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 }
                 idx = endIdx;
               }
-              const { startIndex } = getVisibleRenderWindow(rendered.length, visibleCount);
+              const visibleRendered = rendered.filter((node) => node !== null);
+              const { startIndex } = getVisibleRenderWindow(visibleRendered.length, visibleCount);
               const hasMore = startIndex > 0 || hasEarlierMessages;
               return (
                 <>
@@ -1300,9 +1311,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                        {t("chat.loadEarlier")}
                     </div>
                   )}
-                  {rendered.slice(startIndex)}
+                  {visibleRendered.slice(startIndex)}
                   {streamState.isStreaming && hasStreamingContent && streamState.streamingMessage && (!streamingInProcess || streamingProcessAnswer) && (
-                    <MessageView message={streamingProcessAnswer ?? streamState.streamingMessage as AgentMessage} toolResults={toolResultsMap} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+                    <MessageView message={streamingProcessAnswer ?? streamState.streamingMessage as AgentMessage} toolResults={toolResultsMap} hideSubagentActivity={hideSubagentActivity} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
                   )}
                 </>
               );
@@ -1310,7 +1321,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
             {agentRunning && !hasStreamingContent && agentPhase && (
               <div className="break-words py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
+                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t, hideSubagentActivity)}</span>
               </div>
             )}
 

@@ -1,0 +1,11 @@
+{
+  "installer": "C:\\Users\\jch\\pi-desktop\\release\\Pi Desktop Setup 0.2.2.exe",
+  "version": "0.2.2",
+  "sizeBytes": 141488810,
+  "sha256": "7dbee63a25af06bcd90d03ad16001e9acbf6ba34753fc9750035affae2229e47",
+  "modifiedUtc": "2026-10-08T15:24:06.000Z",
+  "unpackedModifiedUtc": "2026-10-08T15:23:02.070Z",
+  "packagedRendererAndAdaptive": true,
+  "packagedPiAiVersion": "0.85.1",
+  "latestMetadataMatches": true
+}

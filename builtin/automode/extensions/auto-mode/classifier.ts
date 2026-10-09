@@ -228,21 +228,14 @@ async function completeClassifierAttempt(
   }
 }
 
-/**
- * Run normalized Pi AI completion through the provider in Pi's runtime registry.
- * This temporary bridge is only valid until Pi exposes
- * `ctx.modelRegistry.completeSimple(...)` natively. Replace this function with
- * that API when the project's minimum supported Pi version includes it.
- */
+/** Use Pi's public boundary to normalize transcript context and resolve auth. */
 async function completeSimpleWithRegistry(
   ctx: ExtensionContext,
   model: Model<any>,
   context: { systemPrompt: string; messages: UserMessage[] },
   options: Parameters<ClassifierCompletionFn>[2],
 ): Promise<AssistantMessage> {
-  const provider = ctx.modelRegistry.getProvider(model.provider);
-  if (!provider) throw new Error(`Unknown provider: ${model.provider}`);
-  return provider.streamSimple(model, context, options).result();
+  return ctx.modelRegistry.streamSimple(model, context, options).result();
 }
 
 const DETAILED_CLASSIFIER_MAX_TOKENS = 1200;

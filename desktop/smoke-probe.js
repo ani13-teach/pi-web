@@ -284,6 +284,162 @@
     return "recent assistant content matches the selected session";
   });
 
+  // The fixture is loaded through the real reader and IPC; no model/tool is run.
+  const subagentFixture = window.__piSmokeSubagentFixture;
+  const transcript = () => document.querySelector(".chat-content .overflow-y-auto");
+  const selectedId = () => new URLSearchParams(location.search).get("session");
+  const contextMessages = async (id) => {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/context`);
+    if (!response.ok) throw new Error(`context status ${response.status} for ${id}`);
+    const context = await response.json();
+    const messages = context.messages ?? context.context?.messages;
+    if (!Array.isArray(messages)) throw new Error("fixture context has no messages");
+    return messages;
+  };
+  const openProcess = async () => {
+    const pane = transcript();
+    if (!pane) throw new Error("no chat transcript");
+    // Process children are unmounted when collapsed. Open them before checking
+    // absence, otherwise a leaked card could pass simply by being collapsed.
+    for (const button of pane.querySelectorAll('button[aria-expanded="false"]')) button.click();
+    await sleep(200);
+    return pane;
+  };
+  const expandTool = async (marker) => {
+    const button = await waitFor(() => [...(transcript()?.querySelectorAll("button") ?? [])]
+      .find((element) => element.textContent.includes(marker)), 5000);
+    if (!button) throw new Error(`tool header missing: ${marker}`);
+    button.click();
+  };
+  const assertQuietMain = async () => {
+    if (!subagentFixture) throw new Error("no subagent fixture supplied by main");
+    const answer = `Desktop fixture answer ${window.__piSmokeSessionId}`;
+    if (!await waitFor(() => selectedId() === window.__piSmokeSessionId
+      && transcript()?.innerText.includes(answer), 30000)) throw new Error("main fixture transcript did not load");
+    await openProcess();
+    if (!transcript()?.innerText.includes(subagentFixture.ordinaryResult)) await expandTool(subagentFixture.ordinaryTool);
+    if (!await waitFor(() => transcript()?.innerText.includes(subagentFixture.ordinaryResult), 5000)) {
+      throw new Error("the ordinary read card/result was lost in main chat");
+    }
+    const pane = transcript();
+    const forbidden = [subagentFixture.legacyControl, subagentFixture.nativeControl, subagentFixture.notification];
+    for (const marker of forbidden) {
+      if (pane.textContent.includes(marker)) throw new Error(`internal activity leaked into main chat: ${marker}`);
+    }
+    if ([...pane.querySelectorAll("button")].some((button) => button.textContent.trim().startsWith("Agent"))) {
+      throw new Error("an Agent control header remains in main chat");
+    }
+    return "native and historical cards + completion notice hidden; ordinary read result preserved";
+  };
+  const assertOrdinarySidebar = () => {
+    if (!subagentFixture) throw new Error("no subagent fixture supplied by main");
+    const sidebar = document.querySelector("#session-sidebar");
+    const mainTitle = `Desktop smoke session ${window.__piSmokeSessionId}`.slice(0, 50);
+    if (!sidebar || !sidebar.textContent.includes(mainTitle)) {
+      throw new Error("main fixture is not in the ordinary sidebar");
+    }
+    if (sidebar.textContent.includes(subagentFixture.childTitle.slice(0, 50))
+      || sidebar.textContent.includes(subagentFixture.description.slice(0, 50))) throw new Error("child fixture leaked into the ordinary sidebar");
+    return "main row present, child title/task absent in the same workspace";
+  };
+
+  await record("subagent smoke fixtures retain provenance and completion data through IPC", async () => {
+    if (!subagentFixture) throw new Error("no subagent fixture supplied by main");
+    const child = sessions.find((session) => session.id === subagentFixture.childId);
+    if (child?.relation?.kind !== "subagent" || child.relation.parentSessionId !== window.__piSmokeSessionId
+      || child.relation.status !== "completed" || child.firstMessage !== subagentFixture.childTitle) {
+      throw new Error("child session was not read as a completed subagent of the main fixture");
+    }
+    const messages = await contextMessages(window.__piSmokeSessionId);
+    const blocks = messages.filter((message) => message.role === "assistant").flatMap((message) => message.content ?? []);
+    const legacy = blocks.find((block) => block.type === "toolCall" && block.input?.prompt === subagentFixture.legacyControl);
+    const native = blocks.find((block) => block.type === "toolCall" && block.input?.prompt === subagentFixture.nativeControl);
+    if (!legacy || legacy.displayOrigin || legacy.toolName !== "Agent"
+      || !messages.some((message) => message.role === "toolResult" && message.toolCallId === legacy.toolCallId
+        && message.details?.kind === "pi-subagents")) throw new Error("historical Agent/result provenance missing");
+    if (native?.displayOrigin !== "pi-subagents" || native.toolName !== "Agent") throw new Error("native Agent provenance missing");
+    if (!messages.some((message) => message.role === "custom" && message.customType === "subagent-notification"
+      && message.display === true && message.content === subagentFixture.notification)) throw new Error("main completion notification missing from context");
+    const childMessages = await contextMessages(subagentFixture.childId);
+    if (!childMessages.some((message) => message.role === "assistant" && message.content?.some((block) =>
+      block.type === "toolCall" && block.toolName === "Agent" && block.displayOrigin === "pi-subagents"
+        && block.input?.prompt === subagentFixture.childControl))) throw new Error("child native control provenance missing");
+    for (const marker of [subagentFixture.childProcess, subagentFixture.childControlResult, subagentFixture.childTool,
+      subagentFixture.childToolResult, subagentFixture.childNotification, subagentFixture.childAnswer]) {
+      if (!JSON.stringify(childMessages).includes(marker)) throw new Error(`child fixture marker missing from context: ${marker}`);
+    }
+    return "completed child relation, historical/native controls and notifications preserved in stored context";
+  });
+  await record("main chat hides subagent cards and completion notices", assertQuietMain);
+  await record("ordinary sidebar excludes the fixture subagent", assertOrdinarySidebar);
+
+  await record("top Agents opens the complete child process and returns to a quiet main chat", async () => {
+    if (!subagentFixture) throw new Error("no subagent fixture supplied by main");
+    const agentsButton = () => document.querySelector('button[aria-label="Agents"][aria-pressed]');
+    const panel = () => document.querySelector('[role="listbox"][aria-label="Agents"]');
+    const row = (marker) => [...(panel()?.querySelectorAll('[role="option"]') ?? [])]
+      .find((option) => [...option.querySelectorAll("[title]")].some((node) => node.title === marker));
+    const openAgents = async () => {
+      const button = await waitFor(agentsButton);
+      if (!button) throw new Error("top Agents button missing");
+      if (button.getAttribute("aria-pressed") !== "true") button.click();
+      if (!await waitFor(() => agentsButton()?.getAttribute("aria-pressed") === "true" && panel())) {
+        throw new Error("Agents did not enter its pressed/open state");
+      }
+    };
+    try {
+      const button = await waitFor(agentsButton);
+      if (!button || button.getAttribute("aria-pressed") !== "false" || panel()) throw new Error("Agents must start closed");
+      await openAgents();
+      const childRow = row(subagentFixture.description);
+      const mainRow = row(`Desktop smoke session ${window.__piSmokeSessionId}`);
+      if (!childRow || !mainRow || childRow.getAttribute("aria-selected") !== "false"
+        || mainRow.getAttribute("aria-selected") !== "true") throw new Error("Agents family rows/initial selection are wrong");
+      if (!["已完成", "Completed"].some((label) => childRow.innerText.includes(label))) throw new Error("child completion status not shown in Agents");
+      agentsButton().click();
+      if (!await waitFor(() => agentsButton()?.getAttribute("aria-pressed") === "false" && !panel())) throw new Error("Agents toggle did not close its panel");
+      await openAgents();
+      row(subagentFixture.description).click();
+      if (!await waitFor(() => selectedId() === subagentFixture.childId
+        && transcript()?.innerText.includes(subagentFixture.childAnswer), 30000)) throw new Error("Agents click did not open the child transcript");
+      await openAgents();
+      if (row(subagentFixture.description)?.getAttribute("aria-selected") !== "true"
+        || row(`Desktop smoke session ${window.__piSmokeSessionId}`)?.getAttribute("aria-selected") !== "false") {
+        throw new Error("Agents selection did not follow navigation to the child");
+      }
+      assertOrdinarySidebar();
+      await openProcess();
+      await expandTool(subagentFixture.childControl);
+      await expandTool(subagentFixture.childTool);
+      const expected = [subagentFixture.childTitle, subagentFixture.childProcess, subagentFixture.childControl,
+        subagentFixture.childControlResult, subagentFixture.childTool, subagentFixture.childToolResult,
+        subagentFixture.childNotification, subagentFixture.childAnswer];
+      if (!await waitFor(() => expected.every((marker) => transcript()?.innerText.includes(marker)), 5000)) {
+        throw new Error(`child process incomplete: ${expected.filter((marker) => !transcript()?.innerText.includes(marker)).join(", ")}`);
+      }
+      await openAgents();
+      row(`Desktop smoke session ${window.__piSmokeSessionId}`).click();
+      await assertQuietMain();
+      await openAgents();
+      if (row(`Desktop smoke session ${window.__piSmokeSessionId}`)?.getAttribute("aria-selected") !== "true"
+        || row(subagentFixture.description)?.getAttribute("aria-selected") !== "false") throw new Error("Agents selection did not return to main");
+      assertOrdinarySidebar();
+      return "toggle/open and completed status verified; child text, native Agent, read results and notice visible; main stays quiet after return";
+    } finally {
+      // Keep later layout/settings probes on the main fixture even if a child assertion fails.
+      if (selectedId() !== window.__piSmokeSessionId) {
+        await openAgents();
+        const mainRow = row(`Desktop smoke session ${window.__piSmokeSessionId}`);
+        if (!mainRow) throw new Error("cannot restore main fixture from Agents");
+        mainRow.click();
+        if (!await waitFor(() => selectedId() === window.__piSmokeSessionId
+          && transcript()?.innerText.includes(`Desktop fixture answer ${window.__piSmokeSessionId}`), 30000)) throw new Error("main restore did not load");
+      }
+      if (agentsButton()?.getAttribute("aria-pressed") === "true") agentsButton().click();
+      if (!await waitFor(() => !panel() && agentsButton()?.getAttribute("aria-pressed") === "false")) throw new Error("Agents panel stayed open after cleanup");
+    }
+  });
+
   // The file viewer renders previews in an iframe (PDF and documents by URL,
   // HTML by srcdoc). The page policy therefore has to allow frames from this
   // origin, or every preview shows up blank.
@@ -504,6 +660,35 @@
         if (!await waitFor(() => scopes[index].getAttribute("aria-pressed") === "true" && dialog.querySelector(".config-detail-path")?.textContent.includes(paths[index]))) throw new Error("the creation target path does not match its selected scope");
       }
       return "five presets expose editable IDs, direct built-in editing and delete actions; creation defaults to built-in and offers three scopes; no configuration writes";
+    } finally {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      if (!await waitFor(() => !document.querySelector(".settings-dialog-surface"))) throw new Error("settings dialog stayed open");
+    }
+  });
+
+  await record("Code Mode has a loaded global switch in general settings", async () => {
+    const openButton = [...document.querySelectorAll("button[aria-label]")]
+      .find((button) => ["设置", "Settings", "設定"].includes(button.getAttribute("aria-label")));
+    if (!openButton) throw new Error("no settings button");
+    openButton.click();
+    try {
+      const dialog = await waitFor(() => document.querySelector(".settings-dialog-surface"));
+      if (!dialog) throw new Error("settings dialog did not open");
+      const tab = [...dialog.querySelectorAll("button")]
+        .find((button) => ["常规", "General", "一般"].includes(button.textContent.trim()));
+      if (!tab) throw new Error("no general settings tab");
+      tab.click();
+      const control = await waitFor(() => {
+        const heading = [...dialog.querySelectorAll("h3")].find((element) => element.textContent.trim() === "Code Mode");
+        const toggle = heading?.closest("section")?.querySelector('[role="switch"]');
+        return toggle && !toggle.disabled ? toggle : null;
+      });
+      if (!control) throw new Error("Code Mode switch is missing or did not load");
+      const response = await fetch("/api/tools/codemode");
+      const data = await response.json();
+      if (!response.ok || typeof data.enabled !== "boolean") throw new Error("Code Mode settings API did not return a preference");
+      if (control.getAttribute("aria-checked") !== String(data.enabled)) throw new Error("Code Mode switch does not reflect the stored preference");
+      return "global preference loaded over IPC; switch matches the API; no configuration writes";
     } finally {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       if (!await waitFor(() => !document.querySelector(".settings-dialog-surface"))) throw new Error("settings dialog stayed open");

@@ -308,6 +308,7 @@ export interface AgentInvocation {
 
 /** Details attached to custom notification messages for visual rendering. */
 export interface NotificationDetails {
+  displayOrigin?: "pi-subagents";
   id: string;
   description: string;
   status: string;

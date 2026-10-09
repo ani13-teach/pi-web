@@ -1,16 +1,22 @@
 # Pi Desktop
 
-Windows 桌面版的 pi coding agent。界面沿用现有的 pi-web（React 组件原样搬过来），
-但**桌面内部通信不监听本地端口**：窗口和后台之间走 Electron 的进程间通信，
-后台进程里跑的是 pi-web 原来的服务端代码。
+Windows 桌面版的 pi coding agent。界面和服务端基于 pi-web 移植，并有本地功能修改。
+**桌面内部通信不监听本地端口**：窗口和后台之间走 Electron 的进程间通信（IPC），
+后台进程承载会话、模型、文件、终端等服务。
 
-本轮修复、验收证据与暂缓项见 [REVIEW-FIXES.md](REVIEW-FIXES.md)。
-下面标为“早期记录”的数字不代表最终交付包。
+## 文档导航
+
+- **首次使用或接手开发**：[项目入门与维护指南](docs/project-guide.md)（环境、启动、目录、数据、测试、排错和交付）。
+- **功能与实现概览**：本 README；命令从下文「命令」开始。
+- **备份现状与后续目标**：[备份与恢复](docs/backup-plan.md)，注意首版不等于完整恢复所有用户数据。
+- **历次改动和验证证据**：[REVIEW-FIXES.md](REVIEW-FIXES.md)。其中旧测试数量与旧交付包仅是历史记录，不代表当前验收。
+
+本文的维护基线为源码 `0.2.4` / Pi 内核 `1.1.0`；实际版本以 `package.json` 和锁文件为准。
 
 ```
 ┌────────────────────────────────────────────────────────┐
 │ 窗口（渲染进程）                                          │
-│   pi-web 的 React 界面，未经修改                          │
+│   基于 pi-web 的 React 界面，含本地修改                   │
 │   fetch / EventSource / XMLHttpRequest / next-navigation │
 │        ↓ 垫片：把 /api/… 转成 IPC                         │
 │  preload（白名单桥）                                      │
@@ -21,10 +27,10 @@ Windows 桌面版的 pi coding agent。界面沿用现有的 pi-web（React 组�
 └────────────────────────────────────────────────────────┘
         ↓ 子进程通道（请求/响应 + 流式分块拉取）
 ┌────────────────────────────────────────────────────────┐
-│ 后台进程：端口化了 pi-web 的全部服务端路由                   │
+│ 后台进程：移植 pi-web 服务端路由                          │
 │   会话 / Agent / 终端 / 文件 / Git / 模型 / 技能 / 插件      │
-│        ↓ HTTPS（唯一的外网出口）                           │
-│ 模型服务                                                 │
+│        ↓ 出网请求（模型、技能和插件等）                    │
+│ 外部服务                                                 │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -47,7 +53,8 @@ Windows 下点击主窗口的关闭按钮会将窗口隐藏到系统托盘，应
 
 ## 垫片做了什么
 
-渲染进程只替换了四个浏览器 API，业务代码零改动：
+桌面传输主要由下面四类 API 垫片接管；这不意味着业务代码未修改。
+构建还为 `next/image`、`next/font/google` 提供兼容别名（见 `vite.config.ts`）。
 
 | 浏览器 API | 桌面端实现 |
 |---|---|
@@ -76,12 +83,10 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 
 - 入口文件名由 `extensions/auto-mode.ts` 改成 `extensions/index.ts`。这个插件会拦掉对
   “文件名里带 auto-mode”的文件的写入（它把这类文件当成自己的安全配置），
-  原名会让以后改这份源码时被它自己的守卫挡住。其余文件与来源一致。
-- **只有一份生效**：磁盘上已装的那份（`~/.pi/agent/extensions/pi-automode`）会被丢掉，
-  免得同时出现两个分类器和两套工具。插件管理器里仍会列出它，因为它还在磁盘上。
+  原名会让以后改这份源码时被它自己的守卫挡住。这份副本还包含来源工作区的本地修改及 Desktop Pi 1.1 适配，不保证其余文件与上游逐字节一致。
+- **只有一份生效**：磁盘上已装的那份（`~/.pi/agent/extensions/pi-automode`）从会话加载清单中排除，
+  免得同时出现两个分类器和两套工具；不会删除磁盘插件，插件管理器里仍会列出它。
 - 设置入口在设置对话框顶部的「自动模式」页；保存后要重新加载会话才生效。
-- 页面只列可改的项，不再铺开版本、插件路径、会话计数和生效值表（这些属于排查信息，不属于设置）。
-  适用范围是一行下拉框：所有项目 / 当前项目。
 - 页面只展示可编辑设置；适用范围使用「所有项目 / 当前项目」下拉框。
   不再铺开版本、插件路径、会话计数和生效值表。配置读取异常仍会提示。
   自动模式页铺满设置面板，左右内边距相同，滚动条位于面板右侧。
@@ -89,6 +94,25 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
   - 全局：`~/.pi/agent/extensions/pi-automode/config.json`
   - 本项目：`<项目>/.pi/automode.local.json`（项目未受信任时会被忽略，设置页会标出来）
 - 页面上保存时只写你动过的项，没动过的键不进文件，继续用下层的值。
+
+## Code Mode
+
+桌面版通过 SDK 显式加载 Pi 1.1.0 的官方 `createCodemodeExtension()`，不自行实现脚本沙箱。
+入口：**设置 → 常规 → Code Mode → 启用 Code Mode**。默认关闭；切换后自动重载当前会话，
+其他已打开会话需自行重载，新会话读取最新配置。纯聊天模式保持无工具；只读模式的脚本不能调用
+`bash`、`edit`、`write`。顶部「工具」面板可查看已启用的 `codemode`。
+
+- 开关只更新 `~/.pi/agent/settings.json` 的 `defaultTools`，保留其他配置、工具白名单及 `+name/-name` 语义；命令行版可共用该配置。项目 `defaultTools` 仍可覆盖全局选择。
+- Desktop 固定使用官方 `on` 模式：保留原有工具声明，模型可选择直接调用或通过脚本调用，不提供 `only` 模式开关。`tool_search` 不是必需条件，本轮未接入。
+- 遵守内核 `extensions: ["-builtin:codemode"]` / 禁用扩展设置。仅根会话增加内置工厂；不扩大子代理保存的工具和扩展范围。
+- 外层脚本及内层工具调用仍经过原有自动模式安全检查，不增加放行规则。脚本内修改和命令执行都是真实操作，失败不自动撤销已经完成的操作。
+- 可直接提问：`使用 codemode，并行读取 README.md 和 package.json，只返回 README 的一级标题及项目名称、版本，不要输出全文或修改文件。` 不需要输入 `/codemode` 或自己编写 JavaScript。
+
+定向检查：`node --test lib/codemode-settings.test.mjs lib/codemode-sdk.test.mjs app/api/tools/codemode/route.test.mjs lib/powershell-settings.test.mjs`。
+使用真实 SDK、官方 QuickJS 沙箱与本地模拟 provider，不请求真实模型，不修改用户凭据或配置；
+覆盖开关往返/重载、只读/纯聊天、并行读取只返回筛选结果及嵌套调用的安全拒绝。
+窗口检查另验证常规页开关通过 IPC 读到全局值，不保存用户设置。
+修改源码、构建 `dist/` 不会更新已安装版，需要重新打包并安装才会出现在当前安装的应用中。
 
 ## 内置子代理
 
@@ -100,7 +124,7 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 - 每个根会话加载独立的单文件 bundle，配置与任务不会串到其他会话；子会话仍可在 Desktop 中查看、转向和停止。
 - 启动前排除磁盘上重复安装的 `pi-subagents`，不修改它们或用户的全局插件设置。未受信任项目的扩展不会加载。
 - 子会话通过原有 IPC 接入，扩展只绑定一次；保留 Desktop 自动模式保护、历史关系与工具范围快照。
-- 配置页使用原生代理解析与默认值；新配置默认启用内置实现，已有显式关闭状态仍保留。开关与并发配置仍存于 `agents/settings.json`，重载会话后应用。
+- 配置页使用原生代理解析与默认值；新配置默认启用内置实现，已有显式关闭状态仍保留。扩展开关继续存于 `agents/settings.json`；运行设置统一读取全局 `subagents.json` 与项目 `.pi/subagents.json`，保存后重载会话应用。
 - 内置预设仅五套：`plan`、`review`、`work`、`scout`、`test`，分别沿用原 `planner`、`reviewer`、`worker`、`scout`、`tester` 的完整提示词、工具、指定/备用模型、思考级别和轮次限制；不再内置 `Agent/general-purpose`、`Explore`、`Plan` 或长名称的重复预设。技能、扩展、继承上下文和后台默认均关闭。原全局 `.md` 文件保留为用户配置，不删除不改写；模型渠道和凭据不随预设复制，指定模型不可用时可在设置页更换。
 - 列表内置分组置顶；同名生效优先级为 **内置 → 项目 → 工作区 → 全局**。选中内置项只编辑它自身，不自动转向同名全局/项目文件。内置编辑和新建使用同一 `/api/subagents/profiles` 接口，独立保存到 `~/.pi/agent/desktop-agents/<id>.md`，不修改程序包。新建默认选择内置，也可选择全局 `agents/<id>.md` 或项目 `.pi/agents/<id>.md`。
 - 预设和新建内置 Agent 均可删除；内置删除记录保存在 `desktop-agents/.deleted/`，重启后不会恢复预设。删除内置后若存在低层同名用户配置，则该用户配置重新生效；其他范围的文件不受影响。内置/全局/项目 ID 都可编辑，保存时保留原配置和未知 frontmatter、移除旧源，并拒绝覆盖同范围已有 ID 或目标文件；预设改名不会复活旧 ID。工作区来源仍只读。
@@ -110,8 +134,36 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 - 构建复制许可证与来源清单；`node builtin/pi-subagents/scripts/source-manifest.mjs` 检查源码文件库存及 SHA-256。
 
 定向检查：`node --test lib/subagent-extension.test.mjs lib/rpc-manager.test.mjs lib/subagents.test.mjs lib/subagent-settings.test.mjs components/AgentsConfig.test.mjs`。
+
+子代理顶层调用默认后台，显式前后台参数优先于代理配置；关闭自带预设不再忽略已保存的桌面代理文件。主聊天和普通会话列表默认静默，复用顶部 `Agents` 查看完整过程、状态并返回主会话。配置界面显示实际生效来源和默认模式。此功能不删除历史、不改个人配置、不阻断结果和错误回传；后台不代表应用退出后仍运行。详细规则、测试和回退范围见 [`docs/subagent-background-silence.md`](docs/subagent-background-silence.md)。
 备用模型界面/保存检查：`node --test components/AgentsConfig.test.mjs lib/subagents.test.mjs app/api/subagents/profiles/route.test.mjs`（路由测试使用与 Desktop 构建相同的 `next/server` 垫片）。
 其中子代理测试使用真实 SDK 会话和本地模拟 provider，不调用真实模型或修改用户会话。
+
+### 子代理运行设置与高级选项
+
+入口：**设置 → 子代理 → 左侧「运行设置」**，可选「所有项目」或「当前项目」。
+提供 18 个桌面运行字段：后台／前台并发、默认轮数、收尾宽限轮数、结果汇合模式、默认后台运行、
+定时调度、模型范围限制、严格解析、自带预设、工具描述模式、保存会话、输出记录、worktree、工作流、
+嵌套深度、找不到代理时的回退及用量汇总。终端专用 FleetView、widget 等选项不放进桌面界面。
+
+- 每项显示本层设置／继承来源，当前项目覆盖全局时另行提示；布尔选项支持继承、启用、关闭。
+- 保存只写修改过的键，恢复继承只删除本层键；保留未知 JSON 字段，不将默认值整份写回。
+  坏 JSON／非法字段会报错，不静默覆盖。定时任务开关只开放能力，不创建任何定时任务。
+- 后台并发读取优先级：**项目 native → 全局 native → 旧 `agents/settings.json` 的显式并发 → 默认 10**。
+  原来桌面默认 10 覆盖原生文件 4 的问题已修正；旧文件不迁移、不重写。旧 settings API 的并发字段
+  仅为兼容入口，不再用于新 UI；native 已有显式值时不会被旧值盖过。
+- 保存后需新建或重载会话，不承诺运行中任务热更新。默认轮数 0 为不限；单个代理和调用参数仍可覆盖。
+  工作流继承为原生自动模式；嵌套深度 0 或 1 都关闭嵌套。严格解析遵循原生现有覆盖范围，
+  目前启动严格校验不覆盖 `desktop-agents` 的容错加载。
+- 单个代理的「高级设置」增加系统提示词追加／替换、文件隔离、保存会话、扩展工具白名单和颜色。
+  worktree 不是安全沙箱，默认不带主目录未提交修改；全局关闭 worktree 时会共享当前目录。
+  显式清空扩展工具白名单可以移除已有选择器；老 API 客户端省略字段时保留原值。
+- 原生其余 agent frontmatter（如记忆、嵌套类型白名单、资源白名单）仍在文件中维护；界面保存保留这些字段。
+
+检查：`node --test components/AgentsConfig.test.mjs components/SubagentRuntimeSettings.test.mjs lib/subagent-runtime-settings.test.mjs app/api/subagents/runtime-settings/route.test.mjs lib/subagent-extension.test.mjs lib/subagents.test.mjs`。
+`node tests/subagent-runtime-ipc.mjs` 验证构建后后台的真实 IPC 路由与临时文件持久化；
+`node tests/subagent-settings-browser.mjs` 使用独立 Electron 窗口和内存 API，验证实际编辑、保存、继承和布局；
+后者不是完整应用 IPC 或打包版验收。两者都不请求真实模型、不写用户配置。
 
 ## 模型名称与渠道
 
@@ -124,6 +176,18 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 
 定向检查：`node --experimental-strip-types --test components/ModelLabel.test.mjs tests/model-config-labels.test.mjs`
 及下方的模型选择器浏览器检查。
+
+## 自适应思考（Adaptive）
+
+自定义模型使用 `anthropic-messages` 协议时，在「设置 → 模型 → 能力」的「推理 / 思考」旁显示「自适应思考（Adaptive）」。
+开启会同时启用推理，并保存模型级 `compat.forceAdaptiveThinking: true`；实际聊天开启思考时，内核发送
+`thinking.type: "adaptive"` 与 `output_config.effort`，不使用旧式 `budget_tokens`。
+思考强度仍由聊天中的思考等级控制，高级设置的 `thinkingLevelMap` 可自定义对应的 effort。
+关闭只将该 compat 写为显式 `false`（覆盖渠道继承值），不关闭普通推理，也不改变其他兼容项；其他协议不显示此选项。
+保存后请新建或重载会话，使已有运行时重新读取模型配置。
+
+定向检查：`node --test components/ModelsConfig.test.mjs lib/adaptive-thinking.test.mjs lib/models-config-store.test.mjs lib/thinking-level-map.test.mjs`。
+请求测试使用临时配置与 mock fetch，不调用真实模型或读取用户凭据。
 
 ## 模型收藏
 
@@ -147,17 +211,17 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 
 ## 最新安装包
 
-- 版本：`0.2.1`（应用显示为 `0.2.1-desktop`），内置配置优先；仅保留 `plan`、`review`、`work`、`scout`、`test` 五套预设，支持删除/新建内置 Agent 和修改 ID。
-- 安装包：`release/Pi Desktop Setup 0.2.1.exe`，Windows x64，141488350 字节。
-- SHA-256：`086976ef607fcfd67802bc4a841f1d1a93c7182521ee3501587f932373fcab51`。
-- 仓库外打包版窗口检查：隔离副本运行 `node scripts/smoke-window.mjs --binary "release/win-unpacked/Pi Desktop.exe" --isolate`，窗口 22/22、后置 3/3，退出 0；包含五套内置项、ID 草稿编辑、删除按钮与新建三范围的实际点击检查。日志 `.tmp-agents-ui-pkg-window-0.2.1.log`，详情见 `REVIEW-FIXES.md`。本次未运行打包版真实模型聊天/崩溃检查，也未自动安装。
+- 版本：`0.2.4`（应用显示为 `0.2.4-desktop`），四个 Pi 内核包保持 `1.1.0`。新增官方 Code Mode 及常规页开关，并包含当前工作区已有修复。
+- 安装包：`release/Pi Desktop Setup 0.2.4.exe`，Windows x64，140579431 字节。
+- SHA-256：`9814c3e0c37488f911ed2d01771d90e370b29edf644afc76f35154ea7318587c`。
+- 本次打包前定向回归 159/159；仓库外包内 Code Mode 专项 7/7，均退出 0。已核对 asar / 前端版本、四个内核版本及 latest.yml 大小 / SHA-512，记录 `.tmp-codemode-artifact-0.2.4.json`。窗口验收暂未通过：截图阶段 `UnknownVizError`，没有有效窗口统计；不能沿用 0.2.3 的窗口/真实聊天/恢复结果。详情见 `REVIEW-FIXES.md`。旧安装包及已有源码改动保留；未自动安装。
 
 ## 命令
 
 ```bash
 npm install --include=dev        # 这台机器上 NODE_ENV=production，必须显式带上 dev
 npm run build                    # 编译主进程 / preload / 后台 + 构建界面
-npm start                        # 直接运行（开发态）
+npm start                        # 先构建、复制随包 npm，再启动开发版；不是热更新
 npm run typecheck                # 类型检查
 
 npm test                         # 后台路由端到端（走真实 IPC）
@@ -168,6 +232,7 @@ npm run test:gate                # 测试统计门槛的反例检查
 npm run test:web                 # 选取的上游测试，不代表整个上游套件
 npm run test:window              # 窗口检查 + 运行时端口采样 + 采样进程退出检查
 npm run test:window:packaged     # 同一套检查，对安装包产物跑（见下）
+node scripts/verify-packaged-codemode.mjs  # 包内 Code Mode 专项；仓库外隔离、本地模拟模型
 npm run test:resilience          # 提交后刷新 / 后台崩溃两个场景（需要真实模型）
 npm run test:chat                # 真正在输入框发送、停止、继续对话（需要真实模型）
 
@@ -211,6 +276,19 @@ Re-run with --isolate to copy the build somewhere clean first.
 PI_DESKTOP_SCENARIO=skills "release/win-unpacked/Pi Desktop.exe"
 ```
 
+## 备份与恢复
+
+设置中的「备份与恢复」已实现首版。导出 `.pibak` 始终要求当次密码并加密；
+「不备份隐私信息」只保存三个白名单设置字段，不含聊天或模型配置。
+选择备份隐私信息会包含全局模型配置和全部已保存凭据，会话、自定义资源、项目资源另选。
+
+扫描、导出和恢复前要停止活动会话并关闭终端；操作期间后台会暂时停止并重启。
+恢复不覆盖已有文件；含隐私的配置、凭据、自定义资源和项目资源先放入
+`<agent目录>/backup-imports/<批次>/`，人工审阅后迁移，不会自动启用。
+**目前不包含内置 Agent 的编辑/删除记录、Agent 记忆或浏览器偏好，不能当成完整整机迁移。**
+使用步骤、大小限制和遗漏项见 [项目指南](docs/project-guide.md#备份与恢复的实际范围)；
+已实现与待实现的详细区分见 [备份文档](docs/backup-plan.md)。
+
 ## 升级
 
 ### 升级 pi 内核
@@ -233,6 +311,20 @@ npm run package        # 要更新安装包的话再打包一次
 - 包版本精确固定（`--save-exact`），升级命令会更新依赖和锁文件。
   随包 npm 仍来自构建机；复制时核对全部文件内容，并输出版本和摘要。
   这能发现残缺缓存，但不等于不同构建机必然产出相同 npm。
+
+当前 Desktop 的 Pi 1.1 适配使用 SessionManager 保存子代理克隆历史，按
+`started` / `queued` / `handled` 区分提交结果；用户上下文的精确系统提示词在每次请求投影中覆盖，
+保留 SDK 的消息变换与当前工具声明，不写入只读 Agent 状态。
+内置自动模式经公开 `ModelRegistry.streamSimple()` 归一化上下文；权限规则与配置不变。
+Pi 1.1 新增的系统提示词/工具声明消息是上下文记录，不插入聊天消息列表，也不重置流式界面；
+因此不会打断本次用户消息的乐观显示与服务端确认，避免一次发送显示两个消息框。
+后续相同文字的 steering/follow-up 消息仍正常显示，不按全文全局去重。
+
+消息显示回归：`node --test hooks/useAgentSession.messages.test.mjs hooks/useAgentSession.test.mjs lib/prompt-recovery.test.mjs`。
+新增测试执行实际 hook 消息事件分支，包含真实 Pi 内核的 system → user 事件，不调用模型。
+
+升级专项回归：`node --test lib/rpc-manager*.test.mjs lib/mention-clone.test.mjs tests/automode-classifier-sdk.test.mjs`。
+这些测试使用本地模拟 provider，不调用真实模型或读取用户凭据。
 
 ### 升级 pi-web 界面
 
@@ -393,9 +485,9 @@ pi-web 服务就这样被误报成“应用在监听 30141”）。
 - **系统通知**按浏览器 Notification API 走（Electron 窗口里可用），
   但 pi-web 的后台推送（Service Worker + Web Push）在桌面端不适用，需要时改成原生通知。
 - **原生目录选择器**没接到界面上：pi-web 用的是自带的网页目录浏览器（能用）；
-  原生对话框已在 preload 里备好（`pickDirectory`）。上游在 `SessionSidebar.tsx` 里声明了
-  `window.piDesktop.selectDirectory` 但从未调用，接上它要改那个文件——
-  这会破坏“与上游逐字节一致”，所以留着没动。
+  原生对话框已在 preload 里备好（`pickDirectory`）。`SessionSidebar.tsx` 中的
+  `window.piDesktop.selectDirectory` 未接线；此项暂缓不是因为禁止修改上游来源文件。
+  备份选择项目目录已使用原生对话框，不代表工作区选择器也已接通。
 
 ## 出网与代理
 
@@ -460,24 +552,21 @@ pi-web 服务就这样被误报成“应用在监听 30141”）。
 
 ## 上游同步
 
-`lib/`、`components/`、`hooks/`、`app/api/`、`app/*.css`、`public/` 都是从 pi-web 直接复制的。
-搬迁阶段要求它们与上游逐字节一致；**搬迁完成后这条要求就放开了**：现在可以直接改这些文件，
-改完跑 `node <维护skill>/scripts/check-upstream-parity.mjs` 看差异清单，确认差异都是有意为之。
-本次留下的差异（其余文件仍与上游一致）：
+`lib/`、`components/`、`hooks/`、`app/api/`、`app/*.css`、`public/` 来源于 pi-web，
+**搬迁阶段的逐字节一致要求已经结束**。普通本地修改不要求运行来源差异检查。
+当前已有自动模式、备份、模型收藏/渠道/Adaptive、子代理、会话和 SDK 适配等本地改动；
+不能再按早期“五个修改文件”清单覆盖，也不能认为新增文件在完整镜像时一定会保留。
 
-```
-lib         i18n/messages/{en,zh-CN,zh-TW}.ts   rpc-manager.ts   settings-navigation.ts   (+ automode-builtin.ts)
-components  SettingsPanel.tsx, SessionSidebar.tsx                            (+ automode-draft.ts, AutomodeConfig.tsx)
-app/api     (+ automode/route.ts, automode/test/route.ts)
-```
+同步只在专门的任务中进行：
 
-同步上游时仍然先备份，再镜像这些目录，包含删除上游已删除的文件；
-普通覆盖会留下旧路由，`scripts/gen-routes.mjs` 会继续收集它们。还需协调 `package.json` 与锁文件中的新增依赖，
-检查新的 Next API/路由约定，重建并跑回归；不能保证任意上游版本直接覆盖就能用。
-两类改动要分开处理：上面那 5 个被改过的文件在镜像时会冲突，需要把本地那段改动重做一遍
-（都集中在自动模式相关的位置），新增文件不受影响。
-（早期版本改过 `lib/terminal-manager.ts`，后来发现按上游原样即可：终端 shell 就用
-系统环境里的 `ComSpec`，正常 Windows 上一定有；现在这个文件与上游逐字节一致。）
+1. 先保存当前源码和未提交改动，并记录待同步的上游版本。上游参照目录只读。
+2. 对上述目录逐项生成差异清单，区分有意本地修改、本地新增文件与真正的上游删除。
+   如本机配置了维护 Skill，可按需运行其 `scripts/check-upstream-parity.mjs` 辅助比较；这不是仓库自带命令。
+3. 合并上游新增/修改/删除，并重新应用本地功能；不要无差别覆盖或删除本地专用实现。
+   只覆盖不处理上游删除也不行：旧路由会被 `scripts/gen-routes.mjs` 继续收集。
+4. 协调 `package.json` 与锁文件，检查新增 Next API 是否需要垫片；重建并跑定向回归与窗口检查。
+
+不能保证任意上游版本直接覆盖即可使用；历史上保持一致的结论不是当前差异清单。
 
 桌面端自己新增的东西都在这些目录里，不会被覆盖：
 
@@ -490,10 +579,12 @@ shared/      三个进程共用的类型契约
 tests/       后台端到端测试
 ```
 
-`scripts/run-web-tests.mjs --list` 可列出实际收集的149个文件。
-`app/api` 的12个测试文件尚未接入此命令；其中7个直接依赖未安装的Next运行环境。
-9个排除文件中有混合测试，包含桌面也使用的设置界面检查；
-不能把它们全部称为“只测web入口”。源码正则测试也不等于真实界面操作检查。
+`node scripts/run-web-tests.mjs --list` 可列出当前实际收集的文件；本次文档核查为155个，数量会随源码改变。
+它只收集 `lib/`、`components/`、`hooks/`，不收集 `app/api` 和 `tests/`。
+当前排除9个完整文件，并按名称过滤5条环境相关用例，具体名单和理由在该脚本的
+`SKIP` / `SKIP_TESTS` 中；即使命令成功，也不能说整个项目测试全过。
+排除文件中有混合测试，包含桌面也使用的设置界面检查；不能全部称为“只测web入口”。
+上文失败表是历史记录，不等于当前脚本还会运行这些用例。源码正则测试也不等于真实界面操作检查。
 
 ## 安全边界
 

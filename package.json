@@ -1,6 +1,6 @@
 {
   "name": "pi-desktop",
-  "version": "0.2.1",
+  "version": "0.2.5",
   "private": true,
   "description": "Windows desktop host for the pi coding agent (no local HTTP port)",
   "type": "module",
@@ -31,10 +31,10 @@
     "test:resilience:packaged": "node scripts/smoke-resilience.mjs all --binary \"release/win-unpacked/Pi Desktop.exe\" --isolate"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.85.1",
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-tui": "0.85.1",
+    "@earendil-works/pi-agent-core": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
     "@sinclair/typebox": "0.34.49",
     "croner": "10.0.1",
     "nanoid": "5.1.16",

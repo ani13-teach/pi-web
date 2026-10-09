@@ -13,7 +13,11 @@
  * exactly that much: they cover what the snapshot saw, not the whole lifetime of
  * the app and not processes started after the snapshot.
  *
- *   node scripts/smoke-window.mjs [--hold 15000] [--binary <exe>] [--isolate] [--project <dev directory>]
+ *   node scripts/smoke-window.mjs [--hold 15000] [--binary <exe>] [--isolate] [--project <dev directory>] [--electron-arg <flag>]
+ *
+ * --electron-arg is repeatable and forwards diagnostic flags to this test's
+ * Electron instance only (for example --trace-warnings or --disable-gpu).
+ * It does not remove any checks or change the packaged application.
  *
  * --binary points the same checks at a packaged build (release/win-unpacked/...),
  * which is the artifact users actually run. A packaged build must be checked
@@ -45,6 +49,15 @@ const packagedBinary = flag("binary", null);
 // existing .tmp-shot files in the source checkout.
 const devProject = resolve(flag("project", "."));
 const isolate = args.includes("--isolate");
+const electronArgs = [];
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] !== "--electron-arg") continue;
+  const value = args[++index];
+  if (!value || !value.startsWith("--") || value === "--electron-arg") {
+    throw new Error("--electron-arg requires an Electron flag such as --trace-warnings");
+  }
+  electronArgs.push(value);
+}
 
 /**
  * ELECTRON_RUN_AS_NODE makes an Electron binary start as plain Node. Pi Desktop
@@ -253,7 +266,7 @@ foreach ($s in $sampled) {
 // throwaway directory to check a build while the app is already open.
 const userData = process.env.PI_DESKTOP_SMOKE_USERDATA;
 if (userData) mkdirSync(userData, { recursive: true });
-const childArgs = packagedBinary ? [] : [devProject];
+const childArgs = packagedBinary ? [...electronArgs] : [...electronArgs, devProject];
 if (userData) childArgs.push(`--user-data-dir=${userData}`);
 
 const child = spawn(electronBinary, childArgs, {

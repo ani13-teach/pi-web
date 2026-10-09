@@ -4,8 +4,9 @@ import { dump as stringifyYaml } from "js-yaml";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { builtinAgentDirectory, builtinDeletionPath, loadBuiltinAgents } from "../builtin/pi-subagents/src/builtin-agents";
-import { parseAgentFrontmatter, readAgentConfigFile } from "../builtin/pi-subagents/src/custom-agents";
-import { BUILTIN_TOOL_NAMES, resolveEnabledTypeIn } from "../builtin/pi-subagents/src/agent-types";
+import { loadCustomAgents, parseAgentFrontmatter, readAgentConfigFile } from "../builtin/pi-subagents/src/custom-agents";
+import { BUILTIN_TOOL_NAMES, buildAgentRegistry, resolveEnabledTypeIn } from "../builtin/pi-subagents/src/agent-types";
+import { loadSettings } from "../builtin/pi-subagents/src/settings";
 import type { AgentConfig } from "../builtin/pi-subagents/src/types";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
@@ -42,6 +43,8 @@ export interface SubagentProfile {
   enabled: boolean;
   scope: SubagentScope;
   filePath?: string;
+  /** Whether this source wins runtime resolution (disabled winners still veto lower sources). */
+  effective?: boolean;
 }
 
 export interface SubagentMetadata {
@@ -151,7 +154,7 @@ const FRONTMATTER_OPEN_RE = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\n|\r)/;
 const OWNED_ALIAS_VALUES = new Set(["none", "all", "true", "false"]);
 
 /** UI projection only: parsing and defaults belong to the native runtime. */
-function profileFromConfig(config: AgentConfig, scope: SubagentScope): SubagentProfile {
+function profileFromConfig(config: AgentConfig, scope: SubagentScope, defaultRunInBackground = true): SubagentProfile {
   const denied = new Set(config.disallowedTools ?? []);
   return {
     name: config.name,
@@ -167,7 +170,7 @@ function profileFromConfig(config: AgentConfig, scope: SubagentScope): SubagentP
     thinking: config.thinking,
     maxTurns: config.maxTurns,
     inheritContext: config.inheritContext ?? false,
-    runInBackground: config.runInBackground ?? true,
+    runInBackground: config.runInBackground ?? defaultRunInBackground,
     promptMode: config.promptMode,
     color: config.color,
     isolation: config.isolation,
@@ -244,7 +247,7 @@ function isProjectProfilePathAllowed(cwd: string, target: string): boolean {
   return isExistingPathWithinRoots(target, new Set([cwd]));
 }
 
-function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): SubagentProfile[] {
+function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string, defaultRunInBackground = true): SubagentProfile[] {
   if (!existsSync(dir)) return [];
   if (scope !== "global" && scope !== "builtin" && !isProjectProfilePathAllowed(cwd, dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
@@ -253,7 +256,7 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
       const filePath = join(dir, entry.name);
       if (scope !== "global" && scope !== "builtin" && !isProjectProfilePathAllowed(cwd, filePath)) return [];
       const config = readAgentConfigFile(filePath, scope === "global" ? "global" : "project");
-      return config ? [profileFromConfig(config, scope)] : [];
+      return config ? [profileFromConfig(config, scope, defaultRunInBackground)] : [];
     });
 }
 
@@ -267,19 +270,31 @@ function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, 
 
 /** Every configured source, including profiles shadowed by a higher-precedence scope. */
 export function listSubagentProfileSources(cwd: string): SubagentProfile[] {
+  const settings = loadSettings(cwd);
+  const defaultBackground = settings.backgroundByDefault ?? true;
+  // Share the actual runtime merger, not a second UI-only last-source-wins rule.
+  const registry = buildAgentRegistry(loadCustomAgents(cwd), {
+    disableDefaults: settings.disableDefaultAgents === true,
+  });
   const profiles: SubagentProfile[] = [];
   for (const [dir, scope] of profileDirectories(cwd)) {
-    profiles.push(...readProfileDirectory(dir, scope, cwd));
+    profiles.push(...readProfileDirectory(dir, scope, cwd, defaultBackground));
   }
-  profiles.push(...[...loadBuiltinAgents().values()].map((config) => profileFromConfig(config, "builtin")));
-  // Preserve native load order, including same-scope clashes (later file wins).
-  return profiles;
+  // Keep suppressed factory presets available for editing, but mark them inactive.
+  profiles.push(...[...loadBuiltinAgents().values()].map((config) => profileFromConfig(config, "builtin", defaultBackground)));
+  return profiles.map((profile) => {
+    const winner = registry.get(profile.name);
+    return {
+      ...profile,
+      effective: !!winner && winner.sourcePath === profile.filePath
+        && (winner.source === "default") === (profile.scope === "builtin"),
+    };
+  });
 }
 
 export function listSubagentProfiles(cwd: string): SubagentProfile[] {
-  const byName = new Map<string, SubagentProfile>();
-  for (const profile of listSubagentProfileSources(cwd)) byName.set(profile.name, profile);
-  return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return listSubagentProfileSources(cwd).filter((profile) => profile.effective)
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
 export function resolveSubagentProfile(cwd: string, name: string): SubagentProfile | undefined {
@@ -356,7 +371,22 @@ export function saveSubagentProfile(
     throw new Error("Agent ID already exists in this scope");
   }
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
-  const extensionTools = [...new Set(profile.extensionTools ?? [])];
+  if (profile.extensionTools !== undefined && (!Array.isArray(profile.extensionTools) || profile.extensionTools.some((tool) => typeof tool !== "string"))) {
+    throw new Error("Extension tools must be an array of selectors");
+  }
+  const extensionTools = [...new Set((profile.extensionTools ?? []).map((tool) => tool.trim()).filter(Boolean))];
+  if (extensionTools.some((tool) => !/^ext:[^\s,/]+(?:\/[^\s,]+)?$/.test(tool))) {
+    throw new Error("Extension tool selectors require ext:<extension> or ext:<extension>/<tool>, with no empty names, spaces or commas");
+  }
+  if (profile.isolation !== undefined && profile.isolation !== "off" && profile.isolation !== "worktree") {
+    throw new Error("Isolation must be off or worktree");
+  }
+  if (profile.persistSession !== undefined && typeof profile.persistSession !== "boolean") {
+    throw new Error("Persist session must be a boolean");
+  }
+  if (profile.promptMode !== undefined && profile.promptMode !== "append" && profile.promptMode !== "replace") {
+    throw new Error("Prompt mode must be append or replace");
+  }
   if (profile.thinking && !THINKING_LEVELS.has(profile.thinking)) {
     throw new Error(`Invalid thinking level: ${profile.thinking}`);
   }
@@ -393,7 +423,7 @@ export function saveSubagentProfile(
     name,
     description,
     display_name: displayName,
-    tools: composeToolsField([...tools, ...extensionTools], stored.tools),
+    tools: composeToolsField([...tools, ...extensionTools], profile.extensionTools === undefined ? stored.tools : undefined),
     load_skills: loadSkills,
     load_extensions: loadExtensions,
     enabled: profile.enabled,
@@ -428,7 +458,7 @@ export function saveSubagentProfile(
   // Return what the runtime reads, including preserved extension/skill whitelists.
   const config = readAgentConfigFile(filePath, scope === "project" ? "project" : "global", true);
   if (!config) throw new Error("Saved agent profile could not be read");
-  return profileFromConfig(config, scope);
+  return profileFromConfig(config, scope, loadSettings(cwd).backgroundByDefault ?? true);
 }
 
 function markBuiltinDeleted(name: string): void {

@@ -1,3 +1,4 @@
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
@@ -20,7 +21,7 @@ import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { notifySessionComplete } from "./web-push";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
-import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
+import type { AgentSessionLike, ExtensionUiContextLike, PromptDisposition, ToolInfo } from "./pi-types";
 import type {
   ExtensionUiRequest,
   ExtensionUiResponse,
@@ -30,6 +31,7 @@ import type {
   SessionMessageEntry,
 } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS, type HeadlessCustomUiTui } from "./custom-ui-terminal";
+import { nativeSubagentToolNames, SUBAGENT_DISPLAY_META_TYPE } from "./subagent-display";
 import {
   createSubagentExtension,
   filteredSubagentLoaderOptions,
@@ -43,6 +45,7 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { resolveShellTools } from "./powershell-settings";
+import { applyCodemodeSelection, createDesktopCodemodeExtension } from "./codemode";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import {
   appendSessionToolSelection,
@@ -209,7 +212,10 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
     .map((t) => t.name)
     .filter((name) => !codingToolNames.has(name));
 
-  return [...new Set([...selectedToolNames, ...extensionToolNames])];
+  return applyCodemodeSelection(
+    [...selectedToolNames, ...extensionToolNames],
+    session.settingsManager.getDefaultTools(),
+  );
 }
 
 // ============================================================================
@@ -259,8 +265,7 @@ export class AgentSessionWrapper {
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.managedSubagent = options.managedSubagent ?? false;
-    this.installExactSystemPromptContinuation();
-    this.applyExactSystemPrompt();
+    this.installExactSystemPromptProjection();
   }
 
   get sessionId(): string {
@@ -277,6 +282,10 @@ export class AgentSessionWrapper {
 
   get streamingMessage() {
     return this.inner.agent.state?.streamingMessage;
+  }
+
+  get nativeSubagentToolNames(): readonly string[] {
+    return nativeSubagentToolNames(this.inner.getAllTools());
   }
 
   get isStreaming(): boolean {
@@ -306,6 +315,22 @@ export class AgentSessionWrapper {
         invalidateSessionListCache();
       }
       const toolCallId = event.toolCallId;
+      if (event.type === "tool_execution_start" && this.nativeSubagentToolNames.includes(event.toolName as string)) {
+        // Runs before SDK argument validation and permission hooks: even denied
+        // calls need stable historical provenance without editing model messages.
+        const manager = this.inner.sessionManager;
+        let entry = manager.getLeafEntry();
+        while (entry) {
+          if (entry.type === "message" && entry.message.role === "assistant"
+            && entry.message.content.some(block => block.type === "toolCall" && block.id === toolCallId)) {
+            manager.appendCustomEntry(SUBAGENT_DISPLAY_META_TYPE, {
+              version: 1, assistantEntryId: entry.id, toolCallId, toolName: event.toolName,
+            });
+            break;
+          }
+          entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined;
+        }
+      }
       if (typeof toolCallId === "string") {
         if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
           this.activeToolEvents.set(toolCallId, event);
@@ -342,10 +367,7 @@ export class AgentSessionWrapper {
   }
 
   private ensureExtensionsBound(): Promise<void> {
-    if (this.extensionsBound) {
-      this.applyExactSystemPrompt();
-      return Promise.resolve();
-    }
+    if (this.extensionsBound) return Promise.resolve();
     if (this.extensionBindingPromise) return this.extensionBindingPromise;
 
     this.extensionBindingError = null;
@@ -382,7 +404,6 @@ export class AgentSessionWrapper {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
       this.extensionsBound = true;
-      this.applyExactSystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       this.extensionBindingError = err;
@@ -421,32 +442,45 @@ export class AgentSessionWrapper {
     }
   }
 
-  private applyExactSystemPrompt(): void {
-    if (!this.exactSystemPrompt || !this.inner.agent.state) return;
-    this.inner.agent.state.systemPrompt = this.exactSystemPrompt();
-  }
-
-  private installExactSystemPromptContinuation(): void {
-    if (!this.exactSystemPrompt) return;
-    const previous = this.inner.agent.prepareNextTurnWithContext;
-    this.inner.agent.prepareNextTurnWithContext = async (turn, signal) => {
-      const prepared = await previous?.(turn, signal);
-      return {
-        ...prepared,
-        context: {
-          ...(prepared?.context ?? turn.context),
-          systemPrompt: this.exactSystemPrompt!(),
-        },
-      };
+  private installExactSystemPromptProjection(): void {
+    const exactSystemPrompt = this.exactSystemPrompt;
+    if (!exactSystemPrompt) return;
+    const previous = this.inner.agent.transformContext;
+    // The SDK runs context/context_with_system handlers and forced-prompt
+    // projection here for every request, including tool and queued continuations.
+    // Replace only the request's prompt, preserving the current tool declarations
+    // and the SDK's persisted structured transcript.
+    this.inner.agent.transformContext = async (messages, signal) => {
+      const transformed = previous ? await previous(messages, signal) : messages;
+      const current = getCurrentSystemMessage(transformed);
+      return [{
+        role: "system",
+        content: exactSystemPrompt(),
+        ...(current?.toolsAdded ? { toolsAdded: current.toolsAdded } : {}),
+        timestamp: current?.timestamp ?? Date.now(),
+      }, ...transformed.filter((message) => message.role !== "system")];
     };
   }
 
   setActiveToolSelection(toolNames: string[]): void {
     this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
-    this.applyExactSystemPrompt();
   }
 
   private emit(event: AgentEvent): void {
+    // Keep raw message identity for stream snapshot reconciliation; the wire
+    // projector attaches UI-only tool provenance after that check.
+    const delta = event.assistantMessageEvent as { type?: string } | undefined;
+    const message = event.message as { role?: string; content?: unknown[] } | undefined;
+    const needsMessageOrigin = event.type === "message_update"
+      ? delta?.type?.startsWith("toolcall_")
+      : (event.type === "message_start" || event.type === "message_end") && message?.role === "assistant"
+        && message.content?.some(block => (block as { type?: string })?.type === "toolCall");
+    if (needsMessageOrigin) {
+      const names = this.nativeSubagentToolNames;
+      if (names.length > 0) event = { ...event, nativeSubagentToolNames: names };
+    } else if (event.type.startsWith("tool_execution_") && this.nativeSubagentToolNames.includes(event.toolName as string)) {
+      event = { ...event, displayOrigin: "pi-subagents" };
+    }
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -522,7 +556,10 @@ export class AgentSessionWrapper {
       widgetKey: key, widgetLines: lines, widgetPlacement: placement,
     } as ExtensionUiRequest as AgentEvent);
     for (const event of this.pendingUiRequests.values()) listener(event);
-    for (const event of this.activeToolEvents.values()) listener(event);
+    const names = this.activeToolEvents.size > 0 ? this.nativeSubagentToolNames : [];
+    for (const event of this.activeToolEvents.values()) {
+      listener(names.includes(event.toolName as string) ? { ...event, displayOrigin: "pi-subagents" } : event);
+    }
     return () => {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
@@ -606,16 +643,25 @@ export class AgentSessionWrapper {
           const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
           let preflightAccepted = false;
+          let promptDisposition: PromptDisposition | undefined;
           let preflightSettled = false;
           let promptSettled = false;
-          let acceptPreflight!: () => void;
+          let acceptPreflight!: (disposition: PromptDisposition) => void;
           let rejectPreflight!: (error: unknown) => void;
           const preflight = new Promise<void>((resolve, reject) => {
-            acceptPreflight = () => {
-              preflightAccepted = true;
-              this.agentRunNeedsCompletion = true;
+            acceptPreflight = (disposition) => {
               if (preflightSettled) return;
+              preflightAccepted = true;
+              promptDisposition = disposition;
               preflightSettled = true;
+              if (disposition === "started") {
+                this.agentRunNeedsCompletion = true;
+              } else {
+                // Queued/handled inputs do not own a new run. In particular,
+                // handled inputs never emit agent_settled to clear pending work.
+                finishPrompt();
+                if (disposition === "handled" && !streamingBehavior) this.emit({ type: "prompt_done" });
+              }
               resolve();
             };
             rejectPreflight = (error) => {
@@ -641,12 +687,7 @@ export class AgentSessionWrapper {
               source: "rpc",
               // Match pi's RPC contract: acknowledge only after synchronous prompt
               // validation and extension preflight have accepted the submission.
-              preflightResult: (success) => {
-                if (success) {
-                  this.applyExactSystemPrompt();
-                  acceptPreflight();
-                }
-              },
+              preflightResult: acceptPreflight,
             });
           } catch (error) {
             finishPrompt();
@@ -656,9 +697,9 @@ export class AgentSessionWrapper {
           void prompt.then(() => {
             // Compatibility fallback if a future SDK resolves without invoking
             // the internal callback. This waits for the run, but never acks early.
-            acceptPreflight();
+            acceptPreflight("handled");
             finishPrompt();
-            if (!streamingBehavior) this.emit({ type: "prompt_done" });
+            if (promptDisposition === "started" && !streamingBehavior) this.emit({ type: "prompt_done" });
           }, (error) => {
             rejectPreflight(error);
             finishPrompt();
@@ -719,7 +760,7 @@ export class AgentSessionWrapper {
           contextUsage: contextUsage
             ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
             : null,
-          systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
+          systemPrompt: this.exactSystemPrompt?.() ?? this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
@@ -967,11 +1008,15 @@ export class AgentSessionWrapper {
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
         await this.inner.reload();
-        this.setActiveToolSelection(activeToolNames);
+        // An empty loadout is not necessarily Chat-only: a normal session can
+        // have had only codemode, then disabled it. Preserve actual Chat-only,
+        // but let newly enabled defaults recover a normal empty session.
+        this.setActiveToolSelection(activeToolNames.length === 0 && !this.chatOnly
+          ? this.inner.getActiveToolNames()
+          : activeToolNames);
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
-        this.applyExactSystemPrompt();
         invalidateModelsCache();
         return { success: true };
       }
@@ -1667,7 +1712,6 @@ export class AgentSessionWrapper {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
-        this.applyExactSystemPrompt();
       },
     };
   }
@@ -2082,6 +2126,7 @@ export async function startRpcSession(
           ? CHAT_ONLY_RESOURCE_LOADER_OPTIONS
         : {
             extensionFactories: [
+              createDesktopCodemodeExtension(),
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
                 settings: settingsManager,

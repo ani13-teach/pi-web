@@ -1,0 +1,15 @@
+{
+  "file": "release/Pi Desktop Setup 0.2.1.exe",
+  "version": "0.2.1",
+  "sizeBytes": 141488350,
+  "sha256": "086976ef607fcfd67802bc4a841f1d1a93c7182521ee3501587f932373fcab51",
+  "installerModifiedUtc": "2026-10-07T16:03:15.477Z",
+  "unpackedModifiedUtc": "2026-10-07T16:02:12.368Z",
+  "archiveModifiedUtc": "2026-10-07T16:02:11.732Z",
+  "checks": [
+    "package version",
+    "renderer version and builtin storage",
+    "native five presets and storage",
+    "latest.yml size and sha512"
+  ]
+}

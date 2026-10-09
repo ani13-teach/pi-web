@@ -102,9 +102,9 @@ export interface SubagentsSettings {
    */
   strictAgentFiles?: boolean;
   /**
-   * When true, all embedded default agents (including Desktop presets)
-   * are not registered at startup. User-defined agents from project/global custom
-   * agent dirs are completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
+   * When true, embedded factory presets are not registered at startup.
+   * Explicitly saved desktop-agents profiles and project/global custom agents
+   * are unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
    * Defaults to false.
    */
   disableDefaultAgents?: boolean;

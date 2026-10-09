@@ -8,6 +8,7 @@ import { acquireSessionLivenessLease } from "./session-liveness";
 export interface AgentEventStreamSession {
   readonly isStreaming: boolean;
   readonly streamingMessage: unknown;
+  readonly nativeSubagentToolNames?: readonly string[];
   onEvent(listener: (event: AgentEventLike) => void): () => void;
 }
 
@@ -100,7 +101,10 @@ export function createAgentEventStream(
           });
           for (const event of bufferedEvents) forwardEvent(event, snapshot);
           if (snapshot !== undefined && snapshot !== null) {
-            encode({ type: "message_start", message: snapshot });
+            encode(toClientAgentEvent({
+              type: "message_start", message: snapshot,
+              ...(session.nativeSubagentToolNames?.length ? { nativeSubagentToolNames: session.nativeSubagentToolNames } : {}),
+            }));
           }
           snapshotPublished = true;
         } catch (error) {

@@ -14,6 +14,7 @@ import {
   modelCostToDraft,
   parseCompleteModelCost,
   serializeHeaderRows,
+  setAdaptiveThinking,
   setCompatBool,
   updateHeaderRow,
   type HeaderRow,
@@ -993,6 +994,7 @@ function ModelDetail({
     const value = model.cost?.[key];
     return value === undefined ? t("models.notProvided") : `$${String(value)}`;
   };
+  const usesAnthropicMessages = (model.api ?? provider.api) === "anthropic-messages";
   const remainingCompatKeys = new Set(Object.keys(model.compat ?? {}));
   let compatibilityOverrideCount = 0;
   if (hasDeepseekCompat(model)) {
@@ -1133,9 +1135,21 @@ function ModelDetail({
         <SectionTitle>{t("models.capabilities")}</SectionTitle>
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginTop: 8 }}>
           <Check label={t("models.reasoning")} checked={model.reasoning ?? false} onChange={(v) => set("reasoning", v || undefined)} />
+          {usesAnthropicMessages && (
+            <Check
+              label={t("models.adaptiveThinking")}
+              checked={effectiveCompat(provider, model)["forceAdaptiveThinking"] === true}
+              onChange={(v) => onChange(setAdaptiveThinking(model, v))}
+            />
+          )}
           <Check label={t("models.imageInput")} checked={model.input?.includes("image") ?? false}
             onChange={(v) => set("input", v ? ["text", "image"] : undefined)} />
         </div>
+        {usesAnthropicMessages && (
+          <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.6 }}>
+            {t("models.adaptiveThinkingHelp")}
+          </div>
+        )}
       </div>
 
       <section>

@@ -14,7 +14,8 @@ const PRESET_DEFAULTS = {
   thinking: "high",
   promptMode: "append",
   inheritContext: false,
-  runInBackground: false,
+  // Inherit the caller default: top-level is background, nested is foreground.
+  // Pinning true here would accidentally detach nested children too.
   enabled: true,
   isDefault: true,
   source: "default",

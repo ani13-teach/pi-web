@@ -45,6 +45,8 @@ export interface ToolCallContent {
   input: Record<string, unknown>;
   /** Client-only buffer for streamed tool input. Never persisted to session files. */
   rawInput?: string;
+  /** UI-only provenance from the host tool registry; never sent back to the model. */
+  displayOrigin?: "pi-subagents";
 }
 
 export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent | ToolCallContent;

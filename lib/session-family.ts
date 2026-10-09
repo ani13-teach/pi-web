@@ -1,5 +1,10 @@
 import type { SessionInfo } from "./types";
 
+/** Ordinary sidebar/search candidates; preserve names, forks, order, and objects. */
+export function filterOrdinarySessions(sessions: readonly SessionInfo[]): SessionInfo[] {
+  return sessions.filter((session) => session.relation?.kind !== "subagent");
+}
+
 export interface SessionFamily {
   root: SessionInfo;
   subagents: SessionInfo[];

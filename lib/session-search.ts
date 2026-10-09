@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import type { SessionInfo } from "./types";
+import { filterOrdinarySessions } from "./session-family.ts";
 
 const MAX_FILES = 500;
 const MAX_RESULTS = 30;
@@ -37,7 +38,7 @@ export async function searchSessionContents(
   const deadline = Date.now() + TIME_BUDGET_MS;
   const timeout = AbortSignal.timeout(TIME_BUDGET_MS);
   const signal = requestSignal ? AbortSignal.any([requestSignal, timeout]) : timeout;
-  const candidates = sessions
+  const candidates = filterOrdinarySessions(sessions)
     .filter((session) => !session.transient && session.path)
     .sort((a, b) => b.modified.localeCompare(a.modified));
 
