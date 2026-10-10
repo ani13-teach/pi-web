@@ -87,6 +87,8 @@ if (process.argv.includes("--list")) {
 
 // An empty pattern would match every test, so the flag is only passed when it filters something.
 const skipArgs = SKIP_TESTS.length > 0 ? [`--test-skip-pattern=${skipPattern}`] : [];
+if (process.argv.includes("--serial")) skipArgs.push("--test-concurrency=1");
+if (process.argv.includes("--tap")) skipArgs.push("--test-reporter=tap");
 const child = spawn(
   process.execPath,
   [

@@ -1,10 +1,14 @@
 import { execFile } from "child_process";
-import { promisify } from "util";
+import { terminateProcessTree } from "../desktop/process-tree.ts";
 import { existsSync } from "fs";
 import { dirname, join } from "path";
 import { execPath } from "process";
 
-const execFileAsync = promisify(execFile);
+type NpxTask = { stop(reason: unknown): Promise<void> };
+const tasks = new Set<NpxTask>();
+const cleanupFailures: unknown[] = [];
+let stopping = false;
+let stopPromise: Promise<void> | undefined;
 
 /**
  * Locate the `npm-cli.js` / `npx-cli.js` shipped with the running runtime.
@@ -53,6 +57,7 @@ export function resolvePackageManagerCommand(
 }
 
 export interface RunNpxOptions {
+  signal?: AbortSignal;
   timeout?: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -68,10 +73,81 @@ export interface RunNpxResult {
  * shell, so user-controlled arguments are never interpreted as shell syntax.
  */
 export function runNpx(args: string[], opts: RunNpxOptions = {}): Promise<RunNpxResult> {
+  if (stopping) return Promise.reject(new Error("npx is shutting down"));
+  if (opts.signal?.aborted) return Promise.reject(opts.signal.reason);
   const { command, args: commandArgs } = resolvePackageManagerCommand("npx", args);
-  return execFileAsync(command, commandArgs, {
-    timeout: opts.timeout,
-    cwd: opts.cwd,
-    env: opts.env,
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cleanup: Promise<void> | undefined;
+    let cancelled = false;
+    let stdout = "", stderr = "";
+    const detach = () => {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", abort);
+    };
+    const createdAfter = Date.now();
+    const child = execFile(command, commandArgs, {
+      cwd: opts.cwd,
+      env: opts.env,
+    }, (error, out, err) => {
+      stdout = out;
+      stderr = err;
+      if (cancelled) return; // Cancellation settles only after tree cleanup.
+      detach();
+      tasks.delete(task);
+      if (error) reject(Object.assign(error, { stdout, stderr }));
+      else resolve({ stdout, stderr });
+    });
+    const createdBefore = Date.now();
+    const task: NpxTask = {
+      stop(reason) {
+        if (cleanup) return cleanup;
+        cancelled = true;
+        detach();
+        cleanup = Promise.resolve().then(async () => {
+          if (child.pid === undefined) return;
+          try {
+            // Capture only on cancellation, while the npm root still exists.
+            await terminateProcessTree(child.pid, 6_000, {
+              createdAfter, createdBefore,
+              isCurrent: () => child.exitCode === null && child.signalCode === null,
+            });
+          } catch (error) {
+            cleanupFailures.push(error);
+            try { child.kill("SIGKILL"); } catch { /* Preserve the tree cleanup failure. */ }
+            throw error;
+          }
+        });
+        // Attach both handlers immediately, including for fire-and-forget aborts.
+        void cleanup.then(() => {
+          tasks.delete(task);
+          reject(reason);
+        }, (error) => {
+          tasks.delete(task);
+          reject(Object.assign(new AggregateError([reason, error], "npx cancellation failed to clean its process tree"), { stdout, stderr }));
+        });
+        return cleanup;
+      },
+    };
+    const abort = () => { void task.stop(opts.signal?.reason); };
+    // Register synchronously: shutdown cannot miss a process awaiting completion.
+    tasks.add(task);
+    opts.signal?.addEventListener("abort", abort, { once: true });
+    if (opts.signal?.aborted) abort();
+    else if (opts.timeout && opts.timeout > 0) {
+      timer = setTimeout(() => {
+        void task.stop(Object.assign(new Error(`npx timed out after ${opts.timeout}ms`), { code: "ETIMEDOUT" }));
+      }, opts.timeout);
+    }
   });
+}
+
+/** Seal the launch gate immediately, then wait for every registered tree. */
+export function stopNpxProcesses(): Promise<void> {
+  stopping = true;
+  stopPromise ??= (async () => {
+    await Promise.allSettled([...tasks].map((task) => task.stop(new Error("npx is shutting down"))));
+    if (cleanupFailures.length) throw new AggregateError(cleanupFailures, "Failed to stop npx process trees");
+  })();
+  return stopPromise;
 }

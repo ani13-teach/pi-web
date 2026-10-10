@@ -121,14 +121,16 @@ async function backend(route, overrides = {}) {
         // checks independent of how the outbound dispatcher is chosen.
         if (args.path.includes("system-proxy")) return { contents: "export const configureOutboundNetworking = () => {}; export const handleProxyMessage = () => false;" };
         if (args.path.includes("session-reader")) return { contents: 'export const getAgentDir = () => "fixture";' };
-        if (args.path.includes("terminal-manager")) return { contents: "export const killTerminal = (id) => globalThis.killed.push(id);" };
+        if (args.path.includes("terminal-manager")) return { contents: "export const killTerminal = (id) => { globalThis.killed.push(id); globalThis.killTerminal?.(id); };" };
         if (args.path === "node:crypto") return { contents: "export const randomUUID = () => crypto.randomUUID();" };
-        return { contents: "export const runNpx = async () => ({ stdout: 'fixture' });" };
+        return { contents: "export const runNpx = async () => { if (globalThis.npxStopping) throw new Error('npx is shutting down'); return { stdout: 'fixture' }; }; export const stopNpxProcesses = () => { globalThis.npxStopping = true; return globalThis.stopNpx?.() ?? Promise.resolve(); };" };
       });
     } }] });
   const processMock = new EventEmitter();
-  processMock.send = () => {};
-  const context = { ...webGlobals, Buffer, process: processMock, route, killed: [], ...overrides };
+  const messages = [], exits = [];
+  processMock.send = message => messages.push(message);
+  processMock.exit = code => exits.push(code);
+  const context = { ...webGlobals, Buffer, process: processMock, route, killed: [], messages, exits, ...overrides };
   await vm.runInNewContext(`(async () => { ${result.outputFiles[0].text} })()`, context);
   return { ...context.fixture, context };
 }
@@ -245,4 +247,84 @@ test("shutdown waits for extension cleanup and closes live terminals once", asyn
   closing.resolve();
   await Promise.all([first, second]);
   assert.equal(finished, true);
+  assert.equal((await first).closed, true);
+});
+
+function ipc(fixture, method, params = {}, id = method) {
+  fixture.context.process.emit("message", { kind: "request", envelope: { id, method, params } });
+}
+
+for (const holdForExit of [false, true]) {
+  test(`shutdown IPC ${holdForExit ? "holds the backend root" : "keeps the legacy 50ms exit"}`, async () => {
+    const timers = [];
+    const fixture = await backend(async () => ({ kind: "buffered", ...buffered }), {
+      setTimeout(callback, ms) { timers.push({ callback, ms }); return { unref() {} }; },
+      clearTimeout() {},
+    });
+    ipc(fixture, "backend.shutdown", holdForExit ? { holdForExit: true } : {});
+    await tick();
+    const ack = fixture.context.messages.find(message => message.envelope?.id === "backend.shutdown");
+    assert.equal(ack.envelope.ok, true);
+    assert.equal(ack.envelope.result.closed, true);
+    assert.equal(fixture.context.npxStopping, true);
+    assert.equal(timers.length, holdForExit ? 0 : 1);
+    if (!holdForExit) {
+      assert.equal(timers[0].ms, 50);
+      timers[0].callback();
+      assert.deepEqual(fixture.context.exits, [0]);
+    }
+  });
+}
+
+test("shutdown isolates synchronous PTY/session failures and reports unsafe cleanup", async () => {
+  const errors = [], sessions = [];
+  const fixture = await backend(async () => streamResult(new ReadableStream()), {
+    killTerminal(id) { if (id === "broken") throw new Error("PTY cleanup failed"); },
+    console: { ...console, error: (...args) => errors.push(args) },
+  });
+  await fixture.handlers["http.request"]({ url: "/watch", method: "GET", streamId: "watch" });
+  fixture.context.__piWebTerminals = new Map([["broken", {}], ["healthy", {}]]);
+  fixture.context.__piSessions = new Map([
+    ["broken", { shutdown() { sessions.push("broken"); throw new Error("session cleanup failed"); } }],
+    ["healthy", { shutdown() { sessions.push("healthy"); return Promise.resolve(); } }],
+  ]);
+  const result = await fixture.handlers["backend.shutdown"]();
+  assert.equal(result.closed, false);
+  assert.deepEqual(fixture.context.killed, ["broken", "healthy"]);
+  assert.deepEqual(sessions, ["broken", "healthy"]);
+  assert.equal(fixture.requests.size, 0);
+  assert.equal(errors.length, 2);
+});
+
+test("shutdown seals new HTTP and npx requests before cleanup finishes", async () => {
+  const pending = deferred();
+  let calls = 0;
+  const fixture = await backend(async () => { calls++; return { kind: "buffered", ...buffered }; }, {
+    stopNpx: () => pending.promise,
+  });
+  ipc(fixture, "backend.shutdown", { holdForExit: true });
+  await tick();
+  assert.equal(fixture.context.npxStopping, true);
+  ipc(fixture, "http.request", { url: "/new", method: "GET" });
+  ipc(fixture, "npx.probe");
+  await tick();
+  for (const id of ["http.request", "npx.probe"]) {
+    const response = fixture.context.messages.find(message => message.envelope?.id === id);
+    assert.equal(response.envelope.ok, false);
+    assert.match(response.envelope.error, /shutting down/);
+  }
+  assert.equal(calls, 0);
+  pending.resolve();
+  await tick();
+  assert.equal(fixture.context.messages.find(message => message.envelope?.id === "backend.shutdown").envelope.result.closed, true);
+});
+
+test("npx tree cleanup failures make shutdown closed false", async () => {
+  const errors = [];
+  const fixture = await backend(async () => ({ kind: "buffered", ...buffered }), {
+    stopNpx: () => Promise.reject(new Error("tree enumeration failed")),
+    console: { ...console, error: (...args) => errors.push(args) },
+  });
+  assert.equal((await fixture.handlers["backend.shutdown"]()).closed, false);
+  assert.equal(errors.length, 1);
 });

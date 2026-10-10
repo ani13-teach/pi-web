@@ -10,6 +10,7 @@
  *   redirected to the desktop shim.
  */
 import { build } from "esbuild";
+import { buildSubagentFactory } from "./build-subagent-factory.mjs";
 import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,22 +94,10 @@ await build({
   },
 });
 
-// One self-contained module graph per root session: Desktop imports this ESM
-// bundle with a unique query, so all extension-local state stays root-local.
-// Only the SDK is external; third-party dependencies must be inlined too.
-await build({
-  ...common,
-  entryPoints: [join(root, "builtin", "pi-subagents", "src", "index.ts")],
+// The ESM URL is stable; each activation executes the bundled CJS graph in
+// its own collectible factory closure. Only read-only SDK namespaces are shared.
+await buildSubagentFactory({
   outfile: join(root, "dist", "main", "pi-subagents.mjs"),
-  format: "esm",
-  splitting: false,
-  external: ["@earendil-works/*"],
-  banner: {
-    js: [
-      'import { createRequire as __piDesktopCreateRequire } from "node:module";',
-      "globalThis.require = __piDesktopCreateRequire(import.meta.url);",
-    ].join("\n"),
-  },
 });
 
 const subagentsOutput = join(root, "dist", "main", "pi-subagents");

@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
+    req.signal.throwIfAborted();
     const body = await req.json() as {
       cwd?: unknown;
       package?: unknown;
@@ -39,11 +40,13 @@ export async function POST(req: Request) {
     }
 
     const { stdout, stderr } = await runNpx(buildSkillUpdateArgs(skill.install), {
+      signal: req.signal,
       timeout: 60_000,
       cwd: scope === "project" ? cwd : undefined,
       env: { ...process.env, FORCE_COLOR: "0" },
     });
 
+    req.signal.throwIfAborted();
     const refreshed = await loadSkillsWithInstallInfo(cwd);
     const updatedSkill = refreshed.skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
@@ -54,6 +57,7 @@ export async function POST(req: Request) {
       output: `${stdout}${stderr}`.slice(-500),
     });
   } catch (error: unknown) {
+    req.signal.throwIfAborted();
     const detail = error as { stdout?: string; stderr?: string; message?: string };
     const output = `${detail.stdout ?? ""}${detail.stderr ?? ""}`;
     return NextResponse.json(

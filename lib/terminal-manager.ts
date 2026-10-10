@@ -187,11 +187,14 @@ export function killTerminal(id: string, force = false): boolean {
   if (record.cleanupTimer) clearTimeout(record.cleanupTimer);
   registry().delete(id);
   if (!record.exited) {
-    record.pty.kill(force ? "SIGKILL" : undefined);
+    // node-pty on Windows rejects POSIX signals; its no-argument kill already
+    // terminates the ConPTY tree. SIGKILL here used to throw during app shutdown.
+    const hardSignal = process.platform === "win32" ? undefined : "SIGKILL";
+    record.pty.kill(force ? hardSignal : undefined);
     // A shell may trap SIGHUP; explicit close and lease expiry must still finish.
     if (!force) {
       record.cleanupTimer = setTimeout(() => {
-        if (!record.exited) record.pty.kill("SIGKILL");
+        if (!record.exited) record.pty.kill(hardSignal);
       }, 2000);
       record.cleanupTimer.unref?.();
     }

@@ -350,7 +350,7 @@ export async function shutdownChildSession(session: AgentSession | undefined): P
   // Desktop owns the child's bindings and disposal. Never emit/dispose again
   // after handing teardown to the host, even if its cleanup reports an error.
   if (host) {
-    try { await host.shutdownChild(session); } catch { /* best-effort teardown */ }
+    await host.shutdownChild(session);
     return;
   }
   try {
@@ -373,7 +373,10 @@ export async function shutdownChildSession(session: AgentSession | undefined): P
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
-  private cleanupInterval: ReturnType<typeof setInterval>;
+  private cleanupInterval?: ReturnType<typeof setInterval>;
+  private disposed = false;
+  private disposal?: Promise<void>;
+  private parentSignalReleases = new Set<() => void>();
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
@@ -435,7 +438,12 @@ export class AgentManager {
     this.onCompact = onCompact;
     this.onUsage = onUsage;
     this.maxConcurrent = maxConcurrent;
-    // Cleanup completed agents after 10 minutes (but keep sessions for resume)
+  }
+
+  /** Arm maintenance only after this activation survives extension filtering. */
+  startMaintenance(): void {
+    if (this.disposed || this.cleanupInterval) return;
+    // Cleanup completed agents after 10 minutes (but keep sessions for resume).
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
   }
@@ -504,6 +512,7 @@ export class AgentManager {
     prompt: string,
     options: SpawnOptions,
   ): string {
+    if (this.disposed) throw new Error("Subagent manager is disposed");
     // Validate before the queue branch — a queued spawn should fail at the
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.
@@ -571,14 +580,15 @@ export class AgentManager {
       record.status = "queued";
       // A queued record never reaches startAgent's signal wiring, so arm the
       // parent abort here or Esc could not release the position.
-      if (!this.armQueuedAbort(id, options.signal)) return id;
+      const detachQueuedAbort = this.armQueuedAbort(id, options.signal);
+      if (detachQueuedAbort === false) return id;
       let release!: () => void;
       record.startGate = new Promise<void>(resolve => { release = resolve; });
       this.queue.push({
         id,
         pool,
         start: () => this.launch(id, record, args, pool),
-        release: () => release(),
+        release: () => { detachQueuedAbort(); release(); },
       });
       options.onQueued?.(id, this.queue.filter(e => e.pool === pool).length - 1);
       return id;
@@ -588,23 +598,27 @@ export class AgentManager {
     return id;
   }
 
+  /** Own parent-signal subscriptions until abort, explicit release or dispose. */
+  private trackParentAbort(signal: AbortSignal, handler: () => void): () => void {
+    const release = () => {
+      signal.removeEventListener("abort", onAbort);
+      this.parentSignalReleases.delete(release);
+    };
+    const onAbort = () => { release(); handler(); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    this.parentSignalReleases.add(release);
+    return release;
+  }
+
   /**
-   * Wire a parent abort signal for a record that is about to be QUEUED.
-   * `startAgent` does this for running agents, and a queued record never gets
-   * there, so without this Esc could not release a queue position.
-   *
-   * Returns false when the signal is ALREADY aborted, in which case the record
-   * is stopped here and must not be enqueued: `addEventListener` never fires on
-   * an aborted signal, so a `spawnAndWait` on it would wait forever — pi has no
-   * tool-execution timeout to bail it out.
-   *
-   * The listener is left in place when the agent starts. `startAgent` adds its
-   * own, so both fire on a later abort, but `abort()` on an already-stopped
-   * record is a no-op — so detaching would only be tidiness, and tidiness the
-   * `abortAll`/`dispose` paths could not offer anyway.
+   * Wire parent abort while queued and across async startup (before the running
+   * subscription is installed). Returns its release function, or a no-op when
+   * no signal was supplied; the queue releases it when startup settles or the
+   * entry is removed. Returns false for an already-aborted signal, stopping the
+   * record without enqueueing it so spawnAndWait cannot hang on its start gate.
    */
-  private armQueuedAbort(id: string, signal?: AbortSignal): boolean {
-    if (signal === undefined) return true;
+  private armQueuedAbort(id: string, signal?: AbortSignal): false | (() => void) {
+    if (signal === undefined) return () => {};
     if (signal.aborted) {
       const record = this.agents.get(id);
       if (record) {
@@ -613,8 +627,7 @@ export class AgentManager {
       }
       return false;
     }
-    signal.addEventListener("abort", () => this.abort(id), { once: true });
-    return true;
+    return this.trackParentAbort(signal, () => this.abort(id));
   }
 
   /**
@@ -762,9 +775,7 @@ export class AgentManager {
       // never fire, leaving a child the parent can no longer reach.
       if (options.signal.aborted) this.abort(id);
       else {
-        const onParentAbort = () => this.abort(id);
-        options.signal.addEventListener("abort", onParentAbort, { once: true });
-        detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
+        detachParentSignal = this.trackParentAbort(options.signal, () => this.abort(id));
       }
     }
     const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
@@ -1132,6 +1143,7 @@ export class AgentManager {
     signal?: AbortSignal,
     options?: ResumeOptions,
   ): Promise<AgentRecord | undefined> {
+    if (this.disposed) return undefined;
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
 
@@ -1461,7 +1473,7 @@ export class AgentManager {
     // Fire-and-forget is right here and only here: this runs from the 60s cleanup timer
     // and from `clearCompleted()` on session boundaries, with the process staying alive,
     // so handlers get their full window. The quit path awaits instead — see dispose().
-    void shutdownChildSession(session);
+    void shutdownChildSession(session).catch(() => { /* eviction is best-effort; shutdown propagates errors */ });
   }
 
   /**
@@ -1576,22 +1588,35 @@ export class AgentManager {
    *   cannot be reached through a stored spawn argument at shutdown. Omitting
    *   it (tests, teardown of a manager that never spawned) skips the prune.
    */
-  async dispose(pi?: ExtensionAPI): Promise<void> {
-    if (host) {
-      // Aborted provider streams may settle after the root's extension runtime
-      // was invalidated. Never emit completion callbacks into that stale pi API.
-      this.onComplete = undefined;
-      this.onStart = undefined;
-      this.onCompact = undefined;
-      this.onUsage = undefined;
-    }
+  dispose(pi?: ExtensionAPI): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposed = true;
+    this.abortAll();
+    this.disposal = this.disposeResources(pi);
+    return this.disposal;
+  }
+
+  private async disposeResources(pi?: ExtensionAPI): Promise<void> {
+    // Provider streams may settle after invalidation, in either CLI or Desktop.
+    this.onComplete = undefined;
+    this.onStart = undefined;
+    this.onCompact = undefined;
+    this.onUsage = undefined;
     clearInterval(this.cleanupInterval);
+    this.cleanupInterval = undefined;
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
     const sessions = [...this.agents.values()].map(record => record.session);
+    for (const release of this.parentSignalReleases) release();
+    this.parentSignalReleases.clear();
+    for (const record of this.agents.values()) {
+      try { record.outputCleanup?.(); } catch { /* best-effort transcript detach */ }
+      record.outputCleanup = undefined;
+    }
     this.agents.clear();
     this.startups.clear();
+    this.tombstones.clear();
     if (pi && (!host || this.worktreeRepos.size > 0)) {
       // Desktop roots with no worktrees must not launch an unrelated detached
       // git process during teardown (it can hold their cwd open on Windows).
@@ -1608,6 +1633,9 @@ export class AgentManager {
     // Awaited, unlike the eviction path: pi awaits this extension's `session_shutdown`
     // handler and the process exits right after it returns, so anything left unawaited
     // here never runs at all. Bounded — each call carries its own ceiling, concurrently.
-    await Promise.all(sessions.map(session => shutdownChildSession(session)));
+    this.worktreeRepos.clear();
+    const results = await Promise.allSettled(sessions.map(session => shutdownChildSession(session)));
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Subagent child shutdown failed");
   }
 }

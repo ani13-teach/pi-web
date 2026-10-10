@@ -19,6 +19,7 @@ export async function POST(req: Request) {
   }
 
   try {
+    req.signal.throwIfAborted();
     const { package: pkg, scope, cwd } = await req.json() as { package?: string; scope?: string; cwd?: string };
     if (!pkg?.trim()) return NextResponse.json({ error: "package required" }, { status: 400 });
 
@@ -41,11 +42,13 @@ export async function POST(req: Request) {
 
     console.log(`[skills/install] running: npx ${args.join(" ")}`);
     const { stdout, stderr } = await runNpx(args, {
+      signal: req.signal,
       timeout: 60000,
       cwd: !isGlobal && cwd ? cwd : undefined,
       env: { ...process.env, FORCE_COLOR: "0" },
     });
 
+    req.signal.throwIfAborted();
     const output = (stdout + stderr).replace(ANSI_RE, "");
     const success = /Installation complete|Installed \d+ skill/.test(output);
     if (!success) {
@@ -53,6 +56,7 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ success: true, output });
   } catch (e: unknown) {
+    req.signal.throwIfAborted();
     const err = e as { stdout?: string; stderr?: string; message?: string };
     const output = ((err.stdout ?? "") + (err.stderr ?? "")).replace(ANSI_RE, "");
     return NextResponse.json({ error: output || (err.message ?? String(e)) }, { status: 500 });

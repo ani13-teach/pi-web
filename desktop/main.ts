@@ -16,12 +16,16 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { readFile, lstat, readdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, protocol, screen, session, shell, Tray, type IpcMainInvokeEvent } from "electron";
-import { createBackup, inspectBackup, restoreBackup, scanBackup } from "../lib/backup/index";
+import { recoverTransactions } from "../lib/backup/index";
+import { BackupController } from "./backup-controller";
+import { BACKUP_PREFERENCE_KEYS, validateBackupUiState } from "../shared/backup-preferences";
 import { openLocalFile } from "./local-file-open";
+import { ProcessTreeScope } from "./process-tree";
+import { createQuitHandler } from "./quit-lifecycle";
 
 import {
   APP_ORIGIN,
@@ -233,11 +237,18 @@ class BackendHost {
   private restarts = 0;
   private restarting: Promise<void> | null = null;
   private plannedStop: ChildProcess | null = null;
+  private stopping: Promise<void> | null = null;
+  private childScope: ProcessTreeScope | null = null;
+  private closed = false;
+  private stopContext: { deadline: number; requireGraceful: boolean; interrupt: AbortController } | null = null;
 
   constructor(private readonly onPush: (push: BackendPush) => void) {}
 
   start(): void {
+    if (this.closed) throw new Error("backend cannot start while app is quitting");
     if (this.child) return;
+    if (this.stopping) throw new Error("backend is shutting down");
+    const createdAfter = Date.now();
     const child = fork(backendEntry, [], {
       // Electron's own binary, running as plain Node: no second runtime to
       // ship and no mismatch between the window's runtime and the backend's.
@@ -257,6 +268,11 @@ class BackendHost {
       serialization: "json",
     });
     this.child = child;
+    const createdBefore = Date.now();
+    this.childScope = process.platform === "win32" && child.pid ? new ProcessTreeScope(child.pid, undefined, process.platform, {
+      createdAfter, createdBefore,
+      isCurrent: () => child.exitCode === null && child.signalCode === null,
+    }) : null;
 
     child.stdout?.on("data", (chunk: Buffer) => {
       console.log(`[backend] ${chunk.toString().trimEnd()}`);
@@ -344,6 +360,9 @@ class BackendHost {
   request<M extends BackendMethod>(method: M, params: ParamsOf<M>, timeoutMs = 120_000): Promise<ResultOf<M>> {
     const child = this.child;
     if (!child) return Promise.reject(new Error("backend is not running"));
+    if (this.stopping && method !== "backend.shutdown" && method !== "http.cancel") {
+      return Promise.reject(new Error("backend is shutting down"));
+    }
     return new Promise<ResultOf<M>>((resolveCall, rejectCall) => {
       const envelope: BackendRequestEnvelope = { id: randomUUID(), method, params: params as unknown };
       const timer = setTimeout(() => {
@@ -364,39 +383,94 @@ class BackendHost {
     });
   }
 
-  /** Ask the backend to release sessions and PTYs, then wait for it to exit. */
-  async shutdown(timeoutMs = 5_000, requireGraceful = false): Promise<void> {
-    const child = this.child;
-    if (!child) return;
-    // One deadline for the whole thing: waiting on the request first used to
-    // leave this with the default 120s request timeout before the exit wait
-    // even started, so quitting could hang far longer than asked.
-    const deadline = Date.now() + timeoutMs;
-    if (requireGraceful) this.plannedStop = child;
-    const exited = new Promise<void>((resolveCall) => child.once("exit", () => resolveCall()));
-    try {
-      await this.request("backend.shutdown", {}, Math.max(1_000, timeoutMs - 500));
-    } catch {
-      // the backend may already be gone; the exit wait below still applies
+  /** Permanently seal starts and interrupt a longer backup/restart grace wait. */
+  beginQuit(): void {
+    this.closed = true;
+    if (this.stopContext) {
+      this.stopContext.deadline = Math.min(this.stopContext.deadline, Date.now() + 15_000);
+      this.stopContext.interrupt.abort(new Error("App exit interrupted backend graceful cleanup"));
     }
-    const timedOut = await Promise.race([
-      exited.then(() => false),
-      delay(Math.max(0, deadline - Date.now())).then(() => true),
-    ]);
-    if (timedOut) {
-      // Last resort: Windows gets no graceful signal, so terminate the process.
-      try {
-        child.kill();
-      } catch {
-        /* ignore */
+  }
+
+  /** Release resources before terminating the still-owned backend tree. */
+  shutdown(timeoutMs = 15_000, requireGraceful = false): Promise<void> {
+    if (this.stopping) {
+      if (requireGraceful && !this.stopContext?.requireGraceful) {
+        return this.stopping.then(() => { throw new Error("Could not safely join a non-graceful stop for backup"); });
       }
-      // Wait for the exit before returning: restart() must not start a second
-      // backend while this one is still holding the session files.
-      await Promise.race([exited, delay(1_000)]);
+      return this.stopping;
     }
-    if (this.child === child) this.child = null;
-    if (!requireGraceful) this.restarts += 1;
-    if (timedOut && requireGraceful) throw new Error("Could not safely stop active sessions for backup");
+    const child = this.child;
+    if (!child) return Promise.resolve();
+    this.plannedStop = child;
+    const context = { deadline: Date.now() + timeoutMs, requireGraceful, interrupt: new AbortController() };
+    this.stopContext = context;
+    this.stopping = this.stopChild(child, context).finally(() => {
+      this.stopping = null;
+      this.stopContext = null;
+    });
+    return this.stopping;
+  }
+
+  private async stopChild(child: ChildProcess, context: { deadline: number; requireGraceful: boolean; interrupt: AbortController }): Promise<void> {
+    const { requireGraceful } = context;
+    const remaining = () => Math.max(1, context.deadline - Date.now());
+    const ended = () => child.exitCode !== null || child.signalCode !== null;
+    let resolveExit!: () => void;
+    const exited = new Promise<void>((resolveCall) => { resolveExit = resolveCall; });
+    child.once("exit", resolveExit);
+    if (ended()) resolveExit();
+    const scope = this.child === child ? this.childScope : null;
+    let safe = false;
+    let cleanupError: unknown;
+    try {
+      if (scope) {
+        try { await scope.capture(Math.min(3_000, remaining())); }
+        catch (error) { console.error("[shutdown] process snapshot failed; retrying during cleanup:", error); }
+      }
+      try {
+        const graceMs = Math.max(1, Math.min(requireGraceful ? remaining() - 6_000 : 5_000, remaining()));
+        let interrupt!: () => void;
+        const interrupted = new Promise<never>((_resolve, reject) => {
+          interrupt = () => reject(context.interrupt.signal.reason);
+          context.interrupt.signal.addEventListener("abort", interrupt, { once: true });
+          if (context.interrupt.signal.aborted) interrupt();
+        });
+        try {
+          const result = await Promise.race([
+            this.request("backend.shutdown", { holdForExit: Boolean(scope) }, graceMs), interrupted,
+          ]);
+          safe = result.closed === true;
+        } finally {
+          context.interrupt.signal.removeEventListener("abort", interrupt);
+        }
+        if (!safe) console.error("[shutdown] backend reported incomplete resource cleanup");
+      } catch (error) {
+        console.error("[shutdown] backend cleanup did not finish:", error);
+      }
+      if (scope) {
+        // The backend has not self-exited, so taskkill can still follow its
+        // children. The scope also reaps previously observed orphan identities.
+        try { await scope.terminate(Math.max(1, Math.min(8_000, remaining() - 1_000))); }
+        catch (error) { cleanupError = error; console.error("[shutdown] process tree cleanup failed:", error); }
+      } else if (!ended()) {
+        await Promise.race([exited, delay(remaining())]);
+      }
+      if (!ended()) {
+        // Handle-based kill is safe even when process enumeration failed; it is
+        // only a root fallback, not a claim that the whole tree was recovered.
+        child.kill("SIGKILL");
+      }
+      await Promise.race([exited, delay(Math.min(1_000, remaining()))]);
+      if (!ended()) throw new Error("Backend is still running; restart and backup are unsafe");
+      if (cleanupError) throw cleanupError;
+      if (requireGraceful && (!safe || context.interrupt.signal.aborted)) throw new Error("Could not safely stop active sessions for backup");
+      if (!requireGraceful) this.restarts += 1;
+    } finally {
+      child.removeListener("exit", resolveExit);
+      // Only the actual exit listener clears this.child. Never start another
+      // backend over session files still held by a timed-out old process.
+    }
   }
 
   /** Simulates a crash, so recovery paths can be tested for real. */
@@ -425,6 +499,7 @@ class BackendHost {
 
   private async doRestart(): Promise<void> {
     if (this.child) await this.shutdown();
+    if (this.closed) throw new Error("backend cannot restart while app is quitting");
     if (this.restarts > 5) throw new Error("backend restarted too many times");
     this.start();
   }
@@ -898,8 +973,23 @@ async function runSmokeChecks(window: BrowserWindow): Promise<void> {
       } catch (error) {
         outcomes.push({ name, ok: false, detail: String(error) });
       }
-      const image = await window.webContents.capturePage();
-      writeFileSync(join(shotDirectory, `ui-${width}.png`), image.toPNG());
+      try {
+        // The Windows compositor can temporarily lose the resized surface.
+        // Keep capture awake and retry only that transient Viz error; do not
+        // weaken layout assertions or hide a persistent screenshot failure.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            const image = await window.webContents.capturePage(undefined, { stayAwake: true });
+            writeFileSync(join(shotDirectory, `ui-${width}.png`), image.toPNG());
+            break;
+          } catch (error) {
+            if (attempt >= 2 || !(error instanceof Error) || error.message !== "UnknownVizError") throw error;
+            await new Promise((resolve) => setTimeout(resolve, 400));
+          }
+        }
+      } catch (error) {
+        outcomes.push({ name: `screenshot captured at ${width}x${height}`, ok: false, detail: String(error) });
+      }
     }
 
     for (const outcome of outcomes) {
@@ -1070,6 +1160,8 @@ async function startRun(cwd: string, message: string): Promise<string> {
  * into the asar archive, which is no place to write sessions.
  */
 function scenarioWorkspace(): string {
+  const isolated = process.env.PI_DESKTOP_SMOKE_WORKSPACE;
+  if (process.env.PI_DESKTOP_SMOKE && isolated && isAbsolute(isolated)) return isolated;
   return app.isPackaged ? app.getPath("home") : appRoot;
 }
 
@@ -1434,11 +1526,11 @@ async function runScenario(window: BrowserWindow, scenario: string): Promise<voi
   app.exit(failed === 0 ? 0 : 1);
 }
 
-// Archive paths never cross the renderer bridge. Only a native dialog may select them.
+// Archive and destination paths never cross the renderer bridge.
 let backupBusy = false;
-const backupInspections = new Map<string, { file: string; size: number; modified: number; expires: number }>();
-const backupScans = new Map<string, { agentDir: string; projectDir?: string; includePrivate: boolean;
-  includeSessions: boolean; includeCustomizations: boolean; preview: Awaited<ReturnType<typeof scanBackup>>; expires: number }>();
+let backupRecoveryBlocked = false;
+let backupBooted = false;
+let backupBootPromise: Promise<void> | undefined;
 
 function assertBackupCaller(event: IpcMainInvokeEvent): void {
   if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame ||
@@ -1447,120 +1539,93 @@ function assertBackupCaller(event: IpcMainInvokeEvent): void {
   }
 }
 
-function backupPassword(value: unknown): string {
-  if (typeof value !== "string" || value.length < 8 || value.length > 1024) {
-    throw new Error("Backup password must contain at least 8 characters");
-  }
-  return value;
-}
-
-async function withStoppedBackend<T>(work: (agentDir: string) => Promise<T>): Promise<T> {
-  if (backupBusy || !backend.running) throw new Error("Backup unavailable while backend is busy");
+async function withStoppedBackend<T>(work: (agentDir: string, snapshot: ResultOf<"backup.resources">) => Promise<T>): Promise<T> {
+  if (backupBusy || backupRecoveryBlocked || !backend.running) throw new Error("Backup unavailable while backend is busy");
   backupBusy = true;
   try {
     const state = await backend.request("backup.status", {}, 10_000);
     if (state.busy) throw new Error("Stop active agent sessions and terminals before backup");
     const { agentDir } = await backend.request("app.info", {}, 10_000);
-    // Release open session files and block new requests until the archive is complete.
+    const snapshot = await backend.request("backup.resources", {}, 10_000);
     await backend.shutdown(30_000, true);
-    return await work(agentDir);
+    return await work(agentDir, snapshot);
   } finally {
-    if (!backend.running && !quitting) backend.start();
+    if (!backend.running && !quitting && !backupRecoveryBlocked) backend.start();
     backupBusy = false;
   }
 }
 
-ipcMain.handle(DESKTOP_CHANNEL.backupScan, async (event, options: unknown) => {
-  assertBackupCaller(event);
-  const input = options as { includePrivate?: unknown; includeSessions?: unknown;
-    includeCustomizations?: unknown; includeProject?: unknown } | null;
-  if (typeof input?.includePrivate !== "boolean" || typeof input.includeSessions !== "boolean" ||
-    typeof input.includeCustomizations !== "boolean" || typeof input.includeProject !== "boolean")
-    throw new Error("Invalid backup options");
-  const includePrivate = input.includePrivate;
-  if (!includePrivate && (input.includeSessions || input.includeCustomizations || input.includeProject))
-    throw new Error("Private categories require explicit consent");
-  let projectDir: string | undefined;
-  if (includePrivate && input.includeProject) {
-    const project = await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory"] });
-    if (project.canceled || !project.filePaths[0]) return { cancelled: true };
-    projectDir = project.filePaths[0];
-  }
-  const sections = { includePrivate, includeSessions: input.includeSessions,
-    includeCustomizations: input.includeCustomizations };
-  const { agentDir, preview } = await withStoppedBackend(async (dir) => ({ agentDir: dir,
-    preview: await scanBackup({ agentDir: dir, ...sections, projectDir }),
-  }));
-  for (const [id, scan] of backupScans) if (scan.expires < Date.now()) backupScans.delete(id);
-  if (backupScans.size >= 32) backupScans.delete(backupScans.keys().next().value!);
-  const token = randomUUID();
-  backupScans.set(token, { agentDir, projectDir, ...sections, preview, expires: Date.now() + 10 * 60_000 });
-  return { token, preview };
+const preferenceParticipant = {
+  read: async (): Promise<Record<string, string>> => {
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Preference participant unavailable");
+    return validateBackupUiState(await mainWindow.webContents.executeJavaScript(`(() => {
+      const state = {}; for (const key of ${JSON.stringify(BACKUP_PREFERENCE_KEYS)}) { const value = localStorage.getItem(key); if (value !== null) state[key] = value; } return state;
+    })()`));
+  },
+  write: async (state: Record<string, string>): Promise<void> => {
+    validateBackupUiState(state);
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Preference participant unavailable");
+    await mainWindow.webContents.executeJavaScript(`(() => {
+      const state = ${JSON.stringify(state)}; const keys = ${JSON.stringify(BACKUP_PREFERENCE_KEYS)};
+      window.__piBackupWriting = true;
+      try { for (const key of keys) { if (Object.hasOwn(state, key)) localStorage.setItem(key, state[key]); else localStorage.removeItem(key); }
+        for (const key of keys) if (localStorage.getItem(key) !== (Object.hasOwn(state, key) ? state[key] : null)) throw new Error('Preference persistence verification failed');
+      } finally { window.__piBackupWriting = false; }
+    })()`);
+  },
+};
+const backupController = new BackupController({
+  homeDir: homedir(), appVersion: app.getVersion(), applicationDir: appRoot,
+  info: () => backend.request("app.info", {}, 10_000), stopped: withStoppedBackend, ui: preferenceParticipant,
+  pickProjects: async () => { const s = await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory", "multiSelections"] }); return s.canceled ? null : s.filePaths; },
+  pickMapping: async () => { const s = await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory"] }); return s.canceled ? null : s.filePaths[0] ?? null; },
+  pickArchive: async () => { const s = await dialog.showOpenDialog(mainWindow!, { properties: ["openFile"], filters: [{ name: "Encrypted Pi Desktop backup", extensions: ["pibak"] }] }); return s.canceled ? null : s.filePaths[0] ?? null; },
+  saveArchive: async () => { const s = await dialog.showSaveDialog(mainWindow!, { defaultPath: `pi-desktop-${new Date().toISOString().slice(0,10)}.pibak`, filters: [{ name: "Encrypted Pi Desktop backup", extensions: ["pibak"] }] }); return s.canceled ? null : s.filePath ?? null; },
+  progress: (owner, progress) => { if (mainWindow?.webContents.id === owner && !mainWindow.isDestroyed()) mainWindow.webContents.send(DESKTOP_CHANNEL.backupProgress, progress); },
+  recoveryRequired: () => { backupRecoveryBlocked = true; },
+  freezeUi: async (frozen) => {
+    if (!mainWindow || mainWindow.isDestroyed()) { if (frozen) throw new Error("Preference participant unavailable"); return; }
+    await mainWindow.webContents.executeJavaScript(`(() => {
+      if (!window.__piBackupStorageGuard) {
+        const set = Storage.prototype.setItem, remove = Storage.prototype.removeItem, clear = Storage.prototype.clear;
+        Storage.prototype.setItem = function(...args) { if (window.__piBackupFrozen && !window.__piBackupWriting) throw new Error('Preferences frozen during restore'); return set.apply(this, args); };
+        Storage.prototype.removeItem = function(...args) { if (window.__piBackupFrozen && !window.__piBackupWriting) throw new Error('Preferences frozen during restore'); return remove.apply(this, args); };
+        Storage.prototype.clear = function(...args) { if (window.__piBackupFrozen && !window.__piBackupWriting) throw new Error('Preferences frozen during restore'); return clear.apply(this, args); };
+        window.__piBackupStorageGuard = true;
+      }
+      window.__piBackupFrozen = ${frozen};
+    })()`);
+  },
 });
-
-ipcMain.handle(DESKTOP_CHANNEL.backupExport, async (event, options: unknown) => {
+const backupOwners = new Set<number>();
+function backupOwner(event: IpcMainInvokeEvent): number {
   assertBackupCaller(event);
-  const input = options as { password?: unknown; token?: unknown } | null;
-  const password = backupPassword(input?.password);
-  if (typeof input?.token !== "string") throw new Error("Scan before exporting");
-  const scanned = backupScans.get(input.token);
-  if (!scanned || scanned.expires < Date.now()) throw new Error("Scan again before exporting");
-  const selected = await dialog.showSaveDialog(mainWindow!, {
-    defaultPath: "pi-desktop-backup.pibak", filters: [{ name: "Encrypted Pi Desktop backup", extensions: ["pibak"] }],
-  });
-  if (selected.canceled || !selected.filePath) return { cancelled: true };
-  const result = await withStoppedBackend(async (agentDir) => {
-    if (agentDir !== scanned.agentDir) throw new Error("Agent directory changed; scan again");
-    const current = await scanBackup({ agentDir, includePrivate: scanned.includePrivate,
-      includeSessions: scanned.includeSessions, includeCustomizations: scanned.includeCustomizations,
-      projectDir: scanned.projectDir });
-    if (current.entries !== scanned.preview.entries || current.bytes !== scanned.preview.bytes ||
-      JSON.stringify(current.kinds) !== JSON.stringify(scanned.preview.kinds))
-      throw new Error("Backup sources changed; scan again");
-    return createBackup({ agentDir, outputPath: selected.filePath!, password,
-      includePrivate: scanned.includePrivate, includeSessions: scanned.includeSessions,
-      includeCustomizations: scanned.includeCustomizations, projectDir: scanned.projectDir });
-  });
-  backupScans.delete(input.token);
+  if (!backupOwners.has(event.sender.id)) {
+    const id = event.sender.id; backupOwners.add(id);
+    event.sender.on("did-start-navigation", (_e, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) backupController.release(id); });
+    event.sender.on("render-process-gone", () => backupController.release(id));
+    event.sender.once("destroyed", () => { backupController.release(id); backupOwners.delete(id); });
+  }
+  return event.sender.id;
+}
+ipcMain.handle(DESKTOP_CHANNEL.backupSelectProjects, event => backupController.selectProjects(backupOwner(event)));
+ipcMain.handle(DESKTOP_CHANNEL.backupScan, (event, input) => backupController.scan(backupOwner(event), input));
+ipcMain.handle(DESKTOP_CHANNEL.backupExport, (event, input) => backupController.export(backupOwner(event), input));
+ipcMain.handle(DESKTOP_CHANNEL.backupInspect, (event, input) => backupController.inspect(backupOwner(event), input));
+ipcMain.handle(DESKTOP_CHANNEL.backupSelectMappingTarget, (event, input) => backupController.map(backupOwner(event), input));
+ipcMain.handle(DESKTOP_CHANNEL.backupCancel, (event, input) => backupController.cancel(backupOwner(event), input));
+ipcMain.handle(DESKTOP_CHANNEL.backupRestore, async (event, input) => {
+  const owner = backupOwner(event); const result = await backupController.restore(owner, input);
+  if (result.committed) setTimeout(() => { if (mainWindow?.webContents.id === owner && !mainWindow.isDestroyed() && !backupRecoveryBlocked) mainWindow.reload(); }, 2500).unref();
   return result;
 });
-
-ipcMain.handle(DESKTOP_CHANNEL.backupInspect, async (event, supplied: unknown) => {
+ipcMain.handle(DESKTOP_CHANNEL.backupBoot, event => {
   assertBackupCaller(event);
-  const password = backupPassword(supplied);
-  const selection = await dialog.showOpenDialog(mainWindow!, {
-    properties: ["openFile"], filters: [{ name: "Encrypted Pi Desktop backup", extensions: ["pibak"] }],
-  });
-  if (selection.canceled || !selection.filePaths[0]) return { cancelled: true };
-  const file = selection.filePaths[0];
-  const before = await lstat(file);
-  if (!before.isFile() || before.isSymbolicLink()) throw new Error("Not a regular backup file");
-  const preview = await inspectBackup({ archivePath: file, password });
-  const after = await lstat(file);
-  if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error("Backup file changed during preview");
-  const token = randomUUID();
-  backupInspections.set(token, { file, size: after.size, modified: after.mtimeMs, expires: Date.now() + 10 * 60_000 });
-  return { token, preview };
-});
-
-ipcMain.handle(DESKTOP_CHANNEL.backupRestore, async (event, options: unknown) => {
-  assertBackupCaller(event);
-  const input = options as { token?: unknown; password?: unknown; overwrite?: unknown } | null;
-  const password = backupPassword(input?.password);
-  if (typeof input?.token !== "string" || typeof input?.overwrite !== "boolean") throw new Error("Invalid restore request");
-  const selection = backupInspections.get(input.token);
-  backupInspections.delete(input.token);
-  if (!selection || selection.expires < Date.now()) throw new Error("Reopen the backup to restore it");
-  const current = await lstat(selection.file);
-  if (!current.isFile() || current.isSymbolicLink() || current.size !== selection.size || current.mtimeMs !== selection.modified) {
-    throw new Error("Backup changed after preview; inspect it again");
-  }
-  // Authenticate again before asking for the destination; the password may have changed.
-  await inspectBackup({ archivePath: selection.file, password });
-  if (input.overwrite) throw new Error("Overwrite is not yet supported; existing files are preserved");
-  return withStoppedBackend((agentDir) => restoreBackup({
-    agentDir, archivePath: selection.file, password,
-  }));
+  return backupBootPromise ??= (async () => {
+    const recovery = await recoverTransactions({ agentDir: startupAgentDir(), ui: preferenceParticipant });
+    if (recovery.blocked) { backupRecoveryBlocked = true; throw new Error("Backup recovery required. Original files and journal retained; backend remains stopped."); }
+    await cleanInterruptedRestore(); backupBooted = true; if (!backend.running && !quitting) backend.start();
+  })();
 });
 
 ipcMain.handle(DESKTOP_CHANNEL.openLocalFile, async (event, options: unknown) => {
@@ -1604,7 +1669,7 @@ ipcMain.handle(DESKTOP_CHANNEL.invoke, async (event, method: BackendMethod, para
       windowRequests.delete(senderId);
     });
   }
-  if (backupBusy && method !== "http.cancel") throw new Error("Backup in progress; wait for it to finish");
+  if ((backupBusy || backupRecoveryBlocked || !backupBooted) && method !== "http.cancel") throw new Error("Backup or recovery in progress; wait for it to finish");
   const streamId = (params as { streamId?: string } | null)?.streamId;
   if (method === "http.request" && streamId) owned.add(streamId);
   try {
@@ -1631,7 +1696,7 @@ ipcMain.handle(DESKTOP_CHANNEL.pickDirectory, async (_event, defaultPath?: strin
 });
 
 ipcMain.handle(DESKTOP_CHANNEL.restartBackend, async () => {
-  if (backupBusy) throw new Error("Backup in progress; wait for it to finish");
+  if (backupBusy || backupRecoveryBlocked || !backupBooted) throw new Error("Backup or recovery in progress; wait before restarting");
   await backend.restart();
 });
 
@@ -1639,15 +1704,17 @@ ipcMain.handle(DESKTOP_CHANNEL.restartBackend, async () => {
 // lifecycle
 // ---------------------------------------------------------------------------
 
-// A crash can leave decrypted staging files behind. No existing files are moved
-// during restore, so these app-owned temporary directories can be removed safely
-// before the backend or any restored resource is loaded on the next launch.
-async function cleanInterruptedRestore(): Promise<void> {
+function startupAgentDir(): string {
   const configured = process.env.PI_CODING_AGENT_DIR;
-  const agentDir = configured
+  return configured
     ? resolve(app.getPath("home"), configured === "~" ? homedir() : configured.startsWith("~/") || configured.startsWith("~\\")
       ? join(homedir(), configured.slice(2)) : configured)
     : join(homedir(), ".pi", "agent");
+}
+// Only old decrypt-only staging directories can be removed. New transaction
+// originals are handled by recoverTransactions before any resources initialize.
+async function cleanInterruptedRestore(): Promise<void> {
+  const agentDir = startupAgentDir();
   let entries;
   try { entries = await readdir(agentDir, { withFileTypes: true }); }
   catch (error) {
@@ -1655,7 +1722,7 @@ async function cleanInterruptedRestore(): Promise<void> {
     throw error;
   }
   for (const entry of entries) {
-    if (!/^\.backup-restore-[a-zA-Z0-9]{6}$/.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) continue;
+    if (!/^(?:\.backup-restore-[a-zA-Z0-9]{6}|\.backup-restore-full-[a-f0-9-]{36})$/.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) continue;
     const dir = join(agentDir, entry.name);
     const state = await lstat(dir);
     if (state.isDirectory() && !state.isSymbolicLink()) await rm(dir, { recursive: true, force: true });
@@ -1671,16 +1738,16 @@ if (!singleInstance) {
   });
 
   void app.whenReady().then(async () => {
-    await cleanInterruptedRestore();
     protocol.handle(APP_SCHEME, (request) => serveRequest(request));
-    backend.start();
+    // Renderer backupBoot recovers transactions before preferences initialize
+    // and only then starts the backend; no half-restored resources are loaded.
     installTray();
     createWindow();
 
     if (process.env.PI_DESKTOP_SMOKE === "1" && mainWindow) {
       const window = mainWindow;
       window.webContents.once("did-finish-load", () => {
-        void runSmokeChecks(window);
+        void (async () => { await backupBootPromise; if (!backupBooted) return; await runSmokeChecks(window); })();
       });
     }
 
@@ -1688,7 +1755,7 @@ if (!singleInstance) {
     if (scenario && mainWindow) {
       const window = mainWindow;
       window.webContents.once("did-finish-load", () => {
-        void runScenario(window, scenario);
+        void (async () => { await backupBootPromise; if (!backupBooted) return; await runScenario(window, scenario); })();
       });
     }
 
@@ -1704,18 +1771,21 @@ if (!singleInstance) {
 
   // Explicit exit from the tray shuts the backend down; closing the main
   // window only hides it while the tray is available.
-  app.on("before-quit", (event) => {
-    event.preventDefault();
-    if (quitting) return;
-    quitting = true;
-    tray?.destroy();
-    tray = null;
-    // Stop the renderer's timers and subscriptions before shutting down the
-    // service they use. Re-entrant quit events remain prevented until exit().
-    for (const window of BrowserWindow.getAllWindows()) window.destroy();
-    // Honour a failure recorded by smoke/scenario checks: process.exitCode is set
-    // before app.quit(), and a hard app.exit(0) here used to swallow it.
-    const code = typeof process.exitCode === "number" ? process.exitCode : 0;
-    void backend.shutdown().finally(() => app.exit(code));
-  });
+  let quitCode = 0;
+  app.on("before-quit", createQuitHandler({
+    begin: () => {
+      quitting = true;
+      backend.beginQuit();
+      // Preserve failures recorded by smoke/scenario checks.
+      quitCode = typeof process.exitCode === "number" ? process.exitCode : 0;
+    },
+    teardown: () => [
+      () => { const icon = tray; tray = null; icon?.destroy(); },
+      ...BrowserWindow.getAllWindows().map((window) => () => window.destroy()),
+    ],
+    shutdown: () => backend.shutdown(),
+    exit: () => app.exit(quitCode),
+    report: (error) => console.error("[quit] cleanup failed:", error),
+    timeoutMs: 20_000,
+  }));
 }

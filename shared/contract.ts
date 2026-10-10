@@ -8,6 +8,8 @@
  * pi-web route handler, and streaming responses are pulled chunk by chunk.
  */
 
+import type { BackupBridge } from "./backup";
+
 export interface BackendMethods {
   "app.info": {
     params: Record<string, never>;
@@ -67,11 +69,16 @@ export interface BackendMethods {
   };
 
   "backend.shutdown": {
-    params: Record<string, never>;
+    params: { holdForExit?: boolean };
     result: { closed: boolean };
   };
 
   /** Backup must not run while a session or terminal can write files. */
+  "backup.resources": {
+    params: Record<string, never>;
+    result: { resources: { path: string; kind: "skills" | "extensions" | "prompts" | "themes" | "agents" | "instructions"; baseDir?: string; cwd?: string; source?: string }[]; sessionDirs: string[]; warnings: string[] };
+  };
+
   "backup.status": {
     params: Record<string, never>;
     result: { busy: boolean };
@@ -133,7 +140,7 @@ export type BackendInMessage =
   | ProxyResultMessage;
 
 /** Shape exposed to the renderer through the preload bridge. */
-export interface DesktopBridge {
+export interface DesktopBridge extends BackupBridge {
   app: {
     version: string;
     platform: string;
@@ -142,11 +149,8 @@ export interface DesktopBridge {
   pickDirectory: (defaultPath?: string) => Promise<string | null>;
   /** Reveals an authorized file in the system file manager, or opens an authorized directory. */
   openLocalFile: (options: { filePath: string; sourceSessionId?: string | null }) => Promise<void>;
-  /** The main process owns native file dialogs and never accepts a renderer-provided archive path. */
-  backupScan: (options: { includePrivate: boolean; includeSessions: boolean; includeCustomizations: boolean; includeProject: boolean }) => Promise<{ cancelled?: boolean; token?: string; preview?: { entries: number; bytes: number; kinds: Record<string, number>; warnings: string[] } }>;
-  backupExport: (options: { password: string; token: string }) => Promise<{ cancelled?: boolean; entries?: number; bytes?: number; warnings?: string[] }>;
-  backupInspect: (password: string) => Promise<{ cancelled?: boolean; token?: string; preview?: { includePrivate: boolean; entries: { path: string; size: number; kind: string }[]; warnings: string[] } }>;
-  backupRestore: (options: { token: string; password: string; overwrite: boolean }) => Promise<{ restored: number; skipped: number; warnings: string[] }>;
+  /** Startup recovery must complete before renderer preferences and resources load. */
+  backupBoot: () => Promise<void>;
   invoke: <M extends BackendMethod>(method: M, params: ParamsOf<M>) => Promise<ResultOf<M>>;
   /** Start the backend again after it stopped or crashed. */
   restartBackend: () => Promise<void>;
@@ -159,6 +163,11 @@ export const DESKTOP_CHANNEL = {
   push: "pi-desktop:push",
   pickDirectory: "pi-desktop:pick-directory",
   openLocalFile: "pi-desktop:open-local-file",
+  backupBoot: "pi-desktop:backup-boot",
+  backupSelectProjects: "pi-desktop:backup-select-projects",
+  backupSelectMappingTarget: "pi-desktop:backup-select-mapping",
+  backupCancel: "pi-desktop:backup-cancel",
+  backupProgress: "pi-desktop:backup-progress",
   backupScan: "pi-desktop:backup-scan",
   backupExport: "pi-desktop:backup-export",
   backupInspect: "pi-desktop:backup-inspect",

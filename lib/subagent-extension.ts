@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -131,9 +130,7 @@ function bundleUrl(): URL {
   const candidates = [join(dir, "pi-subagents.mjs"), resolve(dir, "../dist/main/pi-subagents.mjs")];
   const file = candidates.find(existsSync);
   if (!file) throw new Error("Built-in pi-subagents bundle missing. Run npm run build:desktop.");
-  const url = pathToFileURL(file);
-  url.searchParams.set("activation", randomUUID());
-  return url;
+  return pathToFileURL(file);
 }
 
 export function createSubagentExtension(cwd: string, dependencies: SubagentHostDependencies): InlineExtension {
@@ -142,12 +139,25 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
     hidden: true,
     async factory(pi) {
       if (!isBuiltInSubagentsEnabled()) return;
-      // No code splitting: every relative module (and its mutable globals) is
-      // inside this file, so the unique URL isolates the ENTIRE extension graph.
-      const native = await import(/* @vite-ignore */ bundleUrl().href);
+      // Stable namespace, collectible per-activation module graph.
+      const namespace = await import(/* @vite-ignore */ bundleUrl().href);
+      const native = namespace.createSubagentModule();
       const activation: Activation = { closed: false, children: new Map() };
       activations.add(activation);
       let releaseLiveness: (() => void) | undefined;
+      const releases: (() => void)[] = [];
+      let shutdownPromise: Promise<void> | undefined;
+      const cleanup = () => {
+        releases.splice(0).forEach(release => release());
+        releaseLiveness?.();
+        releaseLiveness = undefined;
+        activations.delete(activation);
+        for (const child of activation.children.values()) child.unsubscribe?.();
+        activation.children.clear();
+        activation.manager = undefined;
+        activation.parentId = undefined;
+        native.configureDesktopHost(undefined);
+      };
       const childShutdowns = new WeakMap<AgentSession, Promise<void>>();
       const persistTerminal = () => {
         for (const [id, child] of activation.children) {
@@ -166,7 +176,10 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
       const host: DesktopHost = {
         cwd,
         get maxConcurrent() { return resolveSubagentRuntimeMaxConcurrent(cwd); },
-        onManager(manager) { activation.manager = manager; },
+        onManager(manager) {
+          if (activation.closed) { void manager.dispose().catch(() => {}); return; }
+          activation.manager = manager;
+        },
         async resourceLoaderOptions(configCwd, options) {
           const base = await filteredSubagentLoaderOptions(options, options.settingsManager!);
           const policy = options.extensionsOverride;
@@ -207,10 +220,15 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
               const meta = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
               if (meta?.type === "custom") session.sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, { ...meta.data as object, resourceSnapshot: { version: 1, appendSystemPrompt: [], tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt } });
             }
-            if (event.type === "agent_settled") setImmediate(persistTerminal);
+            if (event.type === "agent_settled") setImmediate(() => { if (!activation.closed) persistTerminal(); });
           });
           if (info.agentId) activation.children.get(info.agentId)!.unsubscribe = unsubscribe;
-          await dependencies.bindChild(session, info);
+          try { await dependencies.bindChild(session, info); }
+          catch (error) {
+            try { await host.shutdownChild(session); }
+            catch (shutdownError) { throw new AggregateError([error, shutdownError], "Child binding and shutdown failed"); }
+            throw error;
+          }
           if (activation.closed) {
             await host.shutdownChild(session);
             throw new Error("Parent subagent activation closed while child was binding");
@@ -234,39 +252,54 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
           return shutdown;
         },
       };
-      native.configureDesktopHost(host);
-      // Own even the children whose session_start has not returned yet. This
-      // runs BEFORE native dispose clears records, and writes final stop state.
-      pi.on("session_shutdown", async () => {
+      const shutdown = () => {
+        if (shutdownPromise) return shutdownPromise;
         activation.closed = true;
-        activation.manager?.abortAll();
-        persistTerminal();
-      });
-      // Native handlers initialize and dispose the manager. Host handlers only
-      // bridge UI/history; they do not implement agent execution a second time.
-      native.default(pi);
-      const releases = [pi.events.on("subagents:completed", persistTerminal), pi.events.on("subagents:failed", persistTerminal)];
-      pi.on("session_start", (_event, ctx) => {
-        activation.parentId = ctx.sessionManager.getSessionId();
-        releaseLiveness = registerSessionLivenessProvider({ name: "pi-subagents", sessionId: activation.parentId, isActive: () => activation.manager?.hasRunning() ?? false });
-      });
-      pi.on("session_shutdown", async () => {
-        await Promise.all([...activation.children.values()].map(({ session }) => host.shutdownChild(session)));
-        releases.forEach((release) => release());
-        releaseLiveness?.();
-        activations.delete(activation);
-        activation.children.clear();
-        native.configureDesktopHost(undefined);
-      });
-      // Keep upstream result fields unchanged; add only a Desktop session link.
-      pi.on("tool_result", (event) => {
-        if (!SUBAGENT_DISPLAY_TOOLS.has(event.toolName) || !nativeSubagentToolNames(pi.getAllTools()).includes(event.toolName)) return;
-        const details = event.details as { agentId?: string } | undefined;
-        const record = details?.agentId ? activation.manager?.getRecord(details.agentId) : undefined;
-        if (!record?.session) return { details: { ...event.details as object, kind: "pi-subagents" } };
-        persistTerminal();
-        return { details: { ...event.details as object, kind: "pi-subagents", sessionId: record.session.sessionId, profile: record.type } };
-      });
+        shutdownPromise = (async () => {
+          const failures: unknown[] = [];
+          try {
+            activation.manager?.abortAll();
+            persistTerminal();
+          } catch (error) { failures.push(error); }
+          try { await native.shutdownSubagentModule(); }
+          catch (error) { failures.push(error); }
+          try { await activation.manager?.dispose(); }
+          catch (error) { failures.push(error); }
+          try {
+            const results = await Promise.allSettled([...activation.children.values()].map(({ session }) => host.shutdownChild(session)));
+            for (const result of results) if (result.status === "rejected") failures.push(result.reason);
+          } finally { cleanup(); }
+          if (failures.length) throw new AggregateError(failures, "Subagent activation shutdown failed");
+        })();
+        return shutdownPromise;
+      };
+      // Own teardown BEFORE native handlers. A failing native shutdown cannot
+      // prevent the host's subscriptions, liveness and activation release.
+      try {
+        pi.on("session_shutdown", shutdown);
+        native.configureDesktopHost(host);
+        native.default(pi);
+        releases.push(pi.events.on("subagents:completed", () => { if (!activation.closed) persistTerminal(); }), pi.events.on("subagents:failed", () => { if (!activation.closed) persistTerminal(); }));
+        pi.on("session_start", (_event, ctx) => {
+          if (activation.closed) return;
+          activation.parentId = ctx.sessionManager.getSessionId();
+          releaseLiveness?.();
+          releaseLiveness = registerSessionLivenessProvider({ name: "pi-subagents", sessionId: activation.parentId, isActive: () => !activation.closed && native.hasActiveWork() });
+        });
+        // Keep upstream result fields unchanged; add only a Desktop session link.
+        pi.on("tool_result", (event) => {
+          if (!SUBAGENT_DISPLAY_TOOLS.has(event.toolName) || !nativeSubagentToolNames(pi.getAllTools()).includes(event.toolName)) return;
+          const details = event.details as { agentId?: string } | undefined;
+          const record = details?.agentId ? activation.manager?.getRecord(details.agentId) : undefined;
+          if (!record?.session) return { details: { ...event.details as object, kind: "pi-subagents" } };
+          persistTerminal();
+          return { details: { ...event.details as object, kind: "pi-subagents", sessionId: record.session.sessionId, profile: record.type } };
+        });
+      } catch (error) {
+        try { await shutdown(); }
+        catch (shutdownError) { throw new AggregateError([error, shutdownError], "Subagent activation and shutdown failed"); }
+        throw error;
+      }
     },
   };
 }

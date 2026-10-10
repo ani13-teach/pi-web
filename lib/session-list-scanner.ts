@@ -5,7 +5,7 @@
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
@@ -342,6 +342,13 @@ export async function listSessionsIncremental(): Promise<ScannedSessionInfo[]> {
 				return { filePath, fp: null as Fingerprint | null };
 			}
 		}),
+	);
+
+	// SDK 1.1 discovers candidates by filesystem mtime, then filename descending.
+	// Its later metadata-date sort is stable, so preserve this order for ties.
+	fingerprints.sort((a, b) =>
+		(b.fp?.mtimeMs ?? Number.NEGATIVE_INFINITY) - (a.fp?.mtimeMs ?? Number.NEGATIVE_INFINITY)
+		|| basename(b.filePath).localeCompare(basename(a.filePath)),
 	);
 
 	const changed: Array<{ filePath: string; fp: Fingerprint; resultIndex: number }> = [];

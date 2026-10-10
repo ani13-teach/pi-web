@@ -45,8 +45,11 @@
    */
   const checkModelPickers = async (page) => {
     if (page.querySelector("datalist")) throw new Error("the model fields still offer a <datalist> hint list");
-    const fields = [...page.querySelectorAll(".model-selector.is-field")];
-    if (fields.length < 1) throw new Error("the form has no model picker");
+    const fields = await waitFor(() => {
+      const loaded = [...page.querySelectorAll(".model-selector.is-field")];
+      return loaded.length > 0 ? loaded : null;
+    });
+    if (!fields) throw new Error("the form has no model picker");
     // While the two model sources are still being read the picker is disabled, so
     // wait for it instead of clicking into a button that ignores the click.
     const picker = await waitFor(() => {
@@ -105,7 +108,7 @@
   };
 
   await record("renderer loads from the pi-app scheme", () => location.protocol === "pi-app:" && location.host === "app");
-  await record("React mounted a UI", () => document.querySelector("#root")?.childElementCount > 0);
+  await record("React mounted a UI after startup recovery", () => waitFor(() => document.querySelector("#root")?.childElementCount > 0));
   await record("preload bridge is exposed", () => typeof window.piDesktop?.invoke === "function");
   await record("renderer cannot reach Node", () => typeof require === "undefined" && typeof process === "undefined");
   await record("the window is locked down by a CSP", () => {
@@ -171,7 +174,9 @@
           reject(new Error("stream errored"));
         };
       });
-      if (event.type !== "connected") throw new Error(`unexpected first event: ${event.type}`);
+      // Stored history can be intentionally dormant: the read-only probe must
+      // not activate a runtime merely to manufacture a connected event.
+      if (event.type !== "connected" && !(event.type === "dormant" && event.sessionId === session.id)) throw new Error(`unexpected first event: ${event.type}`);
       return `first event type=${event.type}`;
     } finally {
       source.close();
@@ -641,7 +646,7 @@
         await sleep(200);
         if (idInput.value !== changedId) throw new Error("the edited ID was not retained in the draft");
         button.click();
-        if (!await waitFor(() => idInput.value === id)) throw new Error("reselecting did not discard the draft ID");
+        if (!await waitFor(() => dialog.querySelector('.config-detail input[aria-label="子代理 ID"], .config-detail input[aria-label="Sub-agent ID"]')?.value === id)) throw new Error("reselecting did not discard the draft ID");
       }
       if (expectedNames.some((name) => !seen.has(name))) throw new Error("a built-in preset was not checked");
       const create = [...dialog.querySelectorAll(".config-list-action-button")]
@@ -695,7 +700,7 @@
     }
   });
 
-  await record("the backup page requires a password and defaults to no private data", async () => {
+  await record("the complete backup page confirms export passwords and selects files before import passwords", async () => {
     const openButton = [...document.querySelectorAll("button[aria-label]")]
       .find((button) => ["设置", "Settings", "設定"].includes(button.getAttribute("aria-label")));
     if (!openButton) throw new Error("no settings button");
@@ -703,30 +708,28 @@
     const dialog = await waitFor(() => document.querySelector(".settings-dialog-surface"));
     if (!dialog) throw new Error("settings dialog did not open");
     const tab = [...dialog.querySelectorAll("button")]
-      .find((button) => ["备份", "Backup", "備份"].includes(button.textContent.trim()));
+      .find((button) => ["完整备份", "Complete backup", "完整備份"].includes(button.textContent.trim()));
     if (!tab) throw new Error("no backup tab");
     tab.click();
     const page = await waitFor(() => {
       const heading = [...dialog.querySelectorAll("h2")]
-        .find((element) => ["备份", "Backup", "備份"].includes(element.textContent.trim()));
+        .find((element) => ["完整备份", "Complete backup", "完整備份"].includes(element.textContent.trim()));
       return heading?.parentElement ?? null;
     });
     if (!page) throw new Error("backup page did not load");
-    const privacy = page.querySelector('[role="switch"]');
-    if (privacy?.getAttribute("aria-checked") !== "false") throw new Error("private backup must default to no");
-    if (page.querySelectorAll('input[type="password"]').length !== 3)
-      throw new Error("export confirmation and import password inputs are missing");
-    const actions = [...page.querySelectorAll("button")].filter((button) =>
-      ["选择保存位置并导出", "Choose save location and export", "選擇儲存位置並匯出", "选择备份文件并预览", "Choose backup file and preview", "選擇備份檔案並預覽"].includes(button.textContent.trim()));
-    if (actions.length !== 2 || actions.some((button) => !button.disabled))
-      throw new Error("backup actions must require passwords");
-    privacy.click();
-    if (!await waitFor(() => page.querySelectorAll('[role="switch"]').length === 4))
-      throw new Error("private backup options are missing");
+    if (page.querySelector('[role="switch"]')) throw new Error("obsolete privacy/category modes are still visible");
+    if (page.querySelectorAll('input[type="password"]').length !== 2)
+      throw new Error("export needs two passwords; import password must wait for file selection");
+    const exportButton = [...page.querySelectorAll("button")].find((button) =>
+      ["选择保存位置并加密导出", "Choose location and export encrypted archive", "選擇儲存位置並加密匯出"].includes(button.textContent.trim()));
+    const importButton = [...page.querySelectorAll("button")].find((button) =>
+      ["选择备份文件", "Select backup file", "選擇備份檔案"].includes(button.textContent.trim()));
+    if (!exportButton?.disabled || !importButton || importButton.disabled)
+      throw new Error("export must require confirmed passwords and a scan; native file selection must not require a password");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     if (!await waitFor(() => !document.querySelector(".settings-dialog-surface")))
       throw new Error("settings dialog stayed open");
-    return "private backup defaults off; both actions require passwords; optional private categories appear only after consent";
+    return "one complete mode; export confirmation present; import starts with native file selection; no data/configuration writes";
   });
 
   return results;

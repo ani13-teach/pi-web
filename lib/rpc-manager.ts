@@ -293,7 +293,7 @@ export class AgentSessionWrapper {
   }
 
   isAlive(): boolean {
-    return this._alive;
+    return this._alive && !this.shutdownPromise;
   }
 
   isRunning(): boolean {
@@ -363,7 +363,25 @@ export class AgentSessionWrapper {
   }
 
   async waitUntilReady(): Promise<void> {
-    await this.waitForExtensionsBound();
+    try {
+      await this.waitForExtensionsBound();
+      if (!this.isAlive()) throw new Error("Session is closing");
+    } catch (error) {
+      try { await this.shutdown(); } catch { /* preserve readiness error */ }
+      throw error;
+    }
+  }
+
+  async ensureReadyAndTouch(): Promise<void> {
+    await this.waitUntilReady();
+    this.resetIdleTimer();
+  }
+
+  isBackgroundActive(): boolean {
+    return hasActiveSessionLivenessProvider({
+      sessionId: this.sessionId,
+      sessionFile: this.sessionFile || undefined,
+    });
   }
 
   private ensureExtensionsBound(): Promise<void> {
@@ -403,10 +421,11 @@ export class AgentSessionWrapper {
       } else {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
+      if (!this._alive) throw new Error("Session is closing");
       this.extensionsBound = true;
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
-      this.extensionBindingError = err;
+      if (this._alive) this.extensionBindingError = err;
       throw err;
     });
 
@@ -510,10 +529,10 @@ export class AgentSessionWrapper {
     if (SESSION_IDLE_TIMEOUT_MS === 0) return;
     if (!this.isRunning()) this.forceShutdownOnIdle = false;
     this.idleTimer = setTimeout(() => {
-      if (!this.forceShutdownOnIdle && (this.isRunning() || hasActiveSessionLivenessProvider({
-        sessionId: this.sessionId,
-        sessionFile: this.sessionFile || undefined,
-      }))) {
+      if (this.activeMutatingCommands > 0
+        || (this.extensionBindingPromise && !this.extensionsBound && !this.extensionBindingError)
+        || this.isBackgroundActive()
+        || (!this.forceShutdownOnIdle && this.isRunning())) {
         this.resetIdleTimer();
         return;
       }
@@ -544,6 +563,10 @@ export class AgentSessionWrapper {
   }
 
   onEvent(listener: EventListener): () => void {
+    if (!this.isAlive()) {
+      listener({ type: "dormant", sessionId: this.sessionId });
+      return () => {};
+    }
     this.listeners.push(listener);
     // Widgets and statuses may be registered during session startup, before
     // the SSE listener attaches. Replay their current values on every attach.
@@ -611,13 +634,15 @@ export class AgentSessionWrapper {
       throw new Error(`Cannot ${type} while another session command is running`);
     }
 
+    if (!this.isAlive()) throw new Error("Session is closing");
     const tracksMutation = !allowedDuringReplacement;
     if (tracksMutation) this.activeMutatingCommands += 1;
 
     try {
       // Status reconciliation must not postpone forced cleanup after Stop.
-      if (type !== "get_state") this.resetIdleTimer();
+      if (!["get_state", "get_tools", "get_commands"].includes(type)) this.resetIdleTimer();
       if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
+      if (!this.isAlive()) throw new Error("Session is closing");
       if (this.sessionReplacement && !allowedDuringReplacement) {
         throw new Error("Session is being copied to a new session");
       }
@@ -634,6 +659,7 @@ export class AgentSessionWrapper {
         // this submission starts a run or joins its streaming queue.
         const releaseAdmission = await this.acquirePromptAdmission();
         try {
+          if (!this.isAlive()) throw new Error("Session is closing");
           if (this.inner.isBashRunning) {
             throw new Error("Cannot send a prompt while a shell command is running");
           }
@@ -1082,21 +1108,32 @@ export class AgentSessionWrapper {
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
+    this.emit({ type: "dormant", sessionId: this.sessionId });
+    this.listeners = [];
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
     if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.extensionUiAbortController.abort();
+    this.extensionStatuses.clear();
     for (const pending of this.pendingUiResponses.values()) pending.cancel();
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
     this.activeToolEvents.clear();
     this.clearExtensionWidgets(false);
+    this.extensionWidgetGenerations.clear();
+    this.extensionBindingPromise = null;
+    this.extensionBindingError = null;
 
     const finishDispose = () => {
       try {
         this.inner.dispose();
       } finally {
-        this.onDestroyCallback?.();
+        const onDestroy = this.onDestroyCallback;
+        this.onDestroyCallback = null;
+        onDestroy?.();
       }
     };
 
@@ -1753,7 +1790,9 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
   const registry = getRegistry();
   const sessionId = wrapper.sessionId;
   if (wrapper.sessionFile) cacheSessionPath(sessionId, wrapper.sessionFile);
-  wrapper.onDestroy(() => registry.delete(sessionId));
+  wrapper.onDestroy(() => {
+    if (registry.get(sessionId) === wrapper) registry.delete(sessionId);
+  });
   registry.set(sessionId, wrapper);
   wrapper.start();
   if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
@@ -1822,6 +1861,10 @@ function trackStartingSession(cwd: string): () => void {
     if (remaining > 0) startingCwds.set(key, remaining);
     else startingCwds.delete(key);
   };
+}
+
+export function getStartingRpcSession(sessionId: string) {
+  return globalThis.__piStartLocks?.get(sessionId);
 }
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
@@ -2030,7 +2073,8 @@ export async function startRpcSession(
   const locks = getLocks();
 
   const existing = registry.get(sessionId);
-  if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
+  if (existing?.isAlive()) return { session: existing, realSessionId: existing.sessionId };
+  if (existing) await existing.shutdown();
 
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;

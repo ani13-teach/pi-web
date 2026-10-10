@@ -53,6 +53,7 @@ test("keeps the session event stream open through the idle grace window", () => 
   assert.match(source, /const EVENT_STREAM_IDLE_GRACE_MS = 30_000/);
   assert.match(graceSource, /setTimeout\(\(\) => void checkServerIdle\(\), EVENT_STREAM_IDLE_GRACE_MS\)/);
   assert.match(graceSource, /fetch\(`\/api\/agent\/\$\{encodeURIComponent\(sid\)\}`\)/);
+  assert.match(graceSource, /if \(data\.backgroundActive\) \{[\s\S]*?runtimeActiveRef\.current = true;[\s\S]*?return;/);
   assert.match(graceSource, /closeEvents\(\)/);
   assert.match(finishSource, /scheduleEventStreamClose\(sid\)/);
   assert.doesNotMatch(finishSource, /closeEvents\(\)/);
@@ -64,7 +65,7 @@ test("keeps the session event stream open through the idle grace window", () => 
   assert.match(promptDoneSource, /scheduleEventStreamClose\(sid\)/);
   assert.match(sendSource, /const definitivelyRejected = !promptRequestStarted/);
   assert.match(sendSource, /if \(!definitivelyRejected && sentSessionId\) \{[\s\S]*?waitForPromptSettlement/);
-  assert.match(sendSource, /restoreSubmission\(message, images, composerDraftKey\);[\s\S]*?if \(sentSessionId\) \{[\s\S]*?reconcileAgentState\(sentSessionId\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?closeEvents\(\)/);
+  assert.match(sendSource, /restoreSubmission\(message, images, composerDraftKey\);[\s\S]*?if \(sentSessionId && promptRequestStarted\) \{[\s\S]*?reconcileAgentState\(sentSessionId\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?closeEvents\(\)/);
   assert.doesNotMatch(
     sendSource,
     /rpcPromptPendingRef\.current = false;\s*agentRunningRef\.current = false;\s*closeEvents\(\)/,
@@ -113,6 +114,29 @@ test("opening System or Tools lazily starts a dormant session without sending a 
   );
 });
 
+test("explicit sends activate before the SSE handshake and prompts, while history command discovery stays dormant", () => {
+  const activate = source.slice(source.indexOf("  const ensureRuntimeActive"), source.indexOf("  // Opening the System"));
+  assert.match(activate, /type: "ensure_session"/);
+  assert.match(activate, /result\?\.sessionId !== sid/);
+  assert.match(activate, /!sessionHookMountedRef\.current \|\| sessionIdRef\.current !== sid/);
+  const connect = source.slice(source.indexOf("  const ensureEventsConnected"), source.indexOf("  const maintainEventsConnected"));
+  assert.match(connect, /runWithAgentReadinessDeadline\(async \(signal\) =>/);
+  assert.match(connect, /await ensureRuntimeActive\(sid, signal\);\s*await eventConnectionRef\.current!\.ensureConnected\(sid\)/);
+  assert.match(connect, /EVENT_STREAM_READY_TIMEOUT_MS/);
+  const send = source.slice(source.indexOf("  const handleSend = useCallback"), source.indexOf("  const executeBash = useCallback"));
+  assert.match(send, /const sid = await runWithAgentReadinessDeadline\(async \(signal\) =>/);
+  assert.match(send, /await ensureNewSession\(signal\)/);
+  assert.match(send, /await ensureEventsConnected\(readySessionId, signal\)/);
+  assert.ok(send.indexOf("await ensureEventsConnected(readySessionId, signal)") < send.indexOf("promptRequestStarted = true"));
+  assert.match(send, /promptRequestStarted = true;\s*await sendAgentCommand\(sid/);
+  const commands = source.slice(source.indexOf("  const loadSlashCommands"), source.indexOf("  const cancelEventStreamGrace"));
+  assert.match(commands, /if \(!sid \|\| !runtimeActiveRef\.current\)/);
+  assert.doesNotMatch(commands, /ensureNewSession|ensureRuntimeActive/);
+  const dormant = source.slice(source.indexOf('case "dormant"'), source.indexOf('case "connected"'));
+  assert.match(dormant, /runtimeActiveRef\.current = false/);
+  assert.doesNotMatch(dormant, /settleUiStage|agentRunningRef\.current = false|type: "end"/);
+});
+
 test("new-session promotion rekeys drafts before publishing the real session", () => {
   const promoteSource = source.slice(
     source.indexOf("  const promoteNewSession = useCallback"),
@@ -147,7 +171,7 @@ test("fresh sessions use the preference while persisted and live sessions restor
     preferenceSource,
     /const existingSessionId = session\?\.id;[\s\S]*?useLayoutEffect\(\(\) => \{\s*if \(!existingSessionId && \(!isNew \|\| sessionIdRef\.current\)\) return;\s*setToolPresetState\(getPreferredToolPreset\(\)\)/,
   );
-  assert.match(source, /if \(agentState\?\.running\) \{\s*loadTools\(session\.id\)/);
+  assert.match(source, /if \(agentState\?\.runtimeActive \?\? agentState\?\.running\) \{[\s\S]*?loadTools\(session\.id\)/);
   assert.match(source, /d\.toolNames !== undefined \? getPresetFromToolNames\(d\.toolNames\) : "default"/);
   assert.match(changeSource, /setPreferredToolPreset\(preset\)/);
   assert.match(changeSource, /\(sid, \{ type: "set_tools", toolNames \}\)/);
@@ -312,7 +336,7 @@ test("delegates event stream readiness and hides an empty agent phase", () => {
   assert.match(source, /shouldMaintain: \(sid\)[\s\S]*?sessionIdRef\.current === sid/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.ensureConnected\(sid\)/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.maintain\(sid\)/);
-  assert.match(chatWindowSource, /const hasStreamingContent = Boolean\(streamState\.streamingMessage\?\.content\.length\)/);
+  assert.match(chatWindowSource, /const hasStreamingContent = Boolean\(streamState\.streamingMessage[\s\S]*?isDisplayableMessage\(streamState\.streamingMessage/);
   assert.match(chatWindowSource, /streamState\.isStreaming && hasStreamingContent && streamState\.streamingMessage/);
   assert.match(chatWindowSource, /agentRunning && !hasStreamingContent && agentPhase/);
   assert.match(chatWindowSource, /return null;/);
@@ -341,24 +365,24 @@ test("uses server pagination state instead of guessing from rendered rows", () =
   assert.doesNotMatch(chatWindowSource, /rendered\.length >= visibleCount/);
 });
 
-test("keeps the selected session warm while idle and renews its lease", () => {
+test("selection never warms dormant history and wake-up probes cannot apply late results", () => {
+  const probe = source.slice(source.indexOf("  // Reconnect only to an existing runtime"), source.indexOf("  const respondToExtensionUi"));
   assert.match(source, /sessionRunning\?: boolean/);
-  assert.match(
-    source,
-    /const sid = session\?\.id;[\s\S]*?if \(!sid\) return;[\s\S]*?maintainEventsConnected\(sid\)/,
-  );
-  assert.match(source, /sessionPropIdRef\.current === sid/);
-  assert.match(source, /SESSION_LEASE_RENEW_INTERVAL_MS = 30_000/);
-  assert.match(source, /fetch\(`\/api\/agent\/\$\{encodeURIComponent\(sid\)\}\/lease`/);
-  assert.match(source, /setInterval\(\(\) => void renewLease\(\), SESSION_LEASE_RENEW_INTERVAL_MS\)/);
-  assert.match(source, /result\.renewed === 0[\s\S]*?closeEvents\(\)[\s\S]*?maintainEventsConnected\(sid\)/);
-  assert.match(source, /if \(sessionPropIdRef\.current === sid\) \{[\s\S]*?cancelEventStreamGrace\(\);[\s\S]*?return;/);
-  assert.match(source, /maintainEventsConnected\(sid\)/);
-  assert.doesNotMatch(source, /void connectEvents\(/);
+  assert.doesNotMatch(source, /SESSION_LEASE_RENEW_INTERVAL_MS|\/lease`|renewLease/);
+  assert.match(probe, /if \(probing \|\| controller\.signal\.aborted\) return/);
+  assert.match(probe, /signal: controller\.signal/);
+  assert.match(probe, /!sessionHookMountedRef\.current[\s\S]*?sessionIdRef\.current !== sid[\s\S]*?runtimeActivityRevisionRef\.current !== revision/);
+  assert.match(probe, /if \(runtimeActiveRef\.current\) maintainEventsConnected\(sid\);\s*else closeEvents\(\)/);
+  assert.match(probe, /if \(opts\.sessionRunning\) void probeRuntime\(\)/);
+  assert.match(probe, /addEventListener\("visibilitychange", onVisible\)/);
+  assert.match(probe, /addEventListener\("online", onOnline\)/);
+  assert.match(probe, /controller\.abort\(\)/);
+  assert.doesNotMatch(probe, /ensure_session|ensureNewSession|setInterval/);
+  const maintain = source.slice(source.indexOf("shouldMaintain:"), source.indexOf("readinessTimeoutMs:"));
+  assert.match(maintain, /runtimeActiveRef\.current/);
+  assert.doesNotMatch(maintain, /sessionPropIdRef/);
   assert.match(chatWindowSource, /sessionRunning\?: boolean/);
-  assert.match(chatWindowSource, /session, sessionRunning, newSessionCwd/);
   assert.match(appShellSource, /runningSessionIds\.has\(selectedSession\.id\)/);
-  assert.match(appShellSource, /onRunningSessionIdsChange=\{handleRunningSessionIdsChange\}/);
 });
 
 test("keeps one reducer-owned assistant partial and consumes Pi JSON deltas", () => {

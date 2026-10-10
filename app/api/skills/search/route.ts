@@ -54,9 +54,10 @@ function parseSearchOutput(raw: string): SkillSearchResult[] {
   return results;
 }
 
-async function searchSkillsApi(query: string, limit: number): Promise<SkillSearchResult[]> {
+async function searchSkillsApi(query: string, limit: number, signal: AbortSignal): Promise<SkillSearchResult[]> {
+  signal.throwIfAborted();
   const url = `${SEARCH_API_BASE}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, { cache: "no-store", signal });
   if (!res.ok) throw new Error(`skills.sh search failed: HTTP ${res.status}`);
 
   const data = (await res.json()) as SkillsApiResponse;
@@ -90,23 +91,29 @@ function parseInstallCount(installs: string): number {
 // POST /api/skills/search  body: { query: string, limit?: number }
 export async function POST(req: Request) {
   try {
+    req.signal.throwIfAborted();
     const { query, limit: rawLimit } = await req.json() as { query?: string; limit?: unknown };
     if (!query?.trim()) return NextResponse.json({ error: "query required" }, { status: 400 });
     const limit = parseLimit(rawLimit);
 
     try {
-      const results = await searchSkillsApi(query.trim(), limit);
+      const results = await searchSkillsApi(query.trim(), limit, req.signal);
+      req.signal.throwIfAborted();
       return NextResponse.json({ results });
     } catch {
+      req.signal.throwIfAborted();
       const { stdout, stderr } = await runNpx(["skills", "find", query.trim()], {
+        signal: req.signal,
         timeout: 20000,
         env: { ...process.env, FORCE_COLOR: "0" },
       });
 
+      req.signal.throwIfAborted();
       const results = parseSearchOutput(stdout + stderr).slice(0, limit);
       return NextResponse.json({ results });
     }
   } catch (e: unknown) {
+    req.signal.throwIfAborted();
     const err = e as { stdout?: string; stderr?: string; message?: string };
     const raw = (err.stdout ?? "") + (err.stderr ?? "");
     const results = raw ? parseSearchOutput(raw) : [];

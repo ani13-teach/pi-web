@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import type { RouterRequest } from "../services/http-router";
 import { killTerminal } from "../lib/terminal-manager";
+import { stopNpxProcesses } from "../lib/npx";
 import { configureOutboundNetworking, handleProxyMessage } from "./system-proxy";
 
 // Outbound networking is configured before the routes are loaded, because a
@@ -67,6 +68,7 @@ export type BackendRequest = {
 };
 
 async function request(input: BackendRequest) {
+  if (shutdownPromise) throw new Error("backend is shutting down");
   const id = input.streamId ?? randomUUID();
   if (requests.has(id)) throw new Error(`Request ${id} is already open`);
   const entry: PendingRequest = { controller: new AbortController() };
@@ -136,12 +138,21 @@ async function pullStream(id: string): Promise<{ done: boolean; chunkBase64?: st
 
 function shutdown(): Promise<{ closed: boolean }> {
   if (shutdownPromise) return shutdownPromise;
+  // stopNpxProcesses seals its launch gate synchronously, before any cleanup awaits.
+  const npxClosing = stopNpxProcesses();
   shutdownPromise = (async () => {
-    const closing = [...requests.keys()].map(disposeRequest);
-    for (const id of globalThis.__piWebTerminals?.keys() ?? []) killTerminal(id, true);
+    const closing = [...requests.keys()].map((id) => Promise.resolve().then(() => disposeRequest(id)));
+    const terminals = [...(globalThis.__piWebTerminals?.keys() ?? [])];
     const sessions = [...(globalThis.__piSessions?.values() ?? [])];
-    await Promise.allSettled([...closing, ...sessions.map((session) => session.shutdown())]);
-    return { closed: true };
+    const results = await Promise.allSettled([
+      npxClosing,
+      ...closing,
+      ...terminals.map((id) => Promise.resolve().then(() => killTerminal(id, true))),
+      ...sessions.map((session) => Promise.resolve().then(() => session.shutdown())),
+    ]);
+    const failures = results.filter((result) => result.status === "rejected");
+    for (const failure of failures) console.error("[backend] shutdown cleanup failed:", failure.reason);
+    return { closed: failures.length === 0 };
   })();
   return shutdownPromise;
 }
@@ -169,6 +180,11 @@ const handlers: Record<string, Handler> = {
   },
 
   "http.request": request,
+
+  "backup.resources": async () => {
+    const { loadedBackupResources } = await import("./backup-resources");
+    return loadedBackupResources(globalThis.__piSessions?.values() ?? []);
+  },
 
   "backup.status": () => ({
     busy: Boolean([...(globalThis.__piSessions?.values() ?? [])].some((session) => session.isRunning())
@@ -211,8 +227,9 @@ process.on("message", (raw: unknown) => {
     })
     .then((result) => {
       send({ kind: "response", envelope: { id, ok: true, result } });
-      if (method === "backend.shutdown") {
-        // The IPC channel keeps the loop alive; leaving is the point of shutdown.
+      if (method === "backend.shutdown" && (params as { holdForExit?: boolean } | undefined)?.holdForExit !== true) {
+        // Legacy callers expect self-exit; the supervisor can instead keep the
+        // root alive until it has captured and terminated the backend tree.
         setTimeout(() => process.exit(0), 50);
       }
     })

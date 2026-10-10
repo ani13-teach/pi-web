@@ -15,7 +15,7 @@ import type {
 } from "@/lib/types";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { isPromptRejectedError, runWithAgentReadinessDeadline, sendAgentCommand } from "@/lib/agent-client";
 import { clearDraft, rekeyDraft, restoreDraftSubmission } from "@/lib/draft-store";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { getPresetFromToolNames, getToolNamesForPreset, type ToolEntry, type ToolPreset } from "@/lib/tool-presets";
@@ -172,7 +172,6 @@ const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_READY_TIMEOUT_MS = 60_000;
 const EVENT_STREAM_RECONNECT_DELAY_MS = 1_000;
-const SESSION_LEASE_RENEW_INTERVAL_MS = 30_000;
 // Retry temporary model-list failures without requiring a page refresh.
 const MODELS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 const MAX_NOTICES = 5;
@@ -339,6 +338,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventStreamGraceActiveRef = useRef(false);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const sessionPropIdRef = useRef<string | null>(session?.id ?? null);
+  const runtimeActiveRef = useRef(false);
+  const runtimeActivityRevisionRef = useRef(0);
   const agentRunningRef = useRef(false);
   const sdkAgentActiveRef = useRef(false);
   const rpcPromptPendingRef = useRef(false);
@@ -377,7 +378,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && (
           agentRunningRef.current
           || eventStreamGraceActiveRef.current
-          || sessionPropIdRef.current === sid
+          || runtimeActiveRef.current
         )
       ),
       readinessTimeoutMs: EVENT_STREAM_READY_TIMEOUT_MS,
@@ -515,7 +516,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
+        const agentState = await stateRes.json() as { running: boolean; runtimeActive?: boolean; backgroundActive?: boolean; state?: AgentStateResponse };
         if (sessionIdRef.current !== sid) return null;
 
         const liveState = agentState.state;
@@ -624,12 +625,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }, provisionalDraftKey);
   }, [isNew, newSessionCwd, newSessionDraftKey, onSessionCreated, opts.chatInputRef]);
 
-  const ensureNewSession = useCallback(async () => {
+  const ensureNewSession = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) throw signal.reason;
     if (sessionIdRef.current) return sessionIdRef.current;
     if (!isNew || !newSessionCwd) return sessionIdRef.current;
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
 
-    const promise = (async () => {
+    const promise = runWithAgentReadinessDeadline(async (activeSignal) => {
       // Only send explicit user overrides. The server resolves the current
       // enabledModels scope atomically with AgentSession construction.
       const selectedModel = newSessionModelOverrideRef.current;
@@ -639,6 +641,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const res = await fetch("/api/agent/new", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: activeSignal,
         body: JSON.stringify({
           cwd: newSessionCwd,
           type: "ensure_session",
@@ -655,8 +658,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         model?: SelectedModel | null;
         thinkingLevel?: ThinkingLevelOption;
       };
+      if (activeSignal.aborted) throw activeSignal.reason;
+      if (!sessionHookMountedRef.current) throw new Error("Session view closed during creation");
       const realId = result.sessionId;
       sessionIdRef.current = realId;
+      runtimeActiveRef.current = true;
+      runtimeActivityRevisionRef.current += 1;
       if (result.model && newSessionModelOverrideRef.current === selectedModel) {
         setPendingModel(result.model);
         if (!selectedModel) setNewSessionDefaultModel(result.model);
@@ -668,15 +675,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setThinkingLevel(result.thinkingLevel);
       }
       return realId;
-    })();
+    }, EVENT_STREAM_READY_TIMEOUT_MS, undefined, signal);
 
     ensuringNewSessionRef.current = promise;
     try {
       return await promise;
     } finally {
-      ensuringNewSessionRef.current = null;
+      if (ensuringNewSessionRef.current === promise) ensuringNewSessionRef.current = null;
     }
   }, [isNew, newSessionCwd, toolPreset]);
+
+  const ensureRuntimeActive = useCallback(async (sid: string, signal?: AbortSignal) => {
+    runtimeActivityRevisionRef.current += 1;
+    const activate = async (activeSignal: AbortSignal) => {
+      const result = await sendAgentCommand<{ sessionId: string }>(sid, { type: "ensure_session" }, { signal: activeSignal });
+      // A late bridge response must not revive a timed-out or changed view.
+      if (activeSignal.aborted) throw activeSignal.reason;
+      if (result?.sessionId !== sid) throw new Error("Agent activation returned a different session");
+      if (!sessionHookMountedRef.current || sessionIdRef.current !== sid) throw new Error("Session changed during activation");
+      runtimeActiveRef.current = true;
+    };
+    if (signal) await activate(signal);
+    else await runWithAgentReadinessDeadline(activate, EVENT_STREAM_READY_TIMEOUT_MS);
+  }, []);
 
   // Opening the System or Tools panel may initialize an otherwise dormant
   // session. This is deliberately a non-prompt command: it creates no message
@@ -684,6 +705,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadSystemInfo = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
     if (!sid) return;
+    await ensureRuntimeActive(sid);
 
     const [state] = await Promise.all([
       sendAgentCommand<AgentStateResponse>(sid, { type: "get_state" }),
@@ -692,11 +714,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sessionHookMountedRef.current || sessionIdRef.current !== sid) return;
     syncLiveModel(state);
     setSystemPrompt(state.systemPrompt ?? "");
-  }, [ensureNewSession, loadTools, syncLiveModel]);
+  }, [ensureNewSession, ensureRuntimeActive, loadTools, syncLiveModel]);
 
   const loadSlashCommands = useCallback(async () => {
-    const sid = sessionIdRef.current ?? await ensureNewSession();
-    if (!sid) {
+    const sid = sessionIdRef.current;
+    if (!sid || !runtimeActiveRef.current) {
       setSlashCommands([]);
       return [] as SlashCommandInfo[];
     }
@@ -713,7 +735,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       setSlashCommandsLoading(false);
     }
-  }, [ensureNewSession]);
+  }, []);
 
   const cancelEventStreamGrace = useCallback(() => {
     eventStreamGraceGenerationRef.current += 1;
@@ -728,68 +750,61 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventConnectionRef.current?.close();
   }, []);
 
-  const ensureEventsConnected = useCallback((sid: string) => (
-    eventConnectionRef.current!.ensureConnected(sid)
-  ), []);
+  const ensureEventsConnected = useCallback(async (sid: string, parentSignal?: AbortSignal) => {
+    await runWithAgentReadinessDeadline(async (signal) => {
+      await ensureRuntimeActive(sid, signal);
+      await eventConnectionRef.current!.ensureConnected(sid);
+    }, EVENT_STREAM_READY_TIMEOUT_MS, () => {
+      if (sessionIdRef.current === sid && !sdkAgentActiveRef.current) closeEvents();
+    }, parentSignal);
+  }, [ensureRuntimeActive, closeEvents]);
 
   const maintainEventsConnected = useCallback((sid: string) => {
     eventConnectionRef.current!.maintain(sid);
   }, []);
 
-  // Keep the selected session warm even while its agent is idle. The SSE lease
-  // is renewed separately below and expires if the browser disappears.
+  // Reconnect only to an existing runtime. Selection and browser wake-ups never
+  // activate a historical session or renew a liveness lease.
   useEffect(() => {
     const sid = session?.id;
     if (!sid) return;
-    maintainEventsConnected(sid);
-    return () => {
-      if (sessionIdRef.current === sid) eventConnectionRef.current?.close();
-    };
-  }, [maintainEventsConnected, session?.id]);
-
-  useEffect(() => {
-    const sid = session?.id;
-    if (!sid) return;
-    let disposed = false;
-    let renewing = false;
-
-    const renewLease = async () => {
-      if (disposed || renewing) return;
-      renewing = true;
+    const controller = new AbortController();
+    let probing = false;
+    const probeRuntime = async () => {
+      if (probing || controller.signal.aborted) return;
+      probing = true;
+      const revision = runtimeActivityRevisionRef.current;
       try {
-        const response = await fetch(`/api/agent/${encodeURIComponent(sid)}/lease`, {
-          method: "POST",
-          cache: "no-store",
+        const response = await fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+          cache: "no-store", signal: controller.signal,
         });
-        if (!response.ok || disposed) return;
-        const result = await response.json() as { renewed?: number };
-        if (
-          !disposed
-          && result.renewed === 0
-          && sessionIdRef.current === sid
-          && sessionPropIdRef.current === sid
-        ) {
-          closeEvents();
-          maintainEventsConnected(sid);
-        }
+        if (!response.ok) return;
+        const state = await response.json() as { running?: boolean; runtimeActive?: boolean };
+        if (controller.signal.aborted || !sessionHookMountedRef.current
+          || sessionIdRef.current !== sid || sessionPropIdRef.current !== sid
+          || runtimeActivityRevisionRef.current !== revision) return;
+        runtimeActiveRef.current = state.runtimeActive ?? Boolean(state.running);
+        if (runtimeActiveRef.current) maintainEventsConnected(sid);
+        else closeEvents();
       } catch {
-        // Retry on the next interval; the SSE connection remains the primary path.
+        // Transient network errors do not imply the runtime is dormant.
       } finally {
-        renewing = false;
+        probing = false;
       }
     };
-
-    const interval = setInterval(() => void renewLease(), SESSION_LEASE_RENEW_INTERVAL_MS);
+    if (opts.sessionRunning) void probeRuntime();
     const onVisible = () => {
-      if (document.visibilityState === "visible") void renewLease();
+      if (document.visibilityState === "visible") void probeRuntime();
     };
+    const onOnline = () => void probeRuntime();
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
     return () => {
-      disposed = true;
-      clearInterval(interval);
+      controller.abort();
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
     };
-  }, [closeEvents, maintainEventsConnected, session?.id]);
+  }, [closeEvents, maintainEventsConnected, opts.sessionRunning, session?.id]);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -913,10 +928,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [onAgentEnd]);
 
   const scheduleEventStreamClose = useCallback((sid: string) => {
-    if (sessionPropIdRef.current === sid) {
-      cancelEventStreamGrace();
-      return;
-    }
     cancelEventStreamGrace();
     eventStreamGraceActiveRef.current = true;
     const generation = eventStreamGraceGenerationRef.current;
@@ -931,7 +942,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+        const data = await res.json() as { running?: boolean; backgroundActive?: boolean; state?: AgentStateResponse };
         if (
           generation !== eventStreamGraceGenerationRef.current
           || sessionIdRef.current !== sid
@@ -955,6 +966,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (data.running && state?.isCompacting) {
           setIsCompacting(true);
           eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
+          return;
+        }
+
+        if (data.backgroundActive) {
+          // Observe real background work without renewing its lifetime. The
+          // backend closes this stream with dormant after work ends and idles.
+          runtimeActiveRef.current = true;
+          eventStreamGraceActiveRef.current = false;
+          eventStreamGraceTimerRef.current = null;
           return;
         }
 
@@ -1124,7 +1144,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
+      case "dormant": {
+        runtimeActiveRef.current = false;
+        runtimeActivityRevisionRef.current += 1;
+        // Reclamation is not prompt completion: an explicit activation may
+        // already be in flight and will restore the connection before send.
+        break;
+      }
       case "connected": {
+        runtimeActiveRef.current = true;
+        runtimeActivityRevisionRef.current += 1;
         dispatch({ type: "end" });
         if (event.isStreaming === true) {
           cancelEventStreamGrace();
@@ -1436,39 +1465,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let promptRequestStarted = false;
 
     try {
-      if (isNew && newSessionCwd) {
-        const selectedModel = newSessionModel;
-        const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-        const sid = existingSid ?? await ensureNewSession();
-
-        if (!sid) throw new Error("Unable to create a session for the prompt");
-        sentSessionId = sid;
-        if (selectedModel) {
-          setPendingModel(selectedModel);
-          if (existingSid) {
-            await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
+      const sid = await runWithAgentReadinessDeadline(async (signal) => {
+        let readySessionId: string | null;
+        if (isNew && newSessionCwd) {
+          const selectedModel = newSessionModel;
+          const existingSid = sessionIdRef.current;
+          readySessionId = existingSid ?? await ensureNewSession(signal);
+          if (!readySessionId) throw new Error("Unable to create a session for the prompt");
+          if (signal.aborted) throw signal.reason;
+          sentSessionId = readySessionId;
+          if (selectedModel) {
+            setPendingModel(selectedModel);
+            if (existingSid) {
+              await sendAgentCommand(readySessionId, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId }, { signal });
+            }
           }
+        } else if (session) {
+          readySessionId = session.id;
+          sentSessionId = readySessionId;
+        } else {
+          throw new Error("No active session for the prompt");
         }
-        await ensureEventsConnected(sid);
-        promptRequestStarted = true;
-        await sendAgentCommand(sid, {
-          type: "prompt",
-          message,
-          ...(piImages?.length ? { images: piImages } : {}),
-        });
-        promoteNewSession(1, message);
-      } else if (session) {
-        sentSessionId = session.id;
-        await ensureEventsConnected(session.id);
-        promptRequestStarted = true;
-        await sendAgentCommand(session.id, {
-          type: "prompt",
-          message,
-          ...(piImages?.length ? { images: piImages } : {}),
-        });
-      } else {
-        throw new Error("No active session for the prompt");
-      }
+        if (signal.aborted) throw signal.reason;
+        await ensureEventsConnected(readySessionId, signal);
+        return readySessionId;
+      }, EVENT_STREAM_READY_TIMEOUT_MS, () => {
+        if (!sdkAgentActiveRef.current && (!sentSessionId || sessionIdRef.current === sentSessionId)) closeEvents();
+      });
+      promptRequestStarted = true;
+      await sendAgentCommand(sid, {
+        type: "prompt",
+        message,
+        ...(piImages?.length ? { images: piImages } : {}),
+      });
+      if (isNew && newSessionCwd) promoteNewSession(1, message);
       if (isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
@@ -1495,10 +1525,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Rejection only describes this submission. Another tab or an event we
       // missed may still have a real run active for the same session, so keep
       // its SSE connection until server state says the wrapper is idle.
-      if (sentSessionId) {
+      if (!promptRequestStarted && sdkAgentActiveRef.current) return;
+      if (sentSessionId && promptRequestStarted) {
         void reconcileAgentState(sentSessionId);
         return;
       }
+      // Activation/handshake failed before dispatch. Clear this local stage
+      // immediately: querying get_state could wait on the same stuck binding.
       agentRunningRef.current = false;
       closeEvents();
       setAgentRunning(false);
@@ -1924,6 +1957,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const result = await sendAgentCommand<{ sessionId?: string; recreated?: boolean }>(sid, { type: "set_tools", toolNames });
       const activeSessionId = result?.sessionId ?? sid;
+      runtimeActiveRef.current = true;
+      runtimeActivityRevisionRef.current += 1;
       if (activeSessionId !== sid || result?.recreated) {
         cancelEventStreamGrace();
         closeEvents();
@@ -2029,7 +2064,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (session) {
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
-        if (agentState?.running) {
+        if (!sessionHookMountedRef.current || sessionIdRef.current !== session.id) return;
+        if (agentState?.runtimeActive ?? agentState?.running) {
+          runtimeActiveRef.current = true;
+          maintainEventsConnected(session.id);
           loadTools(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             sdkAgentActiveRef.current = Boolean(agentState.state.isStreaming);
@@ -2060,6 +2098,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
     }
     return () => {
+      runtimeActiveRef.current = false;
+      runtimeActivityRevisionRef.current += 1;
       sessionHookMountedRef.current = false;
       const abandonedDraftKey = isNew ? newSessionDraftKey : null;
       if (abandonedDraftKey) {

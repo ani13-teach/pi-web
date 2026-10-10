@@ -408,6 +408,8 @@ try {
     await request(`/api/sessions/${sessionId}`, { method: "DELETE" });
   }
 
+  const liveTerminal = await request("/api/terminal", jsonInit({ cwd: root, cols: 80, rows: 24 }));
+  check("a live native terminal is left for shutdown to close", liveTerminal.status === 200 && typeof liveTerminal.json?.id === "string", liveTerminal.text.slice(0, 120));
   const shutdown = await call("backend.shutdown", {});
   check("backend.shutdown answers", shutdown.closed === true);
   await new Promise((resolve) => setTimeout(resolve, 800));

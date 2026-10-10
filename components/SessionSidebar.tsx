@@ -32,9 +32,7 @@ export function getSessionListIndices(count: number, scrollTop: number, viewport
 
 declare global {
   interface Window {
-    piDesktop?: {
-      selectDirectory: () => Promise<string | null>;
-    };
+    piDesktop?: import("../shared/contract").DesktopBridge;
   }
 }
 

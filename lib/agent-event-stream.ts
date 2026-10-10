@@ -3,7 +3,6 @@ import {
   toClientAgentEvent,
   type AgentEventLike,
 } from "./agent-event-wire";
-import { acquireSessionLivenessLease } from "./session-liveness";
 
 export interface AgentEventStreamSession {
   readonly isStreaming: boolean;
@@ -28,7 +27,6 @@ export function createAgentEventStream(
   sessionPromise: Promise<AgentEventStreamSession>,
 ): ReadableStream<Uint8Array> {
   let cancelStream: (closeController: boolean) => void = () => {};
-  let releaseLease: () => void = () => {};
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -41,8 +39,6 @@ export function createAgentEventStream(
       const cleanup = (closeController: boolean) => {
         if (closed) return;
         closed = true;
-        releaseLease();
-        releaseLease = () => {};
         if (heartbeat !== null) clearInterval(heartbeat);
         unsubscribe?.();
         unsubscribe = null;
@@ -52,7 +48,6 @@ export function createAgentEventStream(
         }
       };
       cancelStream = cleanup;
-      releaseLease = acquireSessionLivenessLease(sessionId).release;
 
       const enqueueText = (text: string) => {
         if (closed) return;
@@ -66,6 +61,11 @@ export function createAgentEventStream(
         enqueueText(`data: ${JSON.stringify(data)}\n\n`);
       };
       const forwardEvent = (event: AgentEventLike, snapshot: unknown) => {
+        if (event.type === "dormant") {
+          encode(event);
+          cleanup(true);
+          return;
+        }
         if (isEventIncludedInSnapshot(event, snapshot)) return;
         const clientEvent = toClientAgentEvent(event);
         if (clientEvent) encode(clientEvent);

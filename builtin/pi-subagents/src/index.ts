@@ -301,11 +301,20 @@ export const WORKFLOW_FILE_FLAG = "subagents-workflow-file";
 export { FOREIGN_WORKFLOW_TOOL_NAMES, WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData };
 export { configureDesktopHost, type DesktopHost, type DesktopChildInfo } from "./desktop-host.js";
 
+let activityProbe: (() => boolean) | undefined;
+let shutdownActivation: (() => Promise<void>) | undefined;
+/** Completed historical records are not activity. */
+export function hasActiveWork(): boolean { return activityProbe?.() ?? false; }
+export function shutdownSubagentModule(): Promise<void> { return shutdownActivation?.() ?? Promise.resolve(); }
+
 export default function (pi: ExtensionAPI) {
   // Child AgentSessions load normal extensions. Re-entering this extension there
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
+  let closed = false;
+  let workflowWorkerCount = 0;
+  let pendingResumes = 0;
 
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
@@ -457,6 +466,7 @@ export default function (pi: ExtensionAPI) {
   const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
+    if (closed) return;
     cancelNudge(key);
     pendingNudges.set(key, setTimeout(() => {
       pendingNudges.delete(key);
@@ -791,6 +801,8 @@ export default function (pi: ExtensionAPI) {
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
+    if (closed) return;
+    manager.startMaintenance();
     // Persisted settings were applied by the factory. Desktop's live setting
     // wins before RPC, scheduler or workflow startup can launch a child.
     const maxConcurrent = host?.maxConcurrent;
@@ -1102,33 +1114,52 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async () => {
-    rpcHandle?.unsubSpawn();
-    rpcHandle?.unsubStop();
-    rpcHandle?.unsubPing();
-    rpcHandle?.unsubConsume();
-    rpcHandle = undefined;
-    currentCtx = undefined;
-    // Only release the global slot if this activation claimed it — a child
-    // session's shutdown must not delete the root session's registry entry.
-    if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
-      delete (globalThis as any)[MANAGER_KEY];
-    }
-    scheduler.stop();
-    // Before abortAll, and not folded into it: a workflow owns a worker thread
-    // as well as its children, and only its own signal terminates that.
-    for (const task of workflowTasks.values()) task.abortController.abort();
-    workflowTasks.clear();
-    manager.abortAll();
-    for (const timer of pendingNudges.values()) clearTimeout(timer);
-    pendingNudges.clear();
-    fleet.dispose();
-    // Awaited: it emits `session_shutdown` into every retained child session so
-    // extensions bound there can release what they armed in `session_start` (#242).
-    // pi awaits this handler, and the process exits right after — unawaited, those
-    // handlers would never run. Internally bounded, so a hung one can't strand quit.
-    await manager.dispose(pi);
-  });
+  let shutdownPromise: Promise<void> | undefined;
+  shutdownActivation = () => {
+    if (shutdownPromise) return shutdownPromise;
+    closed = true;
+    shutdownPromise = (async () => {
+      try {
+        rpcHandle?.unsubSpawn();
+        rpcHandle?.unsubStop();
+        rpcHandle?.unsubPing();
+        rpcHandle?.unsubConsume();
+        rpcHandle = undefined;
+        currentCtx = undefined;
+        // Only release the global slot if this activation claimed it.
+        if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
+          delete (globalThis as any)[MANAGER_KEY];
+        }
+        scheduler.stop();
+        // A workflow owns a worker as well as children; abort its own signal.
+        for (const task of workflowTasks.values()) task.abortController.abort();
+        workflowTasks.clear();
+        manager.abortAll();
+        groupJoin.dispose();
+        if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+        batchFinalizeTimer = undefined;
+        currentBatchAgents = [];
+        for (const timer of pendingNudges.values()) clearTimeout(timer);
+        pendingNudges.clear();
+        widget.dispose();
+        fleet.dispose();
+      } finally {
+        // Retained child sessions must finish their extension shutdown before
+        // the parent runtime is invalidated, even if UI teardown failed.
+        try { await manager.dispose(pi); }
+        finally {
+          workflowTasks.clear();
+          agentActivity.clear();
+          pendingUsage.drain();
+          currentCtx = undefined;
+          activityProbe = undefined;
+          shutdownActivation = undefined;
+        }
+      }
+    })();
+    return shutdownPromise;
+  };
+  pi.on("session_shutdown", () => shutdownPromise ?? shutdownSubagentModule());
 
   // Live widget: show running agents above editor.
   // widgetMode (default "background") selects what the widget shows: "all" =
@@ -1289,6 +1320,9 @@ export default function (pi: ExtensionAPI) {
     prompt: string,
     opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string },
   ): Promise<AgentRecord | undefined> {
+    if (closed) return undefined;
+    pendingResumes++;
+    try {
     const id = existing.id;
     const joinMode = resolveJoinMode(defaultJoinMode, true);
     // Assigned unconditionally: the completion notification carries this as
@@ -1333,7 +1367,7 @@ export default function (pi: ExtensionAPI) {
         }
       },
     });
-    if (!record) return undefined;
+    if (!record || closed) return undefined;
 
     if (joinMode != null && joinMode !== 'async') {
       currentBatchAgents.push({ id, joinMode });
@@ -1363,6 +1397,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     return record;
+    } finally { pendingResumes--; }
   }
 
   // Grab UI context from first tool execution + clear lingering widget on new turn
@@ -2318,6 +2353,13 @@ Terse command-style prompts produce shallow, generic work.
    * background run.
    */
   const workflowTasks = new Map<string, WorkflowTask>();
+  activityProbe = () => !closed && (
+    manager.hasRunning() || workflowWorkerCount > 0 || pendingResumes > 0 ||
+    [...workflowTasks.values()].some(task => task.status === "running" || task.status === "paused") ||
+    pendingNudges.size > 0 || batchFinalizeTimer !== undefined ||
+    manager.listAgents().some(record => !record.resultConsumed && groupJoin.isGrouped(record.id)) ||
+    scheduler.list().some(job => job.enabled && scheduler.getNextRun(job.id) !== undefined)
+  );
 
   /**
    * Workflow runs as the fleet list wants them.
@@ -2350,6 +2392,8 @@ Terse command-style prompts produce shallow, generic work.
    * detached — a rejection would surface as an unhandled one.
    */
   async function runWorkflowTask(ctx: ExtensionContext, task: WorkflowTask): Promise<void> {
+    if (closed) return;
+    workflowWorkerCount++;
     try {
       const result = await runWorkflow({
         script: task.script,
@@ -2377,7 +2421,7 @@ Terse command-style prompts produce shallow, generic work.
       completeWorkflowTask(task, result);
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
-    }
+    } finally { workflowWorkerCount--; }
   }
 
   /**
@@ -2386,6 +2430,7 @@ Terse command-style prompts produce shallow, generic work.
    * triggers a turn, rendered by the existing `subagent-notification` renderer.
    */
   function notifyWorkflowFinished(task: WorkflowTask) {
+    if (closed) return;
     widget.update();
     fleet.update();
     const result = workflowResultText(task);
@@ -2722,6 +2767,7 @@ Terse command-style prompts produce shallow, generic work.
     // Detached: session_start is awaited by the host, and a workflow can run for
     // minutes — blocking here would hold the whole session's startup.
     void runWorkflowTask(ctx, task).then(() => {
+      if (closed) return;
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout), and the outcome is handed to the model as context
       // for its next turn rather than forcing one.

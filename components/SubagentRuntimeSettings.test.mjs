@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { build, transform } from "esbuild";
+import { build } from "esbuild";
 
 const source = await readFile(new URL("./SubagentRuntimeSettings.tsx", import.meta.url), "utf8");
 // Execute the actual helpers and component handlers with a small hook harness.
@@ -298,8 +298,11 @@ test("all three locales contain every runtime field, hint and shared UI key", as
     for (const key of expected) assert.ok(keys.includes(key), `${locale}: missing ${key}`);
     if (baseline) assert.deepEqual([...keys].sort(), baseline, `${locale}: key parity`);
     baseline = [...keys].sort();
-    const output = await transform(contents, { loader: "ts", format: "esm" });
-    const messages = await import(`data:text/javascript;base64,${Buffer.from(output.code).toString("base64")}`);
+    const output = await build({
+      stdin: { contents, resolveDir: fileURLToPath(new URL("../lib/i18n/messages/", import.meta.url)), loader: "ts" },
+      bundle: true, write: false, platform: "node", format: "esm",
+    });
+    const messages = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString("base64")}`);
     const map = Object.values(messages)[0].messages;
     for (const key of expected) assert.ok(map[key]?.trim(), `${locale}: empty ${key}`);
   }

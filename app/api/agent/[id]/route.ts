@@ -25,6 +25,17 @@ export async function POST(
 
     // Fast path: already-running session
     const existing = getRpcSession(id);
+    if (body.type === "ensure_session") {
+      const filePath = existing?.sessionFile || await resolveSessionPath(id);
+      if (!existing?.isAlive() && !filePath) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      const { session, realSessionId } = await startRpcSession(id, filePath || "", undefined, {
+        ...(toolNames !== undefined ? { toolNames } : {}),
+      });
+      await session.ensureReadyAndTouch();
+      return NextResponse.json({ success: true, data: { sessionId: realSessionId } });
+    }
     if (body.type === "set_tools") {
       const filePath = existing?.sessionFile || await resolveSessionPath(id) || undefined;
       if (!existing?.isAlive() && !filePath) {
@@ -50,6 +61,10 @@ export async function POST(
           ? { code: "prompt_rejected", accepted: false }
           : {}),
       }, { status: 404 });
+    }
+
+    if (["get_state", "get_tools", "get_commands"].includes(body.type)) {
+      return NextResponse.json({ error: "Session is dormant", code: "session_dormant" }, { status: 409 });
     }
 
     const { session } = await startRpcSession(id, filePath, undefined, {
@@ -79,11 +94,11 @@ export async function GET(
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
+      return NextResponse.json({ running: false, runtimeActive: false, backgroundActive: false });
     }
 
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json({ running: true, runtimeActive: true, backgroundActive: session.isBackgroundActive(), state });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

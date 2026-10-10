@@ -8,11 +8,8 @@
 import { StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 
-import { AppShell } from "../components/AppShell";
-import { I18nProvider } from "../hooks/useI18n";
 import { isDarkTheme, isThemePreference } from "../lib/theme";
 
-import { BackendRecoveryBar } from "./backend-recovery";
 import { installDesktopEventSource } from "./shims/desktop-eventsource";
 import { installDesktopFetch } from "./shims/desktop-fetch";
 import { installDesktopXhr } from "./shims/desktop-xhr";
@@ -58,9 +55,16 @@ function reportFatal(error: unknown): void {
   root.appendChild(box);
 }
 
-try {
+async function startRenderer(): Promise<void> {
+  // Startup transaction recovery precedes all preference reads and UI effects.
+  await window.piDesktop?.backupBoot?.();
   installShims();
   applyInitialTheme();
+  // Keep preference-owning module initialization behind recovery too, not just
+  // React effects. Future module-level preference caches cannot observe old UI.
+  const [{AppShell},{I18nProvider},{BackendRecoveryBar}] = await Promise.all([
+    import("../components/AppShell"), import("../hooks/useI18n"), import("./backend-recovery"),
+  ]);
   const container = document.getElementById("root");
   if (!container) throw new Error("missing #root element");
   createRoot(container).render(
@@ -81,6 +85,5 @@ try {
       </Suspense>
     </StrictMode>,
   );
-} catch (error) {
-  reportFatal(error);
 }
+void startRenderer().catch(reportFatal);

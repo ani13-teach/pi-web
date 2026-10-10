@@ -7,7 +7,7 @@ export interface AgentEventSourceLike {
   close(): void;
 }
 
-export type AgentEventConnectionStatus = "ready_timeout" | "startup_error" | "closed";
+export type AgentEventConnectionStatus = "ready_timeout" | "startup_error" | "dormant" | "closed";
 
 export class AgentEventConnectionError extends Error {
   constructor(public readonly status: AgentEventConnectionStatus, message?: string) {
@@ -39,6 +39,7 @@ export interface AgentEventConnectionOptions {
   shouldMaintain(sessionId: string): boolean;
   readinessTimeoutMs: number;
   reconnectDelayMs: number;
+  onDormant?(sessionId: string): void;
   onUnexpectedError?(error: unknown): void;
 }
 
@@ -63,7 +64,7 @@ export class AgentEventConnection {
     void this.ensureConnected(sessionId).catch((error) => {
       if (retryGeneration !== this.retryGeneration) return;
       if (error instanceof AgentEventConnectionError) {
-        if (error.status === "startup_error") this.stopRetrying();
+        if (error.status === "startup_error" || error.status === "dormant") this.stopRetrying();
         else this.scheduleRetry(sessionId);
       } else {
         this.options.onUnexpectedError?.(error);
@@ -150,6 +151,11 @@ export class AgentEventConnection {
         attempt.ready = true;
         attempt.succeed();
         this.stopRetrying();
+      } else if (event.type === "dormant") {
+        this.fail(connection, new AgentEventConnectionError("dormant"));
+        this.options.onDormant?.(sessionId);
+        this.options.onEvent(event);
+        return;
       } else if (event.type === "startup_error") {
         const message = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
         this.fail(connection, new AgentEventConnectionError("startup_error", message));
@@ -167,7 +173,7 @@ export class AgentEventConnection {
   private fail(connection: Connection, error: AgentEventConnectionError): void {
     if (this.current !== connection) return;
     this.discard(connection, error);
-    if (error.status === "startup_error") this.stopRetrying();
+    if (error.status === "startup_error" || error.status === "dormant") this.stopRetrying();
     else this.scheduleRetry(connection.sessionId);
   }
 
