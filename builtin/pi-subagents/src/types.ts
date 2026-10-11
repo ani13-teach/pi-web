@@ -64,10 +64,10 @@ export interface AgentConfig {
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;
   /**
-   * Nested delegation, off by default: undefined = no nested tools;
+   * Nested delegation: omitted = inherit all enabled types; false = off;
    * "all" = any enabled agent; string[] = only those agent types.
    */
-  allowedSubagents?: "all" | string[];
+  allowedSubagents?: false | "all" | string[];
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */

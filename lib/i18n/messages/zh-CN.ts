@@ -242,7 +242,7 @@ export const zhCNLocale: LocalePlugin = {
     "title.noMessages": "请先发送消息，再为会话命名",
     "title.generateSession": "生成会话标题",
     "system.prompt": "系统提示词",
-    "system.empty": "系统提示词为空（工具已禁用）",
+    "system.empty": "系统提示词为空",
     "system.load": "系统提示词尚未加载",
     "system.loading": "正在加载系统提示词…",
     "system.label": "系统",

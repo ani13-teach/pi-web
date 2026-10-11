@@ -35,7 +35,8 @@
 import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../agent-manager.js";
-import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
+import { buildAgentRegistry, getAgentConfig, getAgentConfigIn, resolveEnabledTypeIn, resolveSpawnType, resolveTypeIn } from "../agent-types.js";
+import { loadCustomAgents } from "../custom-agents.js";
 import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
 import type { AgentRecord, ThinkingLevel } from "../types.js";
@@ -53,7 +54,19 @@ export const DEFAULT_GATE_TIMEOUT_MS = 10 * 60_000;
 export interface WorkflowHostOptions {
   pi: ExtensionAPI;
   ctx: ExtensionContext;
-  manager: AgentManager;
+  manager: Pick<AgentManager, "spawnAndWait" | "getRecord" | "abort" | "resume">;
+  /** Nested owners never use the process-global registry or root fallback. */
+  nested?: {
+    parentAgentId: string;
+    depth: number;
+    maxSubagentDepth: number;
+    configCwd: string;
+    allowedSubagents: false | "all" | string[];
+    onAssistantUsage?: Parameters<AgentManager["spawn"]>[4]["onAssistantUsage"];
+  };
+  /** Nested shell gates require an owner-scoped, safety-checked execution path.
+   * Without one they fail explicitly; root hosts retain their existing pi.exec path. */
+  executeGate?: (command: string, cwd: string, signal?: AbortSignal) => Promise<WorkflowGateResult>;
   /** The run's abort signal, so killing the workflow kills its children. */
   signal?: AbortSignal;
   /** Groups child transcripts under the parent session. */
@@ -175,6 +188,8 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
    * decided from one behaviour, whichever route the command took.
    */
   async function executeGate(command: string, cwd: string): Promise<WorkflowGateResult> {
+    if (deps.executeGate) return deps.executeGate(command, cwd, deps.signal);
+    if (deps.nested) return { ok: false, output: "Nested workflow gates require a safety-checked owner execution hook." };
     const result = await pi.exec(GATE_SHELL[0], [GATE_SHELL[1], command], {
       cwd,
       timeout: deps.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS,
@@ -194,15 +209,32 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
 
   return {
     async spawnAgent(request) {
-      const dispatch = resolveSpawnType(request.agentType);
+      const nested = deps.nested;
+      if (nested && (nested.depth >= nested.maxSubagentDepth || nested.allowedSubagents === false)) {
+        return { ok: false, error: "Nested workflow spawn blocked by delegation policy or depth limit." };
+      }
+      if (nested && request.gate !== undefined && !deps.executeGate) {
+        return { ok: false, error: "Nested workflow gates require a safety-checked owner execution hook." };
+      }
+      const registry = nested ? buildAgentRegistry(loadCustomAgents(nested.configCwd)) : undefined;
+      const nestedType = registry ? resolveEnabledTypeIn(registry, request.agentType) : undefined;
+      const dispatch = registry
+        ? nestedType === undefined
+          ? { ok: false as const, message: `Unknown or disabled nested agent type: "${request.agentType}".` }
+          : { ok: true as const, type: nestedType }
+        : resolveSpawnType(request.agentType);
       if (!dispatch.ok) return { ok: false, error: dispatch.message };
+      if (nested && Array.isArray(nested.allowedSubagents) && registry
+        && !nested.allowedSubagents.some(name => (resolveTypeIn(registry, name) ?? name) === dispatch.type)) {
+        return { ok: false, error: `Nested agent type "${dispatch.type}" is not allowed for this parent.` };
+      }
 
       // Same precedence as the Agent tool: the caller's model wins, the agent
       // definition's is next, and the parent's is the floor. A model the script
       // named and we cannot resolve is an error; one the definition named falls
       // back to the parent silently, because the script never asked for it.
       let model = ctx.model;
-      const config = getAgentConfig(dispatch.type);
+      const config = registry ? getAgentConfigIn(registry, dispatch.type) : getAgentConfig(dispatch.type);
       const modelInput = request.model ?? config?.model;
       if (modelInput !== undefined) {
         const resolved = resolveModel(modelInput, ctx.modelRegistry);
@@ -222,7 +254,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       // warn-and-proceed branch rather than a refusal.
       const scopeVerdict = checkModelScope({
         model,
-        cwd: ctx.cwd,
+        cwd: nested?.configCwd ?? ctx.cwd,
         modelRegistry: ctx.modelRegistry,
         callerSupplied: request.model !== undefined,
         agentLabel: config?.displayName ?? dispatch.type,
@@ -298,6 +330,13 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
           request.prompt,
           {
             description: request.label,
+            ...(nested ? {
+              parentAgentId: nested.parentAgentId,
+              depth: nested.depth + 1,
+              maxSubagentDepth: nested.maxSubagentDepth,
+              configCwd: nested.configCwd,
+              onAssistantUsage: nested.onAssistantUsage,
+            } : {}),
             // The stamp is what keeps this child out of the session's
             // `maxConcurrent` pool — see `occupiesPoolSlot`. The run already
             // bounds how many of its agents run at once, and counting them
@@ -359,13 +398,22 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       const id = records.get(agentId);
       // Nothing to abort before the manager has issued an id — the child is
       // still in startup, and the run's own signal reaches it there.
-      if (id !== undefined) manager.abort(id);
+      if (id !== undefined) {
+        const record = manager.getRecord(id);
+        if (record && record.workflowId === deps.workflowId
+          && (!deps.nested || record.parentAgentId === deps.nested.parentAgentId)) manager.abort(id);
+      }
     },
 
     async resumeAgent(agentId, prompt, onResolved) {
       const id = records.get(agentId);
       if (id === undefined) {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
+      }
+      const owned = manager.getRecord(id);
+      if (!owned || owned.workflowId !== deps.workflowId
+        || (deps.nested && owned.parentAgentId !== deps.nested.parentAgentId)) {
+        return { ok: false, error: `Cannot resume "${agentId}" — child ownership no longer matches this workflow.` };
       }
       const record = await manager.resume(id, prompt, deps.signal);
       if (record === undefined) {

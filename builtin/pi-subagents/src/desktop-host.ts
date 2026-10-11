@@ -1,4 +1,4 @@
-import type { AgentSession, DefaultResourceLoader, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, DefaultResourceLoader, ExtensionContext, ResourceLoader } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "./agent-manager.js";
 import type { RequestCoordinator } from "./task-coordination.js";
 
@@ -6,6 +6,19 @@ import type { RequestCoordinator } from "./task-coordination.js";
 // public class instead of depending on unexported SDK subpaths.
 export type DefaultResourceLoaderOptions = ConstructorParameters<typeof DefaultResourceLoader>[0];
 export type ResourceLoaderReloadOptions = NonNullable<Parameters<DefaultResourceLoader["reload"]>[0]>;
+
+export interface AgentResourcePolicy {
+  tools: string[];
+  extensions: true | string[] | false;
+  excludeExtensions?: string[];
+  skills: true | string[] | false;
+  extSelectors?: string[];
+  disallowedTools?: string[];
+  allowedSubagents: false | "all" | string[];
+  depth: number;
+  maxSubagentDepth: number;
+  configCwd: string;
+}
 
 export interface DesktopChildInfo {
   parentContext: ExtensionContext;
@@ -18,6 +31,7 @@ export interface DesktopChildInfo {
   loadExtensions: boolean;
   loadSkills: boolean;
   systemPrompt: string;
+  resourcePolicy?: AgentResourcePolicy;
 }
 
 export interface DesktopHost {
@@ -29,7 +43,8 @@ export interface DesktopHost {
   installRequestCoordinator?(sessionId: string, coordinator: RequestCoordinator): boolean;
   bindChild(session: AgentSession, info: DesktopChildInfo): Promise<void>;
   shutdownChild(session: AgentSession): Promise<void>;
-  resourceLoaderOptions?(configCwd: string, options: DefaultResourceLoaderOptions): DefaultResourceLoaderOptions | Promise<DefaultResourceLoaderOptions>;
+  resourceLoaderOptions?(configCwd: string, options: DefaultResourceLoaderOptions, effectiveCwd?: string): DefaultResourceLoaderOptions | Promise<DefaultResourceLoaderOptions>;
+  createResourceLoader?(options: DefaultResourceLoaderOptions): ResourceLoader;
   reloadOptions?(configCwd: string): ResourceLoaderReloadOptions;
 }
 

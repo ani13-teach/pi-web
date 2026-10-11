@@ -3,12 +3,18 @@
  * Keep these independent of the original files; Desktop built-ins take precedence.
  * Prompt and configuration provenance is documented in DESKTOP-PATCHES.md.
  */
+import { createCodingTools, createReadOnlyTools, createPowerShellTool } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./types.js";
 
+const READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls", "bash"];
+const ALL_BUILTIN_TOOL_NAMES = [...new Set([
+  ...createCodingTools("."), ...createReadOnlyTools("."),
+  ...(process.platform === "win32" ? [createPowerShellTool(".")] : []),
+].map(tool => tool.name))];
+
 const PRESET_DEFAULTS = {
-  builtinToolNames: ["read", "grep", "find", "ls", "bash"],
-  extensions: false,
-  skills: false,
+  extensions: true,
+  skills: true,
   model: "哈尔/gpt-6.1-sol",
   fallbackModel: "openai-codex/gpt-6.1-sol",
   thinking: "high",
@@ -25,6 +31,7 @@ export const DESKTOP_AGENT_PRESETS: AgentConfig[] = [
   {
     ...PRESET_DEFAULTS,
     name: "plan",
+    builtinToolNames: [...READ_ONLY_TOOL_NAMES],
     displayName: "plan",
     description: "软件架构师，制定实现方案（只读）",
     maxTurns: 25,
@@ -64,6 +71,7 @@ export const DESKTOP_AGENT_PRESETS: AgentConfig[] = [
   {
     ...PRESET_DEFAULTS,
     name: "review",
+    builtinToolNames: [...READ_ONLY_TOOL_NAMES],
     displayName: "review",
     description: "代码审查员，针对任务/方案检查 bug、测试、边界和过度设计",
     maxTurns: 25,
@@ -101,6 +109,7 @@ bash 边界：仅用于只读检查（读取文件、git diff/log/status、grep�
   {
     ...PRESET_DEFAULTS,
     name: "scout",
+    builtinToolNames: [...READ_ONLY_TOOL_NAMES],
     displayName: "scout",
     description: "快速代码侦查，返回压缩上下文供其他代理使用",
     thinking: "medium",
@@ -149,6 +158,7 @@ bash 边界：仅用于只读检查（读取文件、git diff/log/status、grep�
   {
     ...PRESET_DEFAULTS,
     name: "test",
+    builtinToolNames: [...READ_ONLY_TOOL_NAMES],
     displayName: "test",
     description: "测试代理，专门执行验收测试、冒烟测试和针对性回归验证",
     maxTurns: 150,
@@ -201,7 +211,7 @@ bash 边界：仅用于只读检查（读取文件、git diff/log/status、grep�
     name: "work",
     displayName: "work",
     description: "通用写代码代理，隔离上下文，负责实现任务",
-    builtinToolNames: [...PRESET_DEFAULTS.builtinToolNames, "edit", "write"],
+    builtinToolNames: [...ALL_BUILTIN_TOOL_NAMES],
     maxTurns: 200,
     systemPrompt: `你是一名工人代理（worker），拥有完整能力，在隔离的上下文窗口中处理被委派的任务。
 

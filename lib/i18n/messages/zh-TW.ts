@@ -242,7 +242,7 @@ export const zhTWLocale: LocalePlugin = {
     "title.noMessages": "請先傳送訊息，再為工作階段命名",
     "title.generateSession": "產生工作階段標題",
     "system.prompt": "系統提示詞",
-    "system.empty": "系統提示詞為空（工具已停用）",
+    "system.empty": "系統提示詞為空",
     "system.load": "系統提示詞尚未載入",
     "system.loading": "正在載入系統提示詞…",
     "system.label": "系統",

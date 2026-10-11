@@ -8,6 +8,7 @@ import { loadCustomAgents, parseAgentFrontmatter, readAgentConfigFile } from "..
 import { BUILTIN_TOOL_NAMES, buildAgentRegistry, resolveEnabledTypeIn } from "../builtin/pi-subagents/src/agent-types";
 import { loadSettings } from "../builtin/pi-subagents/src/settings";
 import type { AgentConfig } from "../builtin/pi-subagents/src/types";
+import type { AgentResourcePolicy } from "../builtin/pi-subagents/src/desktop-host";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
 import { sessionPathKey } from "./session-path";
@@ -64,7 +65,8 @@ export interface SubagentMetadata {
 }
 
 export interface SubagentResourceSnapshot {
-  version: 1;
+  version: 1 | 2;
+  policy?: AgentResourcePolicy;
   appendSystemPrompt: string[];
   tools: string[];
   loadSkills: boolean;
@@ -73,6 +75,7 @@ export interface SubagentResourceSnapshot {
 }
 
 export interface SubagentSessionResources {
+  policy?: AgentResourcePolicy;
   appendSystemPrompt: string[];
   tools: string[];
   loadSkills: boolean;
@@ -504,7 +507,28 @@ function subagentMetadataData(entries: readonly SessionEntry[]): ValidSubagentMe
   return data as ValidSubagentMetadataData;
 }
 
-/** Restore the isolated prompt and tool scope used by a persisted subagent session. */
+export function readAgentResourcePolicy(value: unknown): AgentResourcePolicy | null {
+  if (!isRecord(value)) return null;
+  const strings = (items: unknown): items is string[] => Array.isArray(items) && items.every(item => typeof item === "string" && item.length > 0);
+  const resource = (items: unknown): items is true | false | string[] => typeof items === "boolean" || strings(items);
+  if (!strings(value.tools) || !resource(value.extensions) || !resource(value.skills)
+    || !["excludeExtensions", "extSelectors", "disallowedTools"].every(key => value[key] === undefined || strings(value[key]))
+    || !(value.allowedSubagents === false || value.allowedSubagents === "all" || strings(value.allowedSubagents))
+    || !Number.isInteger(value.depth) || (value.depth as number) < 1
+    || !Number.isInteger(value.maxSubagentDepth) || (value.maxSubagentDepth as number) < 0
+    || typeof value.configCwd !== "string" || !value.configCwd) return null;
+  return {
+    tools: [...value.tools], extensions: Array.isArray(value.extensions) ? [...value.extensions] : value.extensions,
+    skills: Array.isArray(value.skills) ? [...value.skills] : value.skills,
+    allowedSubagents: Array.isArray(value.allowedSubagents) ? [...value.allowedSubagents] : value.allowedSubagents,
+    depth: value.depth as number, maxSubagentDepth: value.maxSubagentDepth as number, configCwd: value.configCwd,
+    ...(value.excludeExtensions === undefined ? {} : { excludeExtensions: [...value.excludeExtensions as string[]] }),
+    ...(value.extSelectors === undefined ? {} : { extSelectors: [...value.extSelectors as string[]] }),
+    ...(value.disallowedTools === undefined ? {} : { disallowedTools: [...value.disallowedTools as string[]] }),
+  };
+}
+
+/** Restore the persisted explicit policy rather than freezing one turn's extension tools. */
 export function readSubagentSessionResources(
   entries: readonly SessionEntry[],
 ): SubagentSessionResources | null {
@@ -513,6 +537,17 @@ export function readSubagentSessionResources(
   const snapshot = data.resourceSnapshot;
   const loadSkills = isRecord(snapshot) && snapshot.loadSkills === true;
   const loadExtensions = isRecord(snapshot) && snapshot.loadExtensions === true;
+  if (isRecord(snapshot) && snapshot.version === 2) {
+    const policy = readAgentResourcePolicy(snapshot.policy);
+    if (!policy || !Array.isArray(snapshot.tools) || !snapshot.tools.every(item => typeof item === "string")
+      || !Array.isArray(snapshot.appendSystemPrompt) || !snapshot.appendSystemPrompt.every(item => typeof item === "string")) {
+      // A damaged saved policy must not be mistaken for an unrestricted root.
+      return { tools: [], appendSystemPrompt: [], loadExtensions: false, loadSkills: false };
+    }
+    return { tools: [...new Set(snapshot.tools)], appendSystemPrompt: [...snapshot.appendSystemPrompt],
+      loadExtensions: policy.extensions !== false, loadSkills: policy.skills !== false && !Array.isArray(policy.skills), policy,
+      ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}) };
+  }
   if (
     isRecord(snapshot)
     && snapshot.version === 1

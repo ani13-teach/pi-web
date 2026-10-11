@@ -302,6 +302,7 @@ export const WORKFLOW_FILE_FLAG = "subagents-workflow-file";
  */
 export { FOREIGN_WORKFLOW_TOOL_NAMES, WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData };
 export { configureDesktopHost, type DesktopHost, type DesktopChildInfo } from "./desktop-host.js";
+export { createRestoredSubagentTools } from "./restored-tools.js";
 
 let activityProbe: (() => boolean) | undefined;
 let shutdownActivation: (() => Promise<void>) | undefined;

@@ -4,6 +4,7 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import type { BackupEntry, BackupInspection, BackupManifest, BackupResource, BackupRoot, Collection, OperationOptions, SourceEntry } from "./types.ts";
 import { checkLegacyPublic, readLegacyV1 } from "./legacy-v1.ts";
+import { executableConfig, securityConfig, requiresExecutable } from "./resource-safety.ts";
 import { checkParents, renameNoReplace, syncDirectory, verifyParents } from "./platform.ts";
 import { BACKUP_PREFERENCE_KEYS, BACKUP_UI_RESOURCE_ID, validateBackupUiState } from "../../shared/backup-preferences.ts";
 
@@ -35,20 +36,6 @@ const PROJECT_FILES = new Set(["AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "
 const HOME_FILES = new Set([".agents/.skill-lock.json", "AGENTS.md", "AGENTS.override.md", "CLAUDE.md"]);
 const HOME_DIRS = [".agents/skills", ".agents/agents", ".agents/workflows", ".pi/agent-memory"];
 const PROJECT_DIRS = ["skills", "extensions", "agents", "prompts", "themes", "workflows", "agent-memory", "agent-memory-local"].map((p) => `.pi/${p}`).concat([".agents/skills", ".agents/agents", ".agents/workflows"]);
-const EXECUTABLE_KINDS = new Set(["skill", "skills", "extension", "extensions", "agent", "agents", "prompt", "prompts", "workflow", "workflows", "instruction", "instructions", "custom", "project", "package"]);
-function executableConfig(v: unknown): boolean {
-  if (typeof v === "string") return v.trimStart().startsWith("!");
-  if (Array.isArray(v)) return v.some(executableConfig);
-  return object(v) && Object.entries(v).some(([k, value]) => /^(command|mcpServers|permissions|autoMode|automode)$/.test(k) || ["extensions", "packages"].includes(k) && Array.isArray(value) && value.length > 0 || executableConfig(value));
-}
-function securityConfig(v: unknown): boolean {
-  return !!v && typeof v === "object" && (Array.isArray(v) ? v.some(securityConfig) : Object.entries(v).some(([k,value])=>/^(permissions|automode|autoMode)$/.test(k) || securityConfig(value)));
-}
-function intrinsicallyExecutable(root: BackupRoot, relative: string) {
-  if (root.kind === "external") return false;
-  return /^(?:(?:\.pi|\.agents)\/)?(?:skills|extensions|agents|desktop-agents|workflows|prompts)(?:\/|$)/.test(relative) ||
-    /(?:^|\/)(?:AGENTS(?:\.override)?|CLAUDE|SYSTEM|APPEND_SYSTEM|agent-tool-description)\.md$/.test(relative);
-}
 function allowedResource(root: BackupRoot, relative: string): boolean {
   if (root.kind === "external") return validArchivePath(relative); // Exactly one catalog resource per external root; no target follows originalPath.
   if (root.kind === "ui") return false; // UI is schema-controlled manifest.uiState, never filesystem records.
@@ -90,7 +77,7 @@ export function validateManifest(value: unknown, legacy = false): asserts value 
     if (Object.hasOwn(r,"requiredRootIds") && (!Array.isArray(r.requiredRootIds) || r.requiredRootIds.length > 10000 || new Set(r.requiredRootIds).size!==r.requiredRootIds.length || r.requiredRootIds.some(id=>typeof id!=="string" || roots.get(fold(id))?.id!==id || roots.get(fold(id))?.kind!=="project"))) fail();
     const configKind = /(?:^|\/)auth\.json$|(?:^|\/)web-push\.json$/.test(r.relativePath) ? "auth" : /(?:^|\/)models\.json$/.test(r.relativePath) ? "models" : /(?:^|\/)(?:settings|subagents|automode(?:\.(?:local|settings))?)\.json$/.test(r.relativePath) ? "settings" : undefined;
     if (configKind && (r.kind !== configKind || !r.sensitive)) fail();
-    if ((root.kind === "external" || EXECUTABLE_KINDS.has(r.kind as string) || intrinsicallyExecutable(root, r.relativePath)) && r.executable !== true) fail();
+    if (requiresExecutable(root, r.relativePath, r.kind as string) && r.executable !== true) fail();
     if (/(?:^|\/)(?:automode(?:\.(?:local|settings))?\.json|trust\.json)$/.test(r.relativePath) && r.securityPolicy !== true) fail();
     const resourcePath = `${fold(root.id)}/${fold(r.relativePath)}`;
     if (resourcePaths.has(resourcePath)) fail(); resourcePaths.add(resourcePath);
@@ -317,7 +304,9 @@ function equalEntry(a: BackupEntry, b: BackupEntry) { return ["path", "rootId", 
 export async function writeArchive(o: { outputPath: string; password: string; collection: Collection } & OperationOptions): Promise<{ entries: number; bytes: number; warnings: string[] }> {
   abort(o); if (typeof o.password !== "string" || !o.password) throw new Error("A password is required");
   // Snapshot the descriptors; caller mutation cannot change the authenticated manifest mid-export.
-  const manifest: unknown = JSON.parse(JSON.stringify(o.collection.manifest)); validateManifest(manifest);
+  const manifest: unknown = JSON.parse(JSON.stringify(o.collection.manifest));
+  try { validateManifest(manifest); }
+  catch { throw new Error("Backup export manifest validation failed; scan resources again (EXPORT_MANIFEST_INVALID)"); }
   const entries: SourceEntry[] = o.collection.entries.map((e) => ({ ...e, data: e.data ? Buffer.from(e.data) : undefined }));
   if (entries.length !== manifest.entries.length || entries.some((e, i) => !equalEntry(e, manifest.entries[i]))) throw new Error("Scan collection does not match manifest");
   if (o.collection.preview.blockers.length) throw new Error("Backup scan has unresolved blockers");
@@ -361,7 +350,15 @@ export async function writeArchive(o: { outputPath: string; password: string; co
       }
       await put(tail); await out.writeFile(cipher.final()); await out.writeFile(cipher.getAuthTag()); await out.sync();
     } finally { cipher.destroy(); await out.close(); }
-    const verified = await readArchive({ archivePath: temp, key, signal: o.signal }); verified.key.fill(0); abort(o);
+    try {
+      const verified = await readArchive({ archivePath: temp, key, signal: o.signal });
+      verified.key.fill(0);
+    } catch {
+      abort(o);
+      // Do not attach causes: parser and filesystem errors may expose private content.
+      throw new Error("Backup export self-check failed; no final backup was published (EXPORT_SELF_CHECK_FAILED)");
+    }
+    abort(o);
     const tempStat = await fs.lstat(temp);
     if (!tempStat.isFile() || tempStat.dev !== tempIdentity.dev || tempStat.ino !== tempIdentity.ino) throw new Error("Encrypted temporary archive identity changed");
     const bytes = tempStat.size;

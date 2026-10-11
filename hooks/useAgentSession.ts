@@ -330,6 +330,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const extensionStatusRevisionRef = useRef(0);
   const extensionWidgetRevisionRef = useRef(0);
   const toolPresetChangeRef = useRef(0);
+  const slashCommandsRequestRef = useRef(0);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
 
   const eventConnectionRef = useRef<AgentEventConnection | null>(null);
@@ -627,11 +628,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const ensureNewSession = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) throw signal.reason;
-    if (sessionIdRef.current) return sessionIdRef.current;
-    if (!isNew || !newSessionCwd) return sessionIdRef.current;
+    if (!isNew || !newSessionCwd || newSessionPromotedRef.current) return sessionIdRef.current;
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
 
     const promise = runWithAgentReadinessDeadline(async (activeSignal) => {
+      const existingSid = sessionIdRef.current;
+      if (existingSid) {
+        // Inspection-only sessions have no file until a message is accepted.
+        // If idle reclamation removed one, recreate it with the composer's
+        // original cwd and choices, not a stale path or the server's cwd.
+        const probe = await fetch(`/api/agent/${encodeURIComponent(existingSid)}`, {
+          cache: "no-store", signal: activeSignal,
+        });
+        if (!probe.ok) throw new Error(`HTTP ${probe.status}`);
+        const state = await probe.json() as { runtimeActive?: boolean; running?: boolean };
+        if (activeSignal.aborted) throw activeSignal.reason;
+        if (!sessionHookMountedRef.current || sessionIdRef.current !== existingSid) {
+          throw new Error("Session changed during inspection");
+        }
+        if (state.runtimeActive ?? state.running) return existingSid;
+        sessionIdRef.current = null;
+        runtimeActiveRef.current = false;
+      }
       // Only send explicit user overrides. The server resolves the current
       // enabledModels scope atomically with AgentSession construction.
       const selectedModel = newSessionModelOverrideRef.current;
@@ -703,7 +721,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // session. This is deliberately a non-prompt command: it creates no message
   // or model run, but lets users inspect the exact prompt before sending one.
   const loadSystemInfo = useCallback(async () => {
-    const sid = sessionIdRef.current ?? await ensureNewSession();
+    const sid = await ensureNewSession();
     if (!sid) return;
     await ensureRuntimeActive(sid);
 
@@ -716,26 +734,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSystemPrompt(state.systemPrompt ?? "");
   }, [ensureNewSession, ensureRuntimeActive, loadTools, syncLiveModel]);
 
+  // Opening the palette is an explicit inspection, just like System/Tools.
+  // Initialize resources without sending a prompt or starting a model run.
   const loadSlashCommands = useCallback(async () => {
-    const sid = sessionIdRef.current;
-    if (!sid || !runtimeActiveRef.current) {
-      setSlashCommands([]);
-      return [] as SlashCommandInfo[];
-    }
+    const requestId = ++slashCommandsRequestRef.current;
+    let sid = sessionIdRef.current;
+    const isLatestRequest = () => sessionHookMountedRef.current
+      && slashCommandsRequestRef.current === requestId;
+    const isCurrent = () => isLatestRequest() && (!sid || sessionIdRef.current === sid);
     setSlashCommandsLoading(true);
     try {
-      const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
-      const commands = data?.commands ?? [];
-      setSlashCommands(commands);
-      return commands;
+      return await runWithAgentReadinessDeadline(async (signal) => {
+        sid = await ensureNewSession(signal);
+        if (!sid) return [] as SlashCommandInfo[];
+        if (signal.aborted) throw signal.reason;
+        await ensureRuntimeActive(sid, signal);
+        const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" }, { signal });
+        // Some bridge transports can return after cancellation or navigation.
+        if (signal.aborted) throw signal.reason;
+        const commands = data?.commands ?? [];
+        if (isCurrent()) setSlashCommands(commands);
+        return commands;
+      }, EVENT_STREAM_READY_TIMEOUT_MS);
     } catch (e) {
       console.error("Failed to load slash commands:", e);
-      setSlashCommands([]);
-      return [] as SlashCommandInfo[];
+      if (isLatestRequest()) setSlashCommands([]);
+      // Let the composer reset its request flag so reopening can retry.
+      throw e;
     } finally {
-      setSlashCommandsLoading(false);
+      if (isLatestRequest()) setSlashCommandsLoading(false);
     }
-  }, []);
+  }, [ensureNewSession, ensureRuntimeActive]);
 
   const cancelEventStreamGrace = useCallback(() => {
     eventStreamGraceGenerationRef.current += 1;
@@ -1470,7 +1499,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (isNew && newSessionCwd) {
           const selectedModel = newSessionModel;
           const existingSid = sessionIdRef.current;
-          readySessionId = existingSid ?? await ensureNewSession(signal);
+          readySessionId = await ensureNewSession(signal);
           if (!readySessionId) throw new Error("Unable to create a session for the prompt");
           if (signal.aborted) throw signal.reason;
           sentSessionId = readySessionId;

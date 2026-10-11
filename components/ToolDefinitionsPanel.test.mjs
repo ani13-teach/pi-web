@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { ToolDescription } = await jiti.import("./ToolDefinitionsPanel.tsx");
+const { SystemPromptPanel } = await jiti.import("./SystemPromptPanel.tsx");
 
 const panelSource = await readFile(new URL("./ToolDefinitionsPanel.tsx", import.meta.url), "utf8");
 const systemSource = await readFile(new URL("./SystemPromptPanel.tsx", import.meta.url), "utf8");
@@ -57,6 +58,20 @@ test("ordinary tool and extension descriptions stay as original free text", () =
     ["read", "Delegate a focused task to a configured subagent.\n- reviewer: Review (Tools: read; Model: relay/model-id)"],
   ]) {
     assert.equal(renderToStaticMarkup(React.createElement(ToolDescription, { name, description })), description);
+  }
+});
+
+test("empty system prompts show loading during inspection, not a tools-disabled claim", async () => {
+  const translate = (key) => key;
+  const loadingHtml = renderToStaticMarkup(React.createElement(SystemPromptPanel, { prompt: "", loading: true, translate }));
+  assert.match(loadingHtml, /system\.loading/);
+  assert.doesNotMatch(loadingHtml, /system\.empty/);
+  const emptyHtml = renderToStaticMarkup(React.createElement(SystemPromptPanel, { prompt: "", loading: false, translate }));
+  assert.match(emptyHtml, /system\.empty/);
+  for (const language of ["en", "zh-CN", "zh-TW"]) {
+    const messages = await readFile(new URL(`../lib/i18n/messages/${language}.ts`, import.meta.url), "utf8");
+    const empty = messages.match(/"system\.empty": "([^"]+)"/)[1];
+    assert.doesNotMatch(empty, /tools|工具/i);
   }
 });
 

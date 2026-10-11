@@ -5,15 +5,14 @@ import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@e
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
-import { createBuiltinAutomodeExtension, preferBuiltinAutomode } from "./automode-builtin";
-import { createBuiltinRpivTodoExtension, preferBuiltinRpivTodo } from "./rpiv-todo-builtin";
+import { createDesktopSessionExtensions, applyDesktopSessionExtensionPolicy, createAgentExtensionPolicy } from "./desktop-session-extensions";
+import { createToolScopeGuard, installExtensionToolScope, parseExtSelectors, parseExtensionsSpec } from "../builtin/pi-subagents/src/resource-policy";
+import { BUILTIN_TOOL_NAMES } from "../builtin/pi-subagents/src/agent-types";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import {
-  createProjectCommandBashExtension,
   createProjectCommandBashOperations,
-  preferUserBashExtension,
 } from "./project-command-env";
 import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
@@ -45,7 +44,7 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { resolveShellTools } from "./powershell-settings";
-import { applyCodemodeSelection, createDesktopCodemodeExtension } from "./codemode";
+import { applyCodemodeSelection } from "./codemode";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { FilteredResourceLoader } from "./filtered-resource-loader";
 import {
@@ -122,6 +121,8 @@ type AgentSessionWrapperOptions = {
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
   managedSubagent?: boolean;
+  onExtensionBindingComplete?: () => void;
+  configurationCwd?: string;
 };
 
 const IDLE_RESET_EVENT_TYPES = new Set([
@@ -249,6 +250,8 @@ export class AgentSessionWrapper {
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
   private readonly managedSubagent: boolean;
+  private readonly onExtensionBindingComplete?: () => void;
+  private readonly configurationCwd?: string;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
@@ -266,6 +269,8 @@ export class AgentSessionWrapper {
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.managedSubagent = options.managedSubagent ?? false;
+    this.onExtensionBindingComplete = options.onExtensionBindingComplete;
+    this.configurationCwd = options.configurationCwd;
     this.installExactSystemPromptProjection();
   }
 
@@ -422,6 +427,7 @@ export class AgentSessionWrapper {
       } else {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
+      this.onExtensionBindingComplete?.();
       if (!this._alive) throw new Error("Session is closing");
       this.extensionsBound = true;
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
@@ -484,6 +490,7 @@ export class AgentSessionWrapper {
 
   setActiveToolSelection(toolNames: string[]): void {
     this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+    this.onExtensionBindingComplete?.();
   }
 
   private emit(event: AgentEvent): void {
@@ -1044,6 +1051,7 @@ export class AgentSessionWrapper {
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
+        this.onExtensionBindingComplete?.();
         invalidateModelsCache();
         return { success: true };
       }
@@ -1750,12 +1758,13 @@ export class AgentSessionWrapper {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
+        this.onExtensionBindingComplete?.();
       },
     };
   }
 
   private syncProjectTrust(): void {
-    const status = getProjectTrustStatus(this.cwd, getAgentDir());
+    const status = getProjectTrustStatus(this.configurationCwd ?? this.cwd, getAgentDir());
     this.inner.settingsManager.setProjectTrusted(status.trusted);
   }
 }
@@ -2096,6 +2105,7 @@ export async function startRpcSession(
         sessionManager.getEntries() as unknown as SessionEntry[],
       )
     : null;
+  const configCwd = subagentResources?.policy?.configCwd ?? sessionCwd;
   const persistedToolNames = subagentResources
     ? undefined
     : readSessionToolSelection(sessionManager.getEntries() as unknown as SessionEntry[]);
@@ -2115,7 +2125,11 @@ export async function startRpcSession(
 
     // Determine which tools to pass based on requested toolNames.
     // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
-    let toolsOption: string[] | undefined = subagentResources?.tools;
+    const policy = subagentResources?.policy;
+    const toolScopeGuard = policy ? createToolScopeGuard() : undefined;
+    let toolsOption: string[] | undefined = policy
+      ? policy.extensions === false ? [...policy.tools, ...(policy.allowedSubagents !== false && policy.depth < policy.maxSubagentDepth ? [...SUBAGENT_CONTROL_TOOL_NAMES, "SubagentWorkflow"] : [])].filter(name => !policy.disallowedTools?.includes(name)) : undefined
+      : subagentResources?.tools;
     if (!subagentResources && selectedToolNames !== undefined) {
       // toolNames === [] -> "all off" (an empty allow-list disables every tool).
       // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
@@ -2133,14 +2147,14 @@ export async function startRpcSession(
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
     const trustReloadOptions = subagentResources
       ? subagentLoadsResources
-        ? projectTrustReloadOptions(sessionCwd, agentDir)
+        ? projectTrustReloadOptions(configCwd, agentDir)
         : undefined
       : chatOnly
         ? undefined
-        : projectTrustReloadOptions(sessionCwd, agentDir);
-    const settingsManager = SettingsManager.create(sessionCwd, agentDir);
+        : projectTrustReloadOptions(configCwd, agentDir);
+    const settingsManager = SettingsManager.create(configCwd, agentDir);
     const resourceLoaderOptions: ConstructorParameters<typeof FilteredResourceLoader>[0] = {
-        cwd: sessionCwd,
+        cwd: configCwd,
         agentDir,
         settingsManager,
         eventBus: createEventBus(),
@@ -2158,36 +2172,30 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
-            // A subagent session that loads extensions has to keep the auto-mode
-            // guardrail it would have received from the plugin on disk.
-            ...(subagentResources.loadExtensions
-              ? {
-                  extensionFactories: [createBuiltinAutomodeExtension(), createBuiltinRpivTodoExtension()],
-                  extensionsOverride: (base) => preferBuiltinRpivTodo(preferBuiltinAutomode(base)),
-                }
-              : {}),
+            extensionFactories: [
+              ...createDesktopSessionExtensions(sessionCwd, settingsManager, subagentResources.loadExtensions),
+              ...(toolScopeGuard ? [toolScopeGuard.extension] : []),
+              ...(policy && policy.allowedSubagents !== false && policy.depth < policy.maxSubagentDepth
+                ? [createSubagentExtension(sessionCwd, SUBAGENT_HOST_DEPENDENCIES, policy)] : []),
+            ],
+            ...(policy && Array.isArray(policy.extensions) ? { additionalExtensionPaths: parseExtensionsSpec(policy.extensions, policy.configCwd).paths } : {}),
+            extensionsOverride: (base) => applyDesktopSessionExtensionPolicy(base,
+              policy ? createAgentExtensionPolicy(policy.extensions, policy.excludeExtensions, policy.configCwd) : undefined,
+              policy && policy.allowedSubagents !== false && policy.depth < policy.maxSubagentDepth ? ["<inline:pi-subagents>"] : []),
           }
         : chatOnly
           ? CHAT_ONLY_RESOURCE_LOADER_OPTIONS
         : {
             extensionFactories: [
-              createDesktopCodemodeExtension(),
-              createProjectCommandBashExtension({
-                cwd: sessionCwd,
-                settings: settingsManager,
-              }),
+              ...createDesktopSessionExtensions(sessionCwd, settingsManager),
               createSubagentExtension(sessionCwd, SUBAGENT_HOST_DEPENDENCIES),
-              createBuiltinAutomodeExtension(),
-              createBuiltinRpivTodoExtension(),
             ],
-            extensionsOverride: (base) => preferBuiltinRpivTodo(preferBuiltinAutomode(
-              preferUserBashExtension(base),
-            )),
+            extensionsOverride: (base) => applyDesktopSessionExtensionPolicy(base),
           }),
     };
     const filteredLoaderOptions = await filteredSubagentLoaderOptions(resourceLoaderOptions, settingsManager);
     const services = await createAgentSessionServices({
-      cwd: sessionCwd,
+      cwd: configCwd,
       agentDir,
       settingsManager,
       resourceLoaderOptions: filteredLoaderOptions,
@@ -2230,13 +2238,18 @@ export async function startRpcSession(
       ? restoredModel
       : initial?.model;
     const { session: inner } = await createAgentSessionFromServices({
-      services,
+      // Resource discovery uses the saved configuration root, while tools and
+      // the conversation remain bound to the actual working directory.
+      services: { ...services, cwd: sessionCwd },
       sessionManager,
       ...(startupModel ? { model: startupModel } : {}),
       ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
       ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-      ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES, "SubagentWorkflow"] } : {}),
+      ...(subagentResources ? { excludeTools: policy
+        ? [...BUILTIN_TOOL_NAMES.filter(name => !policy.tools.includes(name)), ...(policy.disallowedTools ?? []),
+          ...(policy.allowedSubagents === false || policy.depth >= policy.maxSubagentDepth ? [...SUBAGENT_CONTROL_TOOL_NAMES, "SubagentWorkflow"] : [])]
+        : [...SUBAGENT_CONTROL_TOOL_NAMES, "SubagentWorkflow"] } : {}),
     });
 
     const persistedPreferences = await persistExplicitStartupPreferences(
@@ -2269,14 +2282,25 @@ export async function startRpcSession(
           ? () => subagentResources.appendSystemPrompt[0] ?? ""
           : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
         : undefined;
+    let renarrowRestoredTools: (() => void) | undefined;
     const wrapper = new AgentSessionWrapper(inner, {
       exactSystemPrompt,
+      configurationCwd: configCwd,
       chatOnly,
       onAgentRunComplete: (completedSessionId) => {
         void notifySessionComplete(completedSessionId).catch((error) => {
           console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
         });
       },
+      onExtensionBindingComplete: policy && toolScopeGuard ? () => {
+        if (renarrowRestoredTools) { renarrowRestoredTools(); return; }
+        const selectors = parseExtSelectors(policy.extSelectors ?? []);
+        const readmitToolNames = new Set(inner.getAllTools().map(tool => tool.name).filter(name =>
+          [...SUBAGENT_CONTROL_TOOL_NAMES, "SubagentWorkflow"].includes(name as typeof SUBAGENT_CONTROL_TOOL_NAMES[number]) && !policy.disallowedTools?.includes(name)));
+        renarrowRestoredTools = installExtensionToolScope(inner, { loader: inner.resourceLoader as import("@earendil-works/pi-coding-agent").DefaultResourceLoader,
+          toolNames: policy.tools, disallowedSet: new Set(policy.disallowedTools), ...selectors, readmitToolNames,
+          guard: toolScopeGuard, defaultToolNames: () => settingsManager.getDefaultTools() });
+      } : undefined,
       suppressCompletionNotifications: Boolean(subagentResources),
     });
     const realSessionId = inner.sessionId as string;

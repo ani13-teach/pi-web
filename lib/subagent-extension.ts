@@ -4,11 +4,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { getAgentDir, type AgentSession, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../builtin/pi-subagents/src/agent-manager";
 import type { AgentRecord } from "../builtin/pi-subagents/src/types";
-import type { DesktopChildInfo, DesktopHost } from "../builtin/pi-subagents/src/desktop-host";
-import { createBuiltinAutomodeExtension, preferBuiltinAutomode } from "./automode-builtin";
-import { createBuiltinRpivTodoExtension, preferBuiltinRpivTodo } from "./rpiv-todo-builtin";
+import type { AgentResourcePolicy, DesktopChildInfo, DesktopHost } from "../builtin/pi-subagents/src/desktop-host";
+import { createDesktopSessionExtensions, applyDesktopSessionExtensionPolicy } from "./desktop-session-extensions";
 import { projectTrustReloadOptions } from "./project-trust";
 import { filteredSubagentLoaderOptions } from "./extension-loader-options";
+import { FilteredResourceLoader } from "./filtered-resource-loader";
 export { filteredSubagentLoaderOptions, isSubagentsSource } from "./extension-loader-options";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveSubagentRuntimeMaxConcurrent } from "./subagent-runtime-settings";
@@ -91,7 +91,7 @@ function bundleUrl(): URL {
   return pathToFileURL(file);
 }
 
-export function createSubagentExtension(cwd: string, dependencies: SubagentHostDependencies): InlineExtension {
+export function createSubagentExtension(cwd: string, dependencies: SubagentHostDependencies, restoredPolicy?: AgentResourcePolicy): InlineExtension {
   return {
     name: HOST_SUBAGENT_EXTENSION_NAME,
     hidden: true,
@@ -209,20 +209,20 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
           });
           return true;
         },
-        async resourceLoaderOptions(configCwd, options) {
-          const base = await filteredSubagentLoaderOptions(options, options.settingsManager!);
+        async resourceLoaderOptions(configCwd, options, effectiveCwd) {
           const policy = options.extensionsOverride;
-          return {
-            ...base,
-            extensionFactories: [createBuiltinAutomodeExtension(), createBuiltinRpivTodoExtension()],
-            extensionsOverride: (loaded) => {
-              // User extension scoping never removes host safety handlers.
-              const guards = loaded.extensions.filter((entry) => entry.path.startsWith("<inline:"));
-              const scoped = policy ? policy({ ...loaded, extensions: loaded.extensions.filter((entry) => !guards.includes(entry)) }) : loaded;
-              return preferBuiltinRpivTodo(preferBuiltinAutomode({ ...scoped, extensions: [...new Set([...scoped.extensions, ...guards])] }));
-            },
+          const shared = {
+            ...options,
+            extensionFactories: [
+              ...createDesktopSessionExtensions(effectiveCwd ?? configCwd, options.settingsManager!, !options.noExtensions),
+              ...(options.extensionFactories ?? []),
+            ],
+            extensionsOverride: (loaded: Parameters<typeof applyDesktopSessionExtensionPolicy>[0]) => applyDesktopSessionExtensionPolicy(loaded, policy),
           };
+          // Supply built-in providers BEFORE discovery so builtin:codemode resolves.
+          return shared;
         },
+        createResourceLoader(options) { return new FilteredResourceLoader(options); },
         reloadOptions(configCwd) { return projectTrustReloadOptions(configCwd, getAgentDir()) ?? {}; },
         async bindChild(session, info) {
           if (activation.closed) {
@@ -236,7 +236,7 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
             version: 1, parentSessionId: parentManager.getSessionId(), parentSessionPath: parentManager.getSessionFile() ?? "",
             parentToolCallId: record?.toolCallId ?? "", profile: info.profile, description: info.description, task: info.task,
             runInBackground: !record?.blocking, createdAt: new Date(record?.startedAt ?? Date.now()).toISOString(),
-            resourceSnapshot: { version: 1, appendSystemPrompt: [], tools: info.tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt },
+            resourceSnapshot: { version: info.resourcePolicy ? 2 : 1, appendSystemPrompt: [], tools: info.tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt, ...(info.resourcePolicy ? { policy: info.resourcePolicy } : {}) },
           });
           session.sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
           const unsubscribe = session.subscribe((event) => {
@@ -244,10 +244,10 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
               session.sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
               // Capture the actual live extension-tool scope AFTER original
               // pi-subagents installed its allow/deny policy.
-              const tools = session.getActiveToolNames().filter((name) => !["Agent", "SubagentWorkflow", "get_subagent_result", "steer_subagent", "subagent_tasks"].includes(name));
+              const tools = session.getActiveToolNames();
               const entries = session.sessionManager.getEntries() as unknown as SessionEntry[];
               const meta = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
-              if (meta?.type === "custom") session.sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, { ...meta.data as object, resourceSnapshot: { version: 1, appendSystemPrompt: [], tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt } });
+              if (meta?.type === "custom") session.sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, { ...meta.data as object, resourceSnapshot: { version: info.resourcePolicy ? 2 : 1, appendSystemPrompt: [], tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt, ...(info.resourcePolicy ? { policy: info.resourcePolicy } : {}) } });
             }
             if (event.type === "agent_settled") setImmediate(() => { if (!activation.closed) persistTerminal(); });
           });
@@ -308,7 +308,17 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
       try {
         pi.on("session_shutdown", shutdown);
         native.configureDesktopHost(host);
-        native.default(pi);
+        if (!restoredPolicy) native.default(pi);
+        else {
+          let restoredTools: { install(session: AgentSession): () => void; dispose(): void } | undefined;
+          pi.on("session_start", (_event, ctx) => {
+            const owner = dependencies.getRootSession?.(ctx.sessionManager.getSessionId());
+            if (!owner) throw new Error("Restored subagent owner session is unavailable");
+            restoredTools = native.createRestoredSubagentTools(pi, restoredPolicy, owner.sessionId);
+            restoredTools!.install(owner);
+          });
+          pi.on("session_shutdown", () => restoredTools?.dispose());
+        }
         releases.push(pi.events.on("subagents:completed", () => { if (!activation.closed) persistTerminal(); }), pi.events.on("subagents:failed", () => { if (!activation.closed) persistTerminal(); }));
         pi.on("session_start", (_event, ctx) => {
           if (activation.closed) return;

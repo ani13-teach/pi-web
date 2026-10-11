@@ -103,6 +103,7 @@ Return only the answer, in exactly the shape the prompt asks for — no preamble
 
     const bridge = `<sub_agent_context>
 You are operating as a sub-agent invoked to handle a specific task.
+Your tool declarations are authoritative. The inherited parent instructions may mention tools disabled by this agent's settings; do not assume those tools are available. Tools not allowed directly are not available through codemode either.
 - Use the read tool instead of cat/head/tail
 - Use the edit tool instead of sed/awk
 - Use the write tool instead of echo/heredoc

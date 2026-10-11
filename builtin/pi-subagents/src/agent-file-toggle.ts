@@ -249,7 +249,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
   if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
   if (cfg.allowedSubagents !== undefined) {
-    fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
+    fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === false ? "false" : cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.length ? cfg.allowedSubagents.join(", ") : "false"}`);
   }
   fmFields.push(`prompt_mode: ${cfg.promptMode}`);
   if (cfg.extensions === false) fmFields.push("extensions: false");

@@ -1,9 +1,22 @@
-import type { Model } from "@earendil-works/pi-ai";
+import { join } from "node:path";
+import { writeFileSync } from "node:fs";
+import type { AgentManager } from "./agent-manager.js";
+import { TaskCoordinator, validateAssignmentInput, type AssignmentInput } from "./task-coordination.js";
+import { compiledResultReport, renderAgentResult } from "./result-protocol.js";
+import { createWorkflowHost, type WorkflowHostOptions } from "./workflow/host.js";
+import { extractMeta } from "./workflow/meta.js";
+import { runWorkflow, MAX_SCRIPT_LENGTH, type WorkflowGateResult } from "./workflow/runtime.js";
+import { collapse } from "./workflow/progress.js";
+import { resolveWorkflowScript } from "./workflow/saved.js";
+import { appendJournal, readJournal } from "./workflow/journal.js";
+import { createWorkflowTask, completeWorkflowTask, failWorkflowTask, updateWorkflowProgressBatch, workflowRunId, workflowResultText, type WorkflowTask } from "./workflow/task.js";
+import { sessionTaskDir } from "./output-file.js";
 import {
   type AgentSession,
   defineTool,
   type ExtensionAPI,
   type ExtensionContext,
+  type ExtensionToolContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -28,10 +41,7 @@ import {
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type {
   AgentConfig,
-  AgentInvocation,
   AgentRecord,
-  IsolationMode,
-  ThinkingLevel,
 } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
@@ -47,50 +57,12 @@ let maxSubagentDepth = 2;
 export function getMaxSubagentDepth(): number { return maxSubagentDepth; }
 export function setMaxSubagentDepth(n: number): void { maxSubagentDepth = Math.max(0, Math.floor(n)); }
 
-const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
+const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent", "subagent_tasks", "SubagentWorkflow"] as const;
 
-interface NestedSpawnOptions {
-  description: string;
-  model?: Model<any>;
-  maxTurns?: number;
-  isolated?: boolean;
-  inheritContext?: boolean;
-  thinkingLevel?: ThinkingLevel;
-  isBackground?: boolean;
-  isolation?: IsolationMode;
-  invocation?: AgentInvocation;
-  signal?: AbortSignal;
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
-  onSessionCreated?: (session: AgentSession) => void;
-  depth: number;
-  parentAgentId: string;
-  maxSubagentDepth: number;
-  configCwd?: string;
-  rootSessionId?: string;
-}
+type NestedSpawnOptions = Parameters<AgentManager["spawn"]>[4];
 
-export interface NestedAgentManager {
-  spawn(
-    pi: ExtensionAPI,
-    ctx: ExtensionContext,
-    type: string,
-    prompt: string,
-    options: NestedSpawnOptions,
-  ): string;
-  /** Resolves once the spawned agent is running; rejects on a startup failure. */
-  awaitStartup(id: string): Promise<void>;
-  spawnAndWait(
-    pi: ExtensionAPI,
-    ctx: ExtensionContext,
-    type: string,
-    prompt: string,
-    options: Omit<NestedSpawnOptions, "isBackground">,
-    /** Fires synchronously after spawn, before the session exists — where the transcript is attached. */
-    onSpawned?: (id: string) => void,
-  ): Promise<{ id: string; record: AgentRecord }>;
-  getRecord(id: string): AgentRecord | undefined;
-  resume(id: string, prompt: string, signal?: AbortSignal): Promise<AgentRecord | undefined>;
-}
+export interface NestedAgentManager extends Pick<AgentManager,
+  "spawn" | "awaitStartup" | "spawnAndWait" | "getRecord" | "resume" | "abort"> {}
 
 export interface NestedToolContext {
   manager: NestedAgentManager;
@@ -98,14 +70,55 @@ export interface NestedToolContext {
   parentAgentId: string;
   depth: number;
   maxSubagentDepth: number;
-  /** "all" = any enabled agent; string[] = only those types. Never empty. */
-  allowedSubagents: "all" | string[];
+  /** false = off; "all" = any enabled agent; string[] = only those types. */
+  allowedSubagents: false | "all" | string[];
+  /** Workflow feature switch, copied from the root registration policy. */
+  workflowsEnabled?: boolean;
+  /** Optional host override; otherwise gates use the owner's guarded ctx.executeTool("bash"). */
+  executeWorkflowGate?: WorkflowHostOptions["executeGate"];
   /** Root used for agent/config discovery; may differ from the agent's working directory. */
   configCwd: string;
 }
 
 function textResult(text: string, isError = false) {
   return { content: [{ type: "text" as const, text }], isError, details: {} };
+}
+
+export async function executeNestedWorkflowGate(
+  ctx: ExtensionToolContext,
+  command: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<WorkflowGateResult> {
+  try {
+    signal?.throwIfAborted();
+    if (typeof ctx.executeTool !== "function") {
+      return { ok: false, output: "Owner context has no guarded executeTool; workflow gate cannot run safely." };
+    }
+    // Git Bash accepts C:/... and //server/share, not PowerShell syntax.
+    // Preserve literal POSIX backslashes unless this is a Windows path.
+    const shellCwd = /^[a-z]:[\\/]/i.test(cwd) || cwd.startsWith("\\\\")
+      ? cwd.replace(/\\/g, "/") : cwd;
+    const quotedCwd = `'${shellCwd.replace(/'/g, "'\\''")}'`;
+    const outcome = await ctx.executeTool("bash", {
+      command: `cd -- ${quotedCwd} && ${command}`,
+      timeout: 600,
+    }, { signal });
+    const structured = outcome.result.structuredContent;
+    const fields = structured !== null && typeof structured === "object" && !Array.isArray(structured)
+      ? structured as Record<string, unknown> : undefined;
+    const exitCode = fields?.exit_code;
+    const text = outcome.result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+    const output = [...new Set([text, typeof fields?.output === "string" ? fields.output : ""].filter(Boolean))].join("\n");
+    const failed = outcome.isError || outcome.result.isError === true;
+    if (exitCode === 0 && !failed) return { ok: true, output };
+    const reason = typeof exitCode === "number" && Number.isInteger(exitCode)
+      ? `Workflow gate ${failed ? "failed or was denied" : "failed"} (bash exit_code=${exitCode}).`
+      : "Workflow gate failed: bash returned no verified numeric exit_code (tool unavailable, denied, or incomplete).";
+    return { ok: false, output: [reason, output].filter(Boolean).join("\n") };
+  } catch (error) {
+    return { ok: false, output: `Workflow gate could not execute safely: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): record is AgentRecord {
@@ -129,21 +142,55 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   if (record.status === "error") {
     return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
   }
+  if (record.runSettled === false && record.status !== "stopped") {
+    return `Agent ${record.id} is still settling (${record.status}); its final result is not ready.`;
+  }
   if (record.status === "queued" || record.status === "running") {
     return `Agent ${record.id} is ${record.status}.`;
   }
   // A truncated run must not read as a finished one. The top-level path carries
   // this in its result headline; a nested result has no headline, so the note
   // leads — appended, it would look like part of the child's own output.
-  const text = record.result?.trim() || record.error?.trim() || "No output.";
+  const text = record.structuredJson
+    ? renderAgentResult(record, "summary")
+    : record.result?.trim() || record.error?.trim() || "No output.";
   const note = position === "inline"
     ? getForegroundOutcomeNote(record.status)
     : getStatusNote(record.status);
   return note ? `Nested agent${note}.\n\n${text}` : text;
 }
 
+export interface NestedSubagentTools extends Array<ToolDefinition> {
+  /** Install after SDK creation, before the first prompt. Release on disposal, not settlement. */
+  install(session: AgentSession): () => void;
+  dispose(): void;
+}
+
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
-export function createNestedSubagentTools(context: NestedToolContext): ToolDefinition[] {
+export function createNestedSubagentTools(context: NestedToolContext): NestedSubagentTools {
+  const coordinator = new TaskCoordinator();
+  const workflows = new Map<string, WorkflowTask>();
+  const workflowRecords = new Map<string, AgentRecord>();
+  const ownedChildren = new Set<string>();
+  let installedSession: AgentSession | undefined;
+  let releaseSession: (() => void) | undefined;
+  let closed = false;
+  const assignmentInput = (params: { task_key?: string; scope?: string[]; deliverable?: string; input_version?: string; independent_work?: string[]; required?: boolean }): AssignmentInput => ({
+    taskKey: params.task_key, scope: params.scope, deliverable: params.deliverable,
+    inputVersion: params.input_version, independentWork: params.independent_work, required: params.required,
+  });
+  const register = (record: AgentRecord, params: Parameters<typeof assignmentInput>[0]) => {
+    record.resultConsumed = false;
+    coordinator.register(record, assignmentInput(params));
+  };
+  const accountUsage: NonNullable<NestedSpawnOptions["onAssistantUsage"]> = usage => {
+    for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
+      const ancestor = context.manager.getRecord(id);
+      if (!ancestor) break;
+      addUsage(ancestor.lifetimeUsage, usage);
+      id = ancestor.parentAgentId;
+    }
+  };
   // Agents resolve from a registry built for THIS branch's config root (under
   // worktree isolation, the copy). Never via registerAgents — that is
   // process-global state shared with the main session and every other agent.
@@ -151,7 +198,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   const allowedTypesIn = (registry: Map<string, AgentConfig>): Set<string> | undefined =>
     context.allowedSubagents === "all"
       ? undefined
-      : new Set(context.allowedSubagents.map(name => resolveTypeIn(registry, name) ?? name));
+      : new Set((context.allowedSubagents || []).map(name => resolveTypeIn(registry, name) ?? name));
   const availableIn = (registry: Map<string, AgentConfig>): string[] => {
     const allowed = allowedTypesIn(registry);
     return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
@@ -172,29 +219,49 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       max_turns: Type.Optional(Type.Number({ minimum: 1 })),
       run_in_background: Type.Optional(
         Type.Boolean({
-          description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true only for work you will collect later with get_subagent_result; a detached child is stopped when you finish.",
+          description: "With a session coordinator, defaults to background and joins at the next request. Without it, defaults to foreground. Explicit background children must be collected before finishing.",
         }),
       ),
       resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
       isolated: Type.Optional(Type.Boolean()),
       inherit_context: Type.Optional(Type.Boolean()),
+      task_key: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
+      scope: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 12 })),
+      deliverable: Type.Optional(Type.String({ minLength: 1, maxLength: 600 })),
+      input_version: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
+      independent_work: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 8 })),
+      required: Type.Optional(Type.Boolean()),
+      result_format: Type.Optional(Type.Union([Type.Literal("structured"), Type.Literal("text")])),
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+      if (closed) return textResult("Nested orchestration is closed.", true);
+      try { validateAssignmentInput(assignmentInput(params)); }
+      catch (error) { return textResult(error instanceof Error ? error.message : String(error), true); }
       if (params.resume) {
         const existing = context.manager.getRecord(params.resume);
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
-        const resumed = await context.manager.resume(params.resume, params.prompt, signal);
-        return resumed
-          ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
-          : textResult(`Failed to resume nested agent "${params.resume}".`, true);
+        if (existing.status === "running" || existing.status === "queued") return textResult("Nested agent is still running; use steer_subagent.", true);
+        const format = existing.resultFormat ?? (existing.structuredJson ? "structured" : "text");
+        if (params.result_format && params.result_format !== format) return textResult("Cannot switch result_format on resume; start a new agent.", true);
+        register(existing, params);
+        try {
+          const resumed = await context.manager.resume(params.resume, params.prompt, signal);
+          coordinator.consumeRecord(resumed ?? existing);
+          return resumed
+            ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
+            : textResult(`Failed to resume nested agent "${params.resume}".`, true);
+        } catch (error) {
+          coordinator.consumeRecord(existing);
+          return textResult(error instanceof Error ? error.message : String(error), true);
+        }
       }
 
-      if (context.depth >= context.maxSubagentDepth) {
+      if (context.allowedSubagents === false || context.depth >= context.maxSubagentDepth) {
         return textResult(
-          `Nested subagent call blocked (depth=${context.depth}, max=${context.maxSubagentDepth}). Complete the task directly.`,
+          `Nested subagent call blocked by delegation policy or depth (depth=${context.depth}, max=${context.maxSubagentDepth}). Complete the task directly.`,
           true,
         );
       }
@@ -222,11 +289,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       }
 
       const config = getAgentConfigIn(registry, resolvedType);
-      // Foreground regardless of `backgroundByDefault` — see the reasoning on
-      // ResolveOptions. An explicit `true` here still opts in.
+      // Foreground without an installed gate; coordinated background otherwise.
+      // Agent configuration and explicit caller overrides retain their precedence.
       const invocation = resolveAgentInvocationConfig(config, params, {
         worktreeAllowed: isWorktreeIsolationEnabled(),
-        defaultRunInBackground: false,
+        defaultRunInBackground: installedSession !== undefined,
       });
       let model = ctx.model;
       if (invocation.modelInput) {
@@ -280,14 +347,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         // great-grandchild from the only record anyone can see. (The live
         // widget/fleet counters read their own per-agent activity tracker, which
         // still sees only the top-level agent's own turns.)
-        onAssistantUsage: (usage) => {
-          for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
-            const ancestor = context.manager.getRecord(id);
-            if (!ancestor) break;
-            addUsage(ancestor.lifetimeUsage, usage);
-            id = ancestor.parentAgentId;
-          }
-        },
+        onAssistantUsage: accountUsage,
+        structuredOutput: params.result_format === "structured" || (installedSession && params.result_format !== "text") ? compiledResultReport : undefined,
         depth: childDepth,
         parentAgentId: context.parentAgentId,
         maxSubagentDepth: context.maxSubagentDepth,
@@ -308,11 +369,18 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           ? rootSessionId
           : undefined;
       let childId: string | undefined;
+      // Startup failure can remove the manager entry after coordination registered
+      // it. Keep the same object so the next request cannot wait on that orphan.
+      let registeredRecord: AgentRecord | undefined;
       const attachTranscript = (id: string): void => {
         childId = id;
-        if (transcriptSessionId === undefined) return;
         const rec = context.manager.getRecord(id);
         if (!rec) return;
+        registeredRecord = rec;
+        ownedChildren.add(id);
+        rec.resultFormat = options.structuredOutput ? "structured" : "text";
+        register(rec, params);
+        if (transcriptSessionId === undefined) return;
         rec.outputFile = createOutputFilePath(context.configCwd, id, transcriptSessionId);
         writeInitialEntry(rec.outputFile, id, params.prompt, ctx.cwd);
       };
@@ -344,7 +412,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           // Worktree isolation starts the agent asynchronously; surface its
           // failure as a tool error, like the synchronous throw used to.
           await context.manager.awaitStartup(id);
-          return textResult(`Nested agent started in background. Agent ID: ${id}`);
+          return textResult(`Nested agent started in background. Agent ID: ${id}\nTask registered; ${installedSession ? "the next model request waits for required results and adopts them" : "use get_subagent_result wait:true before finishing"}. Do not repeat delegated work.`);
         }
 
         const { record } = await context.manager.spawnAndWait(
@@ -355,9 +423,30 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           { ...options, signal },
           attachTranscript,
         );
+        coordinator.consumeRecord(record);
         return textResult(formatRecord(record, "inline"), record.status === "error");
       } catch (err) {
-        return textResult(err instanceof Error ? err.message : String(err), true);
+        const message = err instanceof Error ? err.message : String(err);
+        if (registeredRecord) {
+          const record = registeredRecord;
+          if (context.manager.getRecord(record.id) !== record && record.promise === undefined) {
+            // No run was started; Agent already returns this failure inline.
+            record.status = "error";
+            record.error = message;
+            record.runSettled = true;
+            record.completedAt ??= Date.now();
+          }
+          // A transcript/wiring error may occur after a child actually started.
+          // Do not consume that live child's result or detach its output stream.
+          if (record.status !== "running" && record.status !== "queued" && record.runSettled !== false) {
+            coordinator.consumeRecord(record);
+            ownedChildren.delete(record.id);
+            try { record.outputCleanup?.(); } catch { /* best-effort transcript detach */ }
+            record.outputCleanup = undefined;
+          }
+        }
+        coordinator.changed();
+        return textResult(message, true);
       }
     },
   });
@@ -369,9 +458,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     parameters: Type.Object({
       agent_id: Type.String(),
       wait: Type.Optional(Type.Boolean()),
+      view: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("evidence"), Type.Literal("full")])),
     }),
     execute: async (_toolCallId, params, signal) => {
-      const record = context.manager.getRecord(params.agent_id);
+      if (closed) return textResult("Nested orchestration is closed.", true);
+      const record = workflowRecords.get(params.agent_id) ?? context.manager.getRecord(params.agent_id);
       if (!ownsRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
@@ -379,13 +470,14 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // call is aborted) stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
+      if (params.wait && (record.status === "queued" || record.status === "running" || (record.runSettled === false && record.status !== "stopped"))) {
         while (record.status === "queued") {
           await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
         }
         if (record.promise) await abortable(record.promise, signal);
       }
-      return textResult(formatRecord(record, "fetched"), record.status === "error");
+      if (record.status !== "running" && record.status !== "queued" && record.runSettled !== false) coordinator.consumeRecord(record);
+      return textResult(params.view ? renderAgentResult(record, params.view) : formatRecord(record, "fetched"), record.status === "error");
     },
   });
 
@@ -398,6 +490,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       message: Type.String(),
     }),
     execute: async (_toolCallId, params) => {
+      if (closed) return textResult("Nested orchestration is closed.", true);
       const record = context.manager.getRecord(params.agent_id);
       if (!ownsRecord(record, context.parentAgentId) || record.status !== "running") {
         return textResult(`Running nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
@@ -418,5 +511,253 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     },
   });
 
-  return [agentTool, resultTool, steerTool];
+  const tasksTool = defineTool({
+    name: NESTED_TOOL_NAMES[3],
+    label: "Nested Subagent Tasks",
+    description: "Coordinate only this owner's tasks: independent grants one independent request batch; wait revokes that grant; finish requires adopted required results.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("independent"), Type.Literal("wait"), Type.Literal("finish")]),
+      work: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { minItems: 1, maxItems: 8 })),
+    }),
+    execute: async (_id, params, signal) => {
+      if (closed) return textResult("Nested orchestration is closed.", true);
+      try {
+        if (params.action === "independent") {
+          if (!installedSession) throw new Error("Request coordination is not installed; collect children with get_subagent_result wait:true.");
+          coordinator.allowIndependent(params.work ?? []);
+        } else if (params.action === "wait") {
+          coordinator.requireWait();
+          // A non-SDK host still gets a real join, rather than an inert tool.
+          if (!installedSession) {
+            await coordinator.waitForRequest(signal);
+            const deliveries = coordinator.deliveries();
+            for (const delivery of deliveries) coordinator.consume(delivery);
+            return textResult(deliveries.map(delivery => delivery.content).join("\n\n") || "No required results outstanding.");
+          }
+        } else coordinator.finish();
+        return textResult(coordinator.snapshot() || "No outstanding delegated work.");
+      } catch (error) { return textResult(error instanceof Error ? error.message : String(error), true); }
+    },
+  });
+
+  const workflowTool = defineTool({
+    name: NESTED_TOOL_NAMES[4],
+    label: "Nested Subagent Workflow",
+    description: "Run the existing deterministic workflow runtime, owned only by this agent. Requires explicit user opt-in to workflows. Uses the same agent allowlist and depth cap as Agent. Background runs join at this owner's next request; results are available via get_subagent_result. Scripts use export const meta={name,description}; agent(), parallel(), pipeline(), workflow(), log(), phase(), args and budget. Shell gates call this owner's bash via ctx.executeTool, enforcing its tool permissions and safety handlers.",
+    parameters: Type.Object({
+      script: Type.Optional(Type.String({ maxLength: MAX_SCRIPT_LENGTH })),
+      scriptPath: Type.Optional(Type.String()),
+      name: Type.Optional(Type.String()),
+      args: Type.Optional(Type.Any()),
+      resumeFromRunId: Type.Optional(Type.String({ pattern: "^wf_[a-z0-9-]{6,}$" })),
+      title: Type.Optional(Type.String()),
+      description: Type.Optional(Type.String()),
+      required: Type.Optional(Type.Boolean()),
+      independent_work: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 8 })),
+    }),
+    execute: async (toolCallId, params, signal, _onUpdate, ctx) => {
+      if (closed || context.workflowsEnabled === false || context.allowedSubagents === false || context.depth >= context.maxSubagentDepth) {
+        return textResult("Nested workflow blocked by feature, delegation policy or depth limit.", true);
+      }
+      try {
+        validateAssignmentInput(assignmentInput(params));
+        const prior = params.resumeFromRunId === undefined ? undefined : workflows.get(params.resumeFromRunId);
+        if (params.resumeFromRunId && (!prior || prior.status === "running")) {
+          return textResult("Workflow resume target not found, still running, or not owned by this parent.", true);
+        }
+        const resolved = resolveWorkflowScript(
+          prior && params.script === undefined && params.scriptPath === undefined && params.name === undefined
+            ? { scriptPath: prior.scriptPath, script: prior.script } : params, ctx.cwd,
+        );
+        if (!resolved.ok) return textResult(resolved.message, true);
+        const meta = extractMeta(resolved.script).meta;
+        const id = workflowRunId();
+        let scriptPath: string | undefined;
+        let journalPath: string | undefined;
+        try {
+          // Child session id isolates persisted artifacts from the root and siblings.
+          const dir = sessionTaskDir(context.configCwd, ctx.sessionManager.getSessionId());
+          scriptPath = join(dir, `${id}.workflow.js`);
+          writeFileSync(scriptPath, resolved.script, "utf-8");
+          journalPath = join(dir, `${id}.workflow.jsonl`);
+        } catch { scriptPath = undefined; journalPath = undefined; }
+        const task = createWorkflowTask({
+          id, script: resolved.script, scriptPath: resolved.scriptPath ?? scriptPath,
+          args: params.args, meta, toolCallId, journalPath,
+          ...(prior?.journalPath ? { replay: readJournal(prior.journalPath), resumedFrom: prior.id } : {}),
+        });
+        workflows.set(id, task);
+        const record: AgentRecord = {
+          id, type: "workflow", description: meta.description, status: "running", runSettled: false,
+          parentAgentId: context.parentAgentId, depth: context.depth,
+          maxSubagentDepth: context.maxSubagentDepth, toolUses: 0, startedAt: Date.now(),
+          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 }, compactionCount: 0,
+          abortController: task.abortController,
+        };
+        workflowRecords.set(id, record);
+        register(record, params);
+        // Foreground tool cancellation follows the workflow, background cancellation
+        // follows the owner's lifetime instead (not a completed tool-call signal).
+        const forwardAbort = () => task.abortController.abort(signal?.reason);
+        const foreground = installedSession === undefined;
+        if (foreground) signal?.addEventListener("abort", forwardAbort, { once: true });
+        if (foreground && signal?.aborted) forwardAbort();
+        record.promise = (async () => {
+          try {
+            const result = await runWorkflow({
+              script: task.script, args: task.args, signal: task.abortController.signal,
+              host: createWorkflowHost({
+                pi: context.pi, ctx, manager: context.manager,
+                signal: task.abortController.signal, workflowId: id,
+                rootSessionId: context.manager.getRecord(context.parentAgentId)?.rootSessionId,
+                nested: {
+                  parentAgentId: context.parentAgentId, depth: context.depth,
+                  maxSubagentDepth: context.maxSubagentDepth, configCwd: context.configCwd,
+                  allowedSubagents: context.allowedSubagents, onAssistantUsage: accountUsage,
+                },
+                executeGate: context.executeWorkflowGate ?? ((command, cwd, gateSignal) => executeNestedWorkflowGate(ctx, command, cwd, gateSignal)),
+              }),
+              onProgress: entries => {
+                updateWorkflowProgressBatch(task, entries);
+                if (!closed) for (const entry of entries) {
+                  if (entry.type === "workflow_agent" && entry.recordId
+                    && ownsRecord(context.manager.getRecord(entry.recordId), context.parentAgentId)) ownedChildren.add(entry.recordId);
+                }
+              },
+              journal: {
+                ...(task.replay ? { entries: task.replay } : {}),
+                ...(journalPath ? { append: entry => appendJournal(journalPath!, entry) } : {}),
+              },
+            });
+            completeWorkflowTask(task, result);
+            record.status = result.status === "completed" ? "completed" : result.status === "killed" ? "stopped" : "error";
+          } catch (error) {
+            failWorkflowTask(task, error instanceof Error ? error.message : String(error));
+            record.status = "error";
+          } finally {
+            if (foreground) signal?.removeEventListener("abort", forwardAbort);
+            const failures = collapse(task.workflowProgress).agents.filter(agent => agent.state === "error");
+            const failureNote = failures.length
+              ? `Workflow script settled with ${failures.length} failed child call(s):\n${failures.slice(0, 6).map(agent => `${agent.label}: ${(agent.error ?? "Child failed").slice(0, 400)}`).join("\n")}\n\n`
+              : "";
+            record.result = failureNote + workflowResultText(task);
+            record.error = task.error;
+            record.runSettled = true;
+            record.completedAt = Date.now();
+            coordinator.changed();
+          }
+          return record.result!;
+        })();
+        if (foreground) {
+          await record.promise;
+          coordinator.consumeRecord(record);
+          return textResult(formatRecord(record, "inline"), record.status === "error");
+        }
+        return textResult(`Nested workflow "${meta.name}" started. Agent ID: ${id}\nThe next owner request waits for required results. Use get_subagent_result for targeted verification.`);
+      } catch (error) { return textResult(error instanceof Error ? error.message : String(error), true); }
+    },
+  });
+
+  const dispose = () => {
+    if (closed) return;
+    closed = true;
+    coordinator.dispose();
+    for (const task of workflows.values()) task.abortController.abort(new Error("Nested owner disposed"));
+    for (const id of ownedChildren) {
+      const record = context.manager.getRecord(id);
+      if (ownsRecord(record, context.parentAgentId)
+        && (record.status === "running" || record.status === "queued" || record.runSettled === false)) context.manager.abort(id);
+    }
+    ownedChildren.clear();
+    workflows.clear();
+    workflowRecords.clear();
+    releaseSession?.();
+    releaseSession = undefined;
+    installedSession = undefined;
+  };
+  const install = (session: AgentSession): (() => void) => {
+    if (closed) throw new Error("Nested orchestration is closed");
+    if (installedSession) {
+      if (installedSession !== session) throw new Error("Nested tools cannot be shared between owner sessions");
+      return dispose;
+    }
+    installedSession = session;
+    const stop = new AbortController();
+    let released = false;
+    const previousRequest = session.agent.prepareRequest;
+    const previousFinish = session.agent.finishTurn;
+    const gate: NonNullable<typeof previousRequest> = async (request, signal) => {
+      if (released) return (await previousRequest?.(request, signal)) ?? undefined;
+      const combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+      await coordinator.waitForRequest(combined);
+      combined.throwIfAborted();
+      for (const delivery of coordinator.deliveries()) {
+        session.sessionManager.appendCustomMessageEntry("subagent-notification", delivery.content, false, {
+          displayOrigin: "pi-subagents", agentId: delivery.record.id,
+          assignment: { ...delivery.assignment, delivery: "consumed" },
+        });
+        coordinator.consume(delivery);
+      }
+      const prepared = await previousRequest?.(request, combined);
+      combined.throwIfAborted();
+      const state = coordinator.snapshot();
+      const current = prepared?.context ?? request.context;
+      return { ...prepared, context: state ? { ...current, messages: [...current.messages, {
+        role: "custom" as const, customType: "subagent-task-state", content: state, display: false, timestamp: Date.now(),
+      }] } : current };
+    };
+    const finish: NonNullable<typeof previousFinish> = async (turn, signal) => {
+      const decision = await previousFinish?.(turn, signal);
+      if (released || decision?.action === "end") return decision ?? undefined;
+      if (!turn.message.content.some(block => block.type === "toolCall") && coordinator.needsContinuation()) {
+        coordinator.requireWait();
+        session.sessionManager.appendCustomMessageEntry("subagent-task-state",
+          "Required delegated results are outstanding. Adopt them at the next request before finalizing.", false);
+        return { action: "continue" };
+      }
+      return decision ?? undefined;
+    };
+    session.agent.prepareRequest = gate;
+    session.agent.finishTurn = finish;
+    const unsubscribe = session.subscribe(event => {
+      if (event.type === "message_start" && event.message.role === "user") coordinator.begin();
+      if (event.type === "agent_settled") {
+        coordinator.end();
+        for (const task of workflows.values()) if (task.status === "running") task.abortController.abort();
+      }
+    });
+    // Observe admitted input, not preflight events which other extensions may refuse.
+    const originalPrompt = session.prompt, originalSteer = session.steer, originalFollowUp = session.followUp;
+    const prompt: typeof session.prompt = (text, options) => originalPrompt.call(session, text, {
+      ...options, preflightResult(disposition) {
+        if (!released && disposition === "queued" && options?.source !== "extension") coordinator.acceptedInput();
+        options?.preflightResult?.(disposition);
+      },
+    });
+    const steer: typeof session.steer = async (text, images, options) => {
+      const disposition = await originalSteer.call(session, text, images, options);
+      if (!released && disposition === "queued" && options?.source !== "extension") coordinator.acceptedInput();
+      return disposition;
+    };
+    const followUp: typeof session.followUp = async (text, images, options) => {
+      const disposition = await originalFollowUp.call(session, text, images, options);
+      if (!released && disposition === "queued" && options?.source !== "extension") coordinator.acceptedInput();
+      return disposition;
+    };
+    session.prompt = prompt; session.steer = steer; session.followUp = followUp;
+    releaseSession = () => {
+      released = true;
+      stop.abort(new Error("Nested coordination disposed"));
+      unsubscribe();
+      if (session.agent.prepareRequest === gate) session.agent.prepareRequest = previousRequest;
+      if (session.agent.finishTurn === finish) session.agent.finishTurn = previousFinish;
+      if (session.prompt === prompt) session.prompt = originalPrompt;
+      if (session.steer === steer) session.steer = originalSteer;
+      if (session.followUp === followUp) session.followUp = originalFollowUp;
+    };
+    return dispose;
+  };
+  const tools = context.allowedSubagents === false || context.depth >= context.maxSubagentDepth
+    ? [] : [agentTool, resultTool, steerTool, tasksTool, ...(context.workflowsEnabled === false ? [] : [workflowTool])];
+  return Object.assign(tools, { install, dispose });
 }

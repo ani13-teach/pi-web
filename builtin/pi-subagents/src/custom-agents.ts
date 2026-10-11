@@ -232,18 +232,20 @@ function parseCsvField(val: unknown): string[] | undefined {
 }
 
 /**
- * Parse the nested-delegation allowlist. Single field, default-off:
- * omitted/empty/"none"/`false` → undefined (no nested tools); "all"/"*"/`true`
- * → "all" (any enabled agent); csv → only the listed types.
+ * Parse the nested-delegation allowlist. Omitted/null inherits the default;
+ * explicit empty/"none"/`false` disables it; "all"/"*"/`true`
+ * means any enabled agent; csv limits delegation to those types.
  *
  * Booleans are accepted because `extensions:`/`skills:` take them and users
  * generalize: without this, YAML's `true` stringifies into an agent type
  * literally named "true", so the tools appear and every spawn is refused.
  */
-function parseAllowedSubagents(val: unknown): "all" | string[] | undefined {
-  if (typeof val === "boolean") return val ? "all" : undefined;
+function parseAllowedSubagents(val: unknown): false | "all" | string[] | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val === "boolean") return val ? "all" : false;
+  if (typeof val === "string" && /^(false|none|off|no)$/i.test(val.trim())) return false;
   const items = parseCsvField(val);
-  if (!items) return undefined;
+  if (!items) return false;
   return items.some(i => i === "*" || i.toLowerCase() === "all") ? "all" : items;
 }
 

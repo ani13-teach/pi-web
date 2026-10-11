@@ -115,6 +115,8 @@ export function BackupSettings() {
     let detail = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
     for (const secret of [exportPassword, confirmPassword, importPassword])
       if (secret) detail = detail.split(secret).join("[redacted]");
+    if (key === "backup.exportFailed" && detail.includes("EXPORT_MANIFEST_INVALID")) { setError(t("backup.exportManifestInvalid")); return; }
+    if (key === "backup.exportFailed" && detail.includes("EXPORT_SELF_CHECK_FAILED")) { setError(t("backup.exportSelfCheckFailed")); return; }
     setError(`${t(key)}${detail ? ` ${detail.slice(0, 800)}` : ""}`);
   };
   const discardScan = async () => {

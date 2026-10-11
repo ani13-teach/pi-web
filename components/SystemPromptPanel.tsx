@@ -14,10 +14,10 @@ export function SystemPromptPanel({ loading, prompt, translate }: Props) {
           <div className="system-prompt-text">{prompt}</div>
         ) : (
           <div className="system-prompt-empty">
-            {prompt === ""
-              ? translate("system.empty")
-              : loading
-                ? translate("system.loading")
+            {loading
+              ? translate("system.loading")
+              : prompt === ""
+                ? translate("system.empty")
                 : translate("system.load")}
           </div>
         )}

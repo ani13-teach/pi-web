@@ -2,7 +2,7 @@ import {
   SessionManager,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { closeSync, type Dirent, openSync, readSync } from "fs";
+import { closeSync, type Dirent, existsSync, openSync, readSync } from "fs";
 import { readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -294,7 +294,11 @@ function getPathToIdCache(): Map<string, string> {
 
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
-  if (cached) return cached;
+  if (cached && existsSync(cached)) return cached;
+  // Empty inspection runtimes may be reclaimed before Pi writes their file.
+  // Never pass their cached, nonexistent path to SessionManager.open(), which
+  // would silently create another session in the server's working directory.
+  if (cached) invalidateSessionPathCache(sessionId);
 
   const targetedPath = await findSessionPathById(sessionId);
   if (targetedPath) {
@@ -305,7 +309,10 @@ export async function resolveSessionPath(sessionId: string): Promise<string | nu
   // Unknown layouts, malformed candidates, and duplicate IDs retain the
   // existing authoritative catalogue scan instead of negative-caching a miss.
   await listAllSessions();
-  return getPathCache().get(sessionId) ?? null;
+  const resolved = getPathCache().get(sessionId);
+  if (resolved && existsSync(resolved)) return resolved;
+  if (resolved) invalidateSessionPathCache(sessionId);
+  return null;
 }
 
 export async function resolveSessionIdByPath(filePath: string): Promise<string | undefined> {

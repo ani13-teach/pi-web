@@ -242,7 +242,7 @@ export const enLocale: LocalePlugin = {
     "title.noMessages": "Send a message before naming this session",
     "title.generateSession": "Generate a session title",
     "system.prompt": "System prompt",
-    "system.empty": "System prompt is empty (tools are disabled)",
+    "system.empty": "System prompt is empty",
     "system.load": "System prompt has not loaded yet",
     "system.loading": "Loading system prompt…",
     "system.label": "System",

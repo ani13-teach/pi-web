@@ -5,7 +5,7 @@
  * Desktop built-ins override same-name user agents. Disabled agents cannot spawn.
  */
 
-import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { createCodingTools, createReadOnlyTools, createPowerShellTool } from "@earendil-works/pi-coding-agent";
 import { loadBuiltinAgents } from "./builtin-agents.js";
 import type { AgentConfig } from "./types.js";
 
@@ -18,7 +18,7 @@ import type { AgentConfig } from "./types.js";
  * operations we never invoke here — we read each tool's `.name` and discard it.
  */
 export const BUILTIN_TOOL_NAMES: string[] = [
-  ...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map((t) => t.name)),
+  ...new Set([...createCodingTools("."), ...createReadOnlyTools("."), ...(process.platform === "win32" ? [createPowerShellTool(".")] : [])].map((t) => t.name)),
 ];
 
 /** Unified runtime registry of all agents (defaults + user-defined). */

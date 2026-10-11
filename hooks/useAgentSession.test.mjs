@@ -94,7 +94,7 @@ test("opening System or Tools lazily starts a dormant session without sending a 
     source.indexOf("  useEffect(() => {\n    if (!onBranchDataChange) return;"),
   );
 
-  assert.match(loadSystemInfoSource, /sessionIdRef\.current \?\? await ensureNewSession\(\)/);
+  assert.match(loadSystemInfoSource, /const sid = await ensureNewSession\(\)/);
   assert.doesNotMatch(loadSystemInfoSource, /promoteNewSession\(\)/);
   assert.match(loadSystemInfoSource, /sendAgentCommand<AgentStateResponse>\(sid, \{ type: "get_state" \}\)/);
   assert.match(loadSystemInfoSource, /loadTools\(sid\)/);
@@ -114,7 +114,7 @@ test("opening System or Tools lazily starts a dormant session without sending a 
   );
 });
 
-test("explicit sends activate before the SSE handshake and prompts, while history command discovery stays dormant", () => {
+test("explicit sends and command inspection activate sessions while passive history stays dormant", () => {
   const activate = source.slice(source.indexOf("  const ensureRuntimeActive"), source.indexOf("  // Opening the System"));
   assert.match(activate, /type: "ensure_session"/);
   assert.match(activate, /result\?\.sessionId !== sid/);
@@ -130,8 +130,10 @@ test("explicit sends activate before the SSE handshake and prompts, while histor
   assert.ok(send.indexOf("await ensureEventsConnected(readySessionId, signal)") < send.indexOf("promptRequestStarted = true"));
   assert.match(send, /promptRequestStarted = true;\s*await sendAgentCommand\(sid/);
   const commands = source.slice(source.indexOf("  const loadSlashCommands"), source.indexOf("  const cancelEventStreamGrace"));
-  assert.match(commands, /if \(!sid \|\| !runtimeActiveRef\.current\)/);
-  assert.doesNotMatch(commands, /ensureNewSession|ensureRuntimeActive/);
+  assert.match(commands, /sid = await ensureNewSession\(signal\)/);
+  assert.match(commands, /await ensureRuntimeActive\(sid, signal\)/);
+  assert.ok(commands.indexOf("await ensureRuntimeActive(sid, signal)") < commands.indexOf('type: "get_commands"'));
+  assert.doesNotMatch(commands, /type: "prompt"|promoteNewSession|ensureEventsConnected/);
   const dormant = source.slice(source.indexOf('case "dormant"'), source.indexOf('case "connected"'));
   assert.match(dormant, /runtimeActiveRef\.current = false/);
   assert.doesNotMatch(dormant, /settleUiStage|agentRunningRef\.current = false|type: "end"/);

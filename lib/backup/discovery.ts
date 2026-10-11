@@ -6,24 +6,32 @@ import type { BackupResource, BackupRoot, Collection, ScanOptions, SourceEntry }
 import { BACKUP_SDK_VERSION } from "./runtime.ts";
 import { validateBackupUiState } from "../../shared/backup-preferences.ts";
 import { relativePath, within } from "./platform.ts";
+import { executableConfig, securityConfig, requiresExecutable } from "./resource-safety.ts";
 
 const MAX_TOTAL = 16 * 1024 ** 3, MAX_FILE = 8 * 1024 ** 3, MAX_ENTRIES = 100000;
-const dirs = ["skills", "extensions", "prompts", "themes", "agents", "desktop-agents", "workflows", "agent-memory", "sessions"];
+// New exports contain tool dependencies and settings, never conversation history.
+const dirs = ["skills", "extensions", "prompts", "themes", "agents", "desktop-agents", "workflows"];
+const projectInstructionFiles = new Set(["AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "SYSTEM.md", "APPEND_SYSTEM.md", "agent-tool-description.md"]);
 const files = ["settings.json", "models.json", "auth.json", "web-push.json", "subagents.json", "agent-tool-description.md", "AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "SYSTEM.md", "APPEND_SYSTEM.md", "automode.json", "automode.local.json", "automode.settings.json"];
 const excluded = /^(?:\.git|node_modules|\.cache|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.turbo|coverage|cache|caches|logs?|tmp|temp|backup-imports|\.backup-transactions|\.backup-restore-.+|\.pi-backup-.+)$/i;
 const assetPath = (rel: string) => rel.split("/").some(part=>/^(assets|references|fixtures|examples)$/i.test(part));
-const excludeEntry = (name: string, rel: string) => excluded.test(name) && (!assetPath(rel) || /^(?:\.git|node_modules|backup-imports|\.backup-transactions|\.backup-restore-.+|\.pi-backup-.+)$/i.test(name));
+const historyDirectory = /^(?:sessions?|session-history|chat-history|agent-memory(?:-local)?)$/i;
+const excludeEntry = (name: string, rel: string) => historyDirectory.test(name) || excluded.test(name) && (!assetPath(rel) || /^(?:\.git|node_modules|backup-imports|\.backup-transactions|\.backup-restore-.+|\.pi-backup-.+)$/i.test(name));
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
-const kindFor = (rel: string) => rel.includes("sessions") ? "session" : rel.includes("agent-memory") ? "memory" : /auth|credentials|web-push/.test(rel) ? "auth" : rel.endsWith("models.json") ? "models" : /settings|subagents|automode/.test(rel) ? "settings" : rel.includes("skill") ? "skills" : rel.includes("workflow") ? "workflows" : rel.includes("agent") ? "agents" : rel.includes("extension") ? "extensions" : rel.includes("theme") ? "themes" : rel.includes("prompt") ? "prompts" : "instructions";
-function commands(value: unknown): boolean {
-  if (typeof value === "string") return value.trimStart().startsWith("!");
-  if (Array.isArray(value)) return value.some(commands);
-  if (value && typeof value === "object") return Object.entries(value).some(([key, v]) => /^(command|mcpServers|permissions|automode|autoMode)$/.test(key) || commands(v));
-  return false;
-}
-function securityContent(value: unknown): boolean {
-  return !!value && typeof value === "object" && (Array.isArray(value) ? value.some(securityContent) : Object.entries(value).some(([key,v])=>/^(permissions|automode|autoMode)$/.test(key) || securityContent(v)));
-}
+const kindFor = (rel: string) => {
+  const name = path.posix.basename(rel);
+  if (/^(?:auth|web-push)\.json$/.test(name)) return "auth";
+  if (name === "models.json") return "models";
+  if (/^(?:settings|subagents|automode(?:\.(?:local|settings))?)\.json$/.test(name)) return "settings";
+  const parts = rel.split("/");
+  if (parts.includes("skills")) return "skills";
+  if (parts.includes("extensions")) return "extensions";
+  if (parts.includes("workflows")) return "workflows";
+  if (parts.includes("agents") || parts.includes("desktop-agents")) return "agents";
+  if (parts.includes("themes")) return "themes";
+  if (parts.includes("prompts")) return "prompts";
+  return "instructions";
+};
 async function config(p: string): Promise<Record<string, unknown>> {
   const s = await fs.lstat(p);
   if (!s.isFile() || s.isSymbolicLink() || s.size > 16 * 1024 ** 2) throw new Error("Unsafe/oversized configuration");
@@ -38,7 +46,65 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
   const home = path.resolve(o.homeDir ?? os.homedir()), agent = path.resolve(o.agentDir);
   const roots: BackupRoot[] = [], resources: BackupResource[] = [], entries: SourceEntry[] = [], warnings: string[] = [], blockers: string[] = [];
   const seen = new Set<string>(), realSeen = new Set<string>(); let total = 0;
-  const authorized = [agent, path.join(home, ".agents"), path.join(home, ".pi", "agent-memory"), ...(o.projectDirs ?? []).map(p => path.resolve(p)), ...(o.externalRoots ?? []).map(p => path.resolve(p))];
+  const authorized = [agent, path.join(home, ".agents"), ...(o.projectDirs ?? []).map(p => path.resolve(p)), ...(o.externalRoots ?? []).map(p => path.resolve(p))];
+  // Exclude known history roots even when a tool declaration or link points into them.
+  const historyRoots = new Set<string>();
+  async function excludeHistory(p: string) {
+    historyRoots.add(path.resolve(p));
+    const real = await fs.realpath(p).catch(() => null);
+    if (real) historyRoots.add(real);
+  }
+  for (const p of [path.join(agent, "sessions"), path.join(agent, "agent-memory"),
+    path.join(home, ".pi", "agent-memory"), ...(o.sessionDirs ?? []),
+    ...(o.projectDirs ?? []).flatMap(p => ["sessions", "agent-memory", "agent-memory-local"].map(d => path.join(p, ".pi", d)))])
+    await excludeHistory(p);
+  if (home === path.resolve(os.homedir()) && process.env.PI_CODING_AGENT_SESSION_DIR)
+    await excludeHistory(process.env.PI_CODING_AGENT_SESSION_DIR);
+  for (const base of [agent, ...(o.projectDirs ?? []).map(p => path.join(p, ".pi"))]) {
+    try {
+      const c = await config(path.join(base, "settings.json"));
+      if (typeof c.sessionDir === "string" && c.sessionDir) {
+        const value = c.sessionDir;
+        await excludeHistory(value.startsWith("~/") || value.startsWith("~\\") ? path.join(home, value.slice(2)) : path.resolve(base, value));
+      }
+    } catch { /* Standard configuration inspection reports invalid settings later. */ }
+  }
+  // Discover agent-specific history roots before traversing any tool tree.
+  const inspectedAgents = new Set<string>();
+  async function inspectAgentSessions(p: string, base: string, depth = 0): Promise<void> {
+    if (depth > 64) return;
+    const s = await exists(p); if (!s) return;
+    const real = await fs.realpath(p);
+    if (inspectedAgents.has(real)) return;
+    inspectedAgents.add(real);
+    const stat = await fs.stat(real);
+    if (stat.isDirectory()) {
+      if ([home, agent, ...(o.projectDirs ?? []), ...(o.applicationDir ? [o.applicationDir] : [])].some(root => path.resolve(root) === real) || real === path.parse(real).root) return;
+      for (const name of await fs.readdir(real))
+        if (!excludeEntry(name, name)) await inspectAgentSessions(path.join(real, name), base, depth + 1);
+    } else if (stat.isFile() && real.endsWith(".md") && stat.size < 256 * 1024) {
+      const content = await fs.readFile(real, "utf8");
+      const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)?.[1] ?? "";
+      const declared = /^session_dir:\s*["']?([^\r\n"']+)["']?\s*$/m.exec(frontmatter)?.[1]?.trim();
+      if (declared) await excludeHistory(declared.startsWith("~/") || declared.startsWith("~\\") ?
+        path.join(home, declared.slice(2)) : path.resolve(base, declared));
+    }
+  }
+  for (const p of [path.join(agent, "agents"), path.join(agent, "desktop-agents"), path.join(home, ".agents", "agents")])
+    await inspectAgentSessions(p, agent);
+  for (const p of o.projectDirs ?? [])
+    for (const folder of [".pi/agents", ".agents/agents"]) await inspectAgentSessions(path.join(p, folder), p);
+  for (const r of o.resourceSnapshot ?? []) if (r.kind === "agents") await inspectAgentSessions(r.path, agent);
+  const isHistory = (p: string) => [...historyRoots].some(root => within(root, p));
+  const wholeRoots = [home, agent, ...(o.projectDirs ?? []), ...(o.applicationDir ? [o.applicationDir] : [])];
+  const canonicalWholeRoots = new Set<string>();
+  for (const p of wholeRoots) {
+    canonicalWholeRoots.add(path.resolve(p));
+    const real = await fs.realpath(p).catch(() => null); if (real) canonicalWholeRoots.add(real);
+  }
+  const isWholeRoot = (p: string) => canonicalWholeRoots.has(p) || p === path.parse(p).root;
+  // Direct declarations/links can target a child of a history folder, not only its root.
+  const isHistoryName = (p: string) => p.split(/[\\/]/).some(part => historyDirectory.test(part));
   const rootMap = new Map<string, BackupRoot>();
   function addRoot(kind: BackupRoot["kind"], originalPath: string, label: string) {
     const identity = kind + ":" + originalPath + (kind === "external" ? ":" + label : "");
@@ -50,6 +116,7 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
   const homeRoot = addRoot("home", home, "Shared user tools");
   const safeTarget = async (p: string) => {
     const actual = await fs.realpath(p);
+    if (isHistory(actual)) return actual;
     if (!authorized.some(r => within(r, actual))) throw new Error("External link target requires explicit authorization: " + p);
     return actual;
   };
@@ -79,6 +146,8 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
     o.signal?.throwIfAborted(); if (depth > 64) throw new Error("Resource nesting limit exceeded");
     const s = await exists(p); if (!s) return;
     const actual = s.isSymbolicLink() ? await safeTarget(p) : await fs.realpath(p);
+    if (isHistory(actual) || isHistoryName(actual)) return;
+    if (isWholeRoot(actual)) throw new Error("Tool boundary cannot be an entire environment/project");
     if (visiting.has(actual)) throw new Error("Resource link cycle: " + rel);
     const st = await fs.lstat(actual);
     if (st.isFile()) {
@@ -98,44 +167,41 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
   async function addResource(r: BackupRoot, rel: string, p: string, explicitKind?: string) {
     const originalState = await exists(p); if (!originalState) return;
     const canonical = await fs.realpath(p);
+    if (isHistory(canonical) || isHistoryName(canonical) || historyDirectory.test(path.basename(rel))) return;
+    if (isWholeRoot(canonical)) { blockers.push("Tool boundary cannot be an entire environment/project: " + rel); return; }
     if (originalState.isSymbolicLink() && !authorized.some(root => within(root, canonical))) {
       if ([home, agent, ...(o.projectDirs ?? []), path.parse(canonical).root, ...(o.applicationDir ? [path.resolve(o.applicationDir)] : [])].some(root => path.resolve(root) === canonical)) { blockers.push("Link points at an entire environment/project: " + rel); return; }
       authorized.push(canonical); warnings.push("Linked tool contents included; confirm target ownership: " + canonical);
     }
     if (realSeen.has(canonical)) return;
     realSeen.add(canonical);
-    const kind = explicitKind ?? kindFor(rel), securityPolicy = /automode|auto-mode|trust\.json/.test(rel);
-    const res: BackupResource = { id: "resource-" + digest(r.id + ":" + rel).slice(0, 20), rootId: r.id, relativePath: rel, label: rel || path.basename(p), kind, executable: r.kind === "external" || ["skills", "extensions", "agents", "workflows", "prompts", "instructions"].includes(kind), sensitive: ["auth", "settings", "models", "session", "memory"].includes(kind), securityPolicy, availability: "offlineReady" };
+    const canonicalState = await fs.stat(canonical);
+    const fileKind = canonicalState.isFile() ? kindFor(rel) : undefined;
+    const kind = fileKind && ["settings", "models", "auth"].includes(fileKind) ? fileKind : explicitKind ?? kindFor(rel), securityPolicy = /automode|auto-mode|trust\.json/.test(rel);
+    const res: BackupResource = { id: "resource-" + digest(r.id + ":" + rel).slice(0, 20), rootId: r.id, relativePath: rel, label: rel || path.basename(p), kind, executable: requiresExecutable(r, rel, kind), sensitive: ["auth", "settings", "models", "session", "memory"].includes(kind), securityPolicy, availability: "offlineReady" };
     if (/\.(?:json)$/.test(rel) && ["settings", "models", "auth"].includes(kind)) {
-      try { const c = await config(p); if (securityContent(c)) res.securityPolicy=true; if (commands(c) || Array.isArray(c.extensions) && c.extensions.length > 0 || Array.isArray(c.packages) && c.packages.length > 0) res.executable = true; }
+      try { const c = await config(p); if (securityConfig(c)) res.securityPolicy=true; if (executableConfig(c)) res.executable = true; }
       catch (e) { blockers.push("Cannot inspect configuration " + rel + ": " + (e as Error).message); return; }
     }
     resources.push(res);
     try {
       await walk(r, res, p, rel);
-      if (kind === "agents" && p.endsWith(".md") && (await fs.stat(p)).size < 256 * 1024) {
-        const text = await fs.readFile(p,"utf8");
-        const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? "";
-        const declared = /^session_dir:\s*["']?([^\r\n"']+)["']?\s*$/m.exec(frontmatter)?.[1]?.trim();
-        if (declared) { const base = r.kind === "project" ? r.originalPath : agent; await external(path.resolve(base, declared.startsWith("~/") ? path.join(home,declared.slice(2)) : declared), "session"); }
-      }
     } catch (e) { o.signal?.throwIfAborted(); blockers.push((e as Error).message); }
   }
   async function standard(r: BackupRoot, base: string, project = false) {
-    for (const f of files) await addResource(r, project ? ".pi/" + f : f, path.join(base, project ? ".pi" : "", f));
-    for (const d of dirs.filter(d => !project || !["desktop-agents", "sessions"].includes(d))) {
+    for (const f of files.filter(f => !project || !projectInstructionFiles.has(f))) await addResource(r, project ? ".pi/" + f : f, path.join(base, project ? ".pi" : "", f));
+    for (const d of dirs.filter(d => !project || d !== "desktop-agents")) {
       const prefix = project ? ".pi/" : "";
       const folder = path.join(base, project ? ".pi" : "", d);
-      // Independently selectable tool units and session workspace buckets.
-      if (["skills", "extensions", "agents", "desktop-agents", "workflows", "prompts", "themes", "sessions"].includes(d)) {
+      // Independently selectable tool units; project source is never traversed.
+      if (["skills", "extensions", "agents", "desktop-agents", "workflows", "prompts", "themes"].includes(d)) {
         const st = await exists(folder); if (!st) continue;
         if (st.isSymbolicLink()) { await addResource(r, prefix + d, folder); continue; }
-        for (const item of (await fs.readdir(folder)).sort()) if (!excluded.test(item)) await addResource(r, prefix + d + "/" + item, path.join(folder, item));
+        for (const item of (await fs.readdir(folder)).sort()) if (!excludeEntry(item, prefix + d + "/" + item)) await addResource(r, prefix + d + "/" + item, path.join(folder, item));
       } else await addResource(r, prefix + d, folder);
     }
     if (project) {
-      for (const f of ["AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "skills-lock.json"]) await addResource(r, f, path.join(base, f));
-      await addResource(r, ".pi/agent-memory-local", path.join(base, ".pi", "agent-memory-local"));
+      await addResource(r, "skills-lock.json", path.join(base, "skills-lock.json"), "settings");
       for (const d of ["skills", "agents", "workflows"]) {
         const folder = path.join(base, ".agents", d), st = await exists(folder); if (!st) continue;
         for (const name of (await fs.readdir(folder)).sort()) await addResource(r, ".agents/" + d + "/" + name, path.join(folder, name), d);
@@ -144,8 +210,10 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
     await declarations(r, path.join(base, project ? ".pi" : "", "settings.json"), path.join(base, project ? ".pi" : ""));
   }
   async function external(p: string, kind: string) {
+    if (!["skills", "extensions", "prompts", "themes", "agents", "settings"].includes(kind)) return;
     const s = await exists(p); if (!s) { if (kind === "session") warnings.push("No saved sessions at declared root: " + p); else blockers.push("Declared resource unavailable: " + p); return; }
     const actual = await fs.realpath(p);
+    if (isHistory(actual) || isHistoryName(actual) || isHistoryName(p)) return;
     if (o.applicationDir && [path.resolve(o.applicationDir),path.resolve(o.applicationDir.replace("app.asar","app.asar.unpacked"))].some(root=>within(root,actual))) { warnings.push("Program-provided resource is not archived: " + path.basename(actual)); return; }
     if (kind === "extensions" && s.isFile()) {
       const normalized=actual.split(path.sep).join("/"), marker="/node_modules/", index=normalized.lastIndexOf(marker);
@@ -223,8 +291,7 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
       const root = addRoot("external", "", "Package dependency: " + sourceLabel + " (" + r.id + ")"); res.rootId = root.id; res.relativePath = "package-" + digest(source).slice(0, 16); resources.push(res);
       warnings.push(captured?.availability === "offlineReady" ? "Managed package source included; confirm mapping and activation: " + sourceLabel : "Package dependency requires review/reinstallation; managed source content is included when found: " + sourceLabel + ". No install command runs during backup or restore.");
     }
-    const sessionDir = c.sessionDir;
-    if (typeof sessionDir === "string" && sessionDir) await external(path.resolve(base, sessionDir), "session");
+    // sessionDir is configuration only; its history is intentionally not collected.
   }
   const st = await exists(agent); if (!st?.isDirectory() || st.isSymbolicLink()) throw new Error("Invalid agent directory");
   await standard(agentRoot, agent);
@@ -232,9 +299,9 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
     const folder = path.join(home, ".agents", d); if (!(await exists(folder))) continue;
     for (const name of (await fs.readdir(folder)).sort()) await addResource(homeRoot, ".agents/" + d + "/" + name, path.join(folder, name), d);
   }
-  for (const file of ["AGENTS.md","AGENTS.override.md","CLAUDE.md"]) await addResource(homeRoot,file,path.join(home,file),"instructions");
+
   await addResource(homeRoot, ".agents/.skill-lock.json", path.join(home, ".agents", ".skill-lock.json"), "settings");
-  await addResource(homeRoot, ".pi/agent-memory", path.join(home, ".pi", "agent-memory"), "memory");
+
   for (const project of o.projectDirs ?? []) {
     const p = path.resolve(project); const s = await exists(p); if (!s?.isDirectory() || s.isSymbolicLink()) throw new Error("Invalid selected project");
     await standard(addRoot("project", p, path.basename(p)), p, true);
@@ -247,16 +314,16 @@ export async function collectBackup(o: ScanOptions): Promise<Collection> {
     // ownership boundary exists. The owning project can be selected explicitly.
     if (!boundary) warnings.push("No Git boundary: only explicitly selected project tools are included; select an ancestor project if it owns additional tools.");
     if (boundary && boundary !== p) for (let current=path.dirname(p),depth=0; within(boundary,current) && depth<32;depth++,current=path.dirname(current)) {
-      for (const name of ["AGENTS.override.md","AGENTS.md","CLAUDE.md"]) if (await exists(path.join(current,name))) await external(path.join(current,name),"instructions");
+
       const skills = path.join(current,".agents","skills");
       if (await exists(skills)) for (const name of (await fs.readdir(skills)).sort()) await external(path.join(skills,name),"skills");
       if (current === boundary) break;
     }
   }
   for (const resource of o.resourceSnapshot ?? []) await external(resource.kind === "skills" && resource.baseDir ? resource.baseDir : resource.path, resource.kind);
-  for (const dir of o.sessionDirs ?? []) if (!within(path.join(agent, "sessions"), dir)) await external(dir, "session");
+  // sessionDirs from the running backend are not backup dependencies.
   warnings.push(...(o.resourceWarnings ?? []));
-  if (home === path.resolve(os.homedir()) && process.env.PI_CODING_AGENT_SESSION_DIR) await external(path.resolve(process.env.PI_CODING_AGENT_SESSION_DIR), "session");
+
   if (home === path.resolve(os.homedir()) && process.env.XDG_STATE_HOME) {
     const lock=path.join(process.env.XDG_STATE_HOME,"skills",".skill-lock.json"); if(await exists(lock)) await external(lock,"settings");
   }
