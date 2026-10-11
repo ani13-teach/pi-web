@@ -44,6 +44,7 @@ export const SUBAGENT_TOOL_NAMES = {
   WORKFLOW: "SubagentWorkflow",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
+  TASKS: "subagent_tasks",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -607,6 +608,8 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
 // Retain the per-agent policy for live resumes without resetting the spawn's
 // budget during a structured-output follow-up. Reopened sessions pass runAgent.
 const sessionFallbackPolicies = new WeakMap<AgentSession, Omit<ModelFallbackOptions, "signal" | "canFallback">>();
+// Preserve the injected tool's capture across resume, but never its prior answer.
+const sessionStructuredCaptures = new WeakMap<AgentSession, ReturnType<typeof createStructuredCapture>>();
 
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
   if (!sessionDir) return undefined;
@@ -1019,6 +1022,7 @@ export async function runAgent(
   }
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  if (structuredCapture) sessionStructuredCaptures.set(session, structuredCapture);
 
   // Until onSessionCreated hands ownership to the manager, a failed setup
   // must close any bindings/resources already opened by the host or SDK.
@@ -1209,12 +1213,15 @@ export async function resumeAgent(
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
-): Promise<{ text: string; failure?: string }> {
+): Promise<{ text: string; failure?: string; structuredJson?: string; structuredRetried?: boolean }> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
+  const capture = sessionStructuredCaptures.get(session);
+  if (capture) { capture.json = undefined; capture.lastError = undefined; capture.called = false; }
+  let structuredRetried = false;
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
   const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
@@ -1239,10 +1246,13 @@ export async function resumeAgent(
 
   try {
     const policy = sessionFallbackPolicies.get(session);
-    if (policy) {
-      await createModelFallback(session, { ...policy, signal: options.signal })(prompt);
-    } else {
-      await session.prompt(prompt);
+    const run = policy
+      ? createModelFallback(session, { ...policy, signal: options.signal })
+      : (text: string) => session.prompt(text);
+    await run(prompt);
+    if (capture && capture.json === undefined && !options.signal?.aborted && !finalTurnError(session, startLen)) {
+      structuredRetried = true;
+      await run(structuredRetryPrompt(capture));
     }
   } finally {
     collector.unsubscribe();
@@ -1252,7 +1262,10 @@ export async function resumeAgent(
 
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
-    failure: finalTurnError(session, startLen),
+    failure: finalTurnError(session, startLen) ?? (capture && capture.json === undefined
+      ? `The resumed agent did not report a valid StructuredOutput.${capture.lastError ? ` ${capture.lastError}` : ""}` : undefined),
+    ...(capture?.json !== undefined ? { structuredJson: capture.json } : {}),
+    ...(structuredRetried ? { structuredRetried } : {}),
   };
 }
 
@@ -1270,7 +1283,8 @@ export async function steerAgent(
 /**
  * Get the subagent's conversation messages as formatted text.
  */
-export function getAgentConversation(session: AgentSession): string {
+export function getAgentConversation(session: AgentSession, options?: { full?: boolean }): string {
+  if (options?.full) return JSON.stringify(session.messages, null, 2);
   const parts: string[] = [];
 
   for (const msg of session.messages) {

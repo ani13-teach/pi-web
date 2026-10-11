@@ -10,12 +10,13 @@ import { loadSettings } from "../builtin/pi-subagents/src/settings";
 import type { AgentConfig } from "../builtin/pi-subagents/src/types";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
+import { sessionPathKey } from "./session-path";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
 
 export const SUBAGENT_META_TYPE = "pi-web:subagent";
 export const SUBAGENT_STATUS_TYPE = "pi-web:subagent-status";
 export const SUBAGENT_RESULT_TYPE = "pi-web:subagent-result";
-export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
+export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent", "subagent_tasks"] as const;
 
 export type SubagentStatus = SubagentSessionStatus;
 export type SubagentScope = "builtin" | "global" | "workspace" | "project";
@@ -569,12 +570,19 @@ export function selectSubagentExtensionTools(
   });
 }
 
-export function readSubagentRun(entries: readonly SessionEntry[], sessionId: string, sessionPath: string): SubagentRunInfo | null {
+export function readSubagentRun(entries: readonly SessionEntry[], sessionId: string, sessionPath: string, parentSessionPath?: string): SubagentRunInfo | null {
   const data = subagentMetadataData(entries);
   if (!data) return null;
-  const lifecycleEntry = [...entries].reverse().find((entry) =>
-    entry.type === "custom" && (entry.customType === SUBAGENT_RESULT_TYPE || entry.customType === SUBAGENT_STATUS_TYPE)
-  );
+  // Forks copy custom entries from their source branch. That inherited marker
+  // is not evidence that the new conversation belongs to the same spawner.
+  if (parentSessionPath !== undefined && (!parentSessionPath || sessionPathKey(data.parentSessionPath) !== sessionPathKey(parentSessionPath))) return null;
+  const lifecycleEntry = [...entries].reverse().find((entry) => {
+    if (entry.type !== "custom" || !isRecord(entry.data) || entry.data.version !== 1) return false;
+    const status = entry.data.status;
+    return entry.customType === SUBAGENT_STATUS_TYPE
+      ? status === "queued" || status === "running"
+      : entry.customType === SUBAGENT_RESULT_TYPE && (status === "completed" || status === "failed" || status === "aborted");
+  });
   const resultEntry = lifecycleEntry?.type === "custom" && lifecycleEntry.customType === SUBAGENT_RESULT_TYPE
     ? lifecycleEntry
     : undefined;

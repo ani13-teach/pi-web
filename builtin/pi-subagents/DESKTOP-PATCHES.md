@@ -55,6 +55,16 @@ The host adds a result-origin marker for the SDK-proven native control tools, in
 
 See `docs/subagent-background-silence.md` for behavior, validation and bounded rollback.
 
+## Request coordination and compact result reports
+
+`src/task-coordination.ts` owns request-scoped assignments and one-batch independent-work grants. Ordinary Desktop top-level Agent spawns/resumes register scope, deliverable, input version, requiredness and run version. `src/index.ts` uses real user-message and `agent_settled` boundaries, forces required joins after premature terminal turns, and adds `subagent_tasks`. Coordinated completion callbacks retain lifecycle/errors without extra follow-up; scheduler/RPC/workflow/nested ownership remains unchanged.
+
+The Desktop host wraps the public root `Agent.prepareRequest` hook, waits with the actual run and activation AbortSignals before every provider request, persists each adopted compact result once, and lets the SDK rebuild authoritative context. Released wrappers transparently forward across same-session reload when a later extension retains them; already waiting calls still abort, and released input hooks no longer supersede tasks. The bounded active task table is an ephemeral request projection. No SDK source or permission configuration changes are required. New user inputs supersede old adoption without clearing user queues; Stop cancels the parent wait, not detached children.
+
+`src/result-protocol.ts` reuses the existing compiled-schema/StructuredOutput path for bounded conclusion/evidence/uncertainties/nextAction reports. Retrieval defaults to summary, with evidence/full and verbose opt-ins. Shape validation never claims factual verification. Text mode remains available with an explicit unverified-evidence diagnostic. `src/agent-runner.ts` refreshes the injected structured capture on resume; `src/agent-manager.ts` resets stale queued-resume promises/start gates and publishes results only after settlement/cleanup. These changes do not bypass auto-mode or expand child tool permissions.
+
+Tests: `lib/subagent-task-coordination.test.mjs`, `lib/subagent-result-protocol.test.mjs`, `lib/subagent-coordination.test.mjs`, `lib/subagent-display.test.mjs`; see `docs/subagent-coordination.md` for behavior and `docs/subagent-coordination-verification.md` for regression results and verification limits.
+
 ## Host ownership and limits
 
 `lib/subagent-extension.ts` supplies the Desktop adapter: pre-import source discovery filters duplicate pi-subagents installations and untrusted project paths; a root-specific manager bridges result/control and persisted resource snapshots. It owns pending children before their first binding completes, persists aborted state before native shutdown clears records, and makes disposal idempotent. `lib/rpc-manager.ts` registers their IPC wrappers, performs their only bind, disables independent idle eviction, and bounds child shutdown waits.

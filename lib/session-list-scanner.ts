@@ -9,6 +9,10 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { readSubagentRun, SUBAGENT_META_TYPE, SUBAGENT_STATUS_TYPE, SUBAGENT_RESULT_TYPE } from "./subagents";
+import type { SessionEntry, SessionInfo } from "./types";
+
+type SubagentRelation = Extract<NonNullable<SessionInfo["relation"]>, { kind: "subagent" }>;
 
 export interface ScannedSessionInfo {
 	path: string;
@@ -22,6 +26,7 @@ export interface ScannedSessionInfo {
 	parentSessionPath?: string;
 	initialAgentName?: string;
 	agentRunIds?: string[];
+	subagentRelation?: SubagentRelation;
 }
 
 interface Fingerprint {
@@ -40,11 +45,20 @@ function isRecord(value: unknown): value is RawEntry {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-const INDEX_FORMAT_VERSION = 2;
+// v3 includes source-validated subagent identity and lifecycle summaries.
+const INDEX_FORMAT_VERSION = 3;
+
+function isSubagentRelation(value: unknown): value is SubagentRelation {
+	return isRecord(value) && value.kind === "subagent"
+		&& typeof value.parentSessionId === "string"
+		&& typeof value.profile === "string" && typeof value.description === "string"
+		&& ["queued", "running", "completed", "failed", "aborted", "interrupted"].includes(value.status as string);
+}
 
 declare global {
 	var __piWebScanIndex: Map<string, IndexEntry> | undefined;
 	var __piWebScanIndexLoaded: boolean | undefined;
+	var __piWebScanIndexVersion: number | undefined;
 	var __piWebScanIndexSaveQueued: boolean | undefined;
 }
 
@@ -103,6 +117,7 @@ export async function scanSessionFileInfo(
 		let initialAgentName: string | undefined;
 		let firstNameSeen = false;
 		const agentRunIds: string[] = [];
+		let subagentRelation: SubagentRelation | undefined;
 
 		const rl = createInterface({
 			input: createReadStream(filePath, { encoding: "utf8" }),
@@ -134,6 +149,24 @@ export async function scanSessionFileInfo(
 			if (entry.type === "custom" && entry.customType === "subagents:record" && isRecord(entry.data) &&
 				typeof entry.data.id === "string" && /^[0-9a-f]{8}-/.test(entry.data.id)) {
 				agentRunIds.push(entry.data.id);
+			}
+			// Reuse the scan already needed for display metadata. Keep only identity
+			// and status, never task text, resource snapshots or result payloads.
+			if (entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE && typeof header.parentSession === "string") {
+				const run = readSubagentRun([entry as unknown as SessionEntry], header.id as string, filePath, header.parentSession);
+				if (run) subagentRelation = {
+					kind: "subagent", parentSessionId: run.parentSessionId,
+					profile: run.profile, description: run.description,
+					status: subagentRelation?.status ?? "interrupted",
+				};
+			}
+			if (subagentRelation && entry.type === "custom" && isRecord(entry.data) && entry.data.version === 1) {
+				const status = entry.data.status;
+				if (entry.customType === SUBAGENT_STATUS_TYPE && (status === "queued" || status === "running")) {
+					subagentRelation.status = status;
+				} else if (entry.customType === SUBAGENT_RESULT_TYPE && (status === "completed" || status === "failed" || status === "aborted")) {
+					subagentRelation.status = status;
+				}
 			}
 			if (entry.type !== "message") continue;
 			messageCount++;
@@ -183,6 +216,7 @@ export async function scanSessionFileInfo(
 			parentSessionPath,
 			...(parentSessionPath && initialAgentName ? { initialAgentName } : {}),
 			...(agentRunIds.length ? { agentRunIds } : {}),
+			...(subagentRelation ? { subagentRelation } : {}),
 			created: new Date(header.timestamp as string),
 			modified,
 			messageCount,
@@ -234,6 +268,13 @@ async function runPool<T>(items: T[], worker: (item: T) => Promise<void>) {
 }
 
 function getIndex(): Map<string, IndexEntry> {
+	// HMR can preserve globals from an older scanner implementation. Never
+	// stamp those incomplete summaries with the new persisted format version.
+	if (globalThis.__piWebScanIndexVersion !== INDEX_FORMAT_VERSION) {
+		globalThis.__piWebScanIndex = undefined;
+		globalThis.__piWebScanIndexLoaded = undefined;
+		globalThis.__piWebScanIndexVersion = INDEX_FORMAT_VERSION;
+	}
 	if (!globalThis.__piWebScanIndex) globalThis.__piWebScanIndex = new Map();
 	return globalThis.__piWebScanIndex;
 }
@@ -243,6 +284,7 @@ function indexFilePath(): string {
 }
 
 function loadPersistedIndex(): void {
+	const index = getIndex();
 	if (globalThis.__piWebScanIndexLoaded) return;
 	globalThis.__piWebScanIndexLoaded = true;
 	const path = indexFilePath();
@@ -250,7 +292,6 @@ function loadPersistedIndex(): void {
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
 		if (!isRecord(parsed) || parsed.version !== INDEX_FORMAT_VERSION || !isRecord(parsed.entries)) return;
-		const index = getIndex();
 		for (const [pathKey, entry] of Object.entries(parsed.entries)) {
 			if (!isRecord(entry) || !isRecord(entry.fp) || !isRecord(entry.info)) continue;
 			const { fp, info } = entry;
@@ -265,6 +306,7 @@ function loadPersistedIndex(): void {
 				(info.parentSessionPath !== undefined && typeof info.parentSessionPath !== "string") ||
 				(info.initialAgentName !== undefined && typeof info.initialAgentName !== "string") ||
 				(info.agentRunIds !== undefined && (!Array.isArray(info.agentRunIds) || !info.agentRunIds.every((id) => typeof id === "string"))) ||
+				(info.subagentRelation !== undefined && (typeof info.parentSessionPath !== "string" || !isSubagentRelation(info.subagentRelation))) ||
 				typeof info.messageCount !== "number" || !Number.isSafeInteger(info.messageCount) || info.messageCount < 0 ||
 				typeof info.created !== "string" || typeof info.modified !== "string"
 			) continue;
@@ -281,6 +323,7 @@ function loadPersistedIndex(): void {
 					parentSessionPath: info.parentSessionPath,
 					...(info.initialAgentName ? { initialAgentName: info.initialAgentName } : {}),
 					...(info.agentRunIds ? { agentRunIds: info.agentRunIds } : {}),
+					...(info.subagentRelation ? { subagentRelation: info.subagentRelation as SubagentRelation } : {}),
 					firstMessage: info.firstMessage,
 					messageCount: info.messageCount,
 					created,
@@ -392,5 +435,6 @@ export async function listSessionsIncremental(): Promise<ScannedSessionInfo[]> {
 export function resetSessionScanIndexForTests(): void {
 	globalThis.__piWebScanIndex = undefined;
 	globalThis.__piWebScanIndexLoaded = undefined;
+	globalThis.__piWebScanIndexVersion = undefined;
 	globalThis.__piWebScanIndexSaveQueued = undefined;
 }

@@ -1,0 +1,21 @@
+{
+  "dist-tags": {
+    "latest": "1.0.169"
+  },
+  "version": "1.0.169",
+  "time": "2026-06-29T18:18:27.670Z",
+  "gitHead": null,
+  "dist": {
+    "integrity": "sha512-94JIaFuLjF9SO2BsGTrbGtyT44K95+9OC8BdbaL/UT76xOkanJLfUR5CzmNw+GELXZQqH4nBrKg9wjBnSFkVnQ==",
+    "shasum": "d5aa9acc648ed420c5dd32ee5f15aa5608f09fea",
+    "tarball": "https://registry.npmjs.org/context-mode/-/context-mode-1.0.169.tgz",
+    "fileCount": 354,
+    "unpackedSize": 4249752,
+    "signatures": [
+      {
+        "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U",
+        "sig": "MEUCIQCbE9rbmHBhZ+6ZIwPjkbImhIUSS36Ka7nT9EMyCu1AiQIgIFP2/fjHTgy2/+nD4diCVyJR2IQ5670c/3u8kLkzINw="
+      }
+    ]
+  }
+}

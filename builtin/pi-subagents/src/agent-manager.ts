@@ -523,6 +523,8 @@ export class AgentManager {
     const record: AgentRecord = {
       id,
       type,
+      runSettled: false,
+      resultFormat: options.structuredOutput ? "structured" : "text",
       // Owned children — nested, or a workflow's — are filtered out of every
       // top-level surface, so no handle: nothing can address them and they must
       // not consume a name a top-level sibling could otherwise take.
@@ -656,6 +658,7 @@ export class AgentManager {
           record.status = "error";
           record.error = err instanceof Error ? err.message : String(err);
           record.completedAt = Date.now();
+          record.runSettled = true;
           this.onComplete?.(record);
         } else {
           this.agents.delete(id);
@@ -999,6 +1002,7 @@ export class AgentManager {
    *   the release disagree with the acquire.
    */
   private settleRun(record: AgentRecord, guardCallback: boolean, pool: Pool | undefined): void {
+    record.runSettled = true;
     if (!record.isBackground) record.resultConsumed = true;
     if (pool === "background") this.runningBackground--;
     else if (pool === "foreground") this.runningForeground--;
@@ -1146,6 +1150,9 @@ export class AgentManager {
     if (this.disposed) return undefined;
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
+    // A provisional terminal status (Stop or worktree cleanup) still owns this
+    // record. Never let a new run race its late writes or slot settlement.
+    if (record.status === "running" || record.status === "queued" || record.runSettled === false) return undefined;
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
@@ -1154,21 +1161,15 @@ export class AgentManager {
     // returned before its background branch, and resume() only ever awaited
     // inline), so a resumed agent always blocked the caller until it finished.
     if (options?.isBackground) {
-      // Never re-enter a run that is still in flight. Detaching means the caller
-      // gets control back while the record stays "running", so nothing stops the
-      // model from resuming the same agent again. Starting a second run would
-      // overwrite record.abortController — orphaning the live run beyond the
-      // reach of `/agents` stop and abortAll() — double-count the pool slot, and
-      // then reject from session.prompt() with "Agent is already processing",
-      // whose settle path would abort the LIVE run's children and report a
-      // failure for a run that is still going. Refuse instead, leaving the
-      // record untouched; the caller decides whether to wait or steer.
-      if (record.status === "running" || record.status === "queued") return undefined;
-
       record.isBackground = true;
       record.resultConsumed = false;
       record.result = undefined;
       record.error = undefined;
+      record.structuredJson = undefined;
+      record.structuredRetried = undefined;
+      record.promise = undefined;
+      record.startGate = undefined;
+      record.runSettled = false;
       record.completedAt = undefined;
       record.status = "queued";
 
@@ -1179,6 +1180,8 @@ export class AgentManager {
         // queue is shared with spawns, whose startup is async, so entries are
         // promise-shaped even though a resume starts synchronously; failures
         // land on the record here, since drainQueue no longer catches.
+        let release!: () => void;
+        record.startGate = new Promise<void>(resolve => { release = resolve; });
         this.queue.push({
           id,
           pool: "background",
@@ -1189,10 +1192,11 @@ export class AgentManager {
               record.status = "error";
               record.error = err instanceof Error ? err.message : String(err);
               record.completedAt = Date.now();
+              record.runSettled = true;
               this.onComplete?.(record);
             }
           },
-          release: () => {},
+          release,
         });
       } else {
         start();
@@ -1206,9 +1210,12 @@ export class AgentManager {
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    record.structuredJson = undefined;
+    record.structuredRetried = undefined;
+    record.runSettled = false;
 
     try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
+      const { text, failure, structuredJson, structuredRetried } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
           options?.onToolActivity?.(activity);
@@ -1230,6 +1237,8 @@ export class AgentManager {
       record.status = failure ? "error" : "completed";
       if (failure) record.error = failure;
       record.result = text;
+      record.structuredJson = structuredJson;
+      record.structuredRetried = structuredRetried;
       record.completedAt = Date.now();
     } catch (err) {
       record.status = "error";
@@ -1240,6 +1249,7 @@ export class AgentManager {
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
+    record.runSettled = true;
 
     return record;
   }
@@ -1260,6 +1270,7 @@ export class AgentManager {
   ) {
     if (!record.session) return;
 
+    record.startGate = undefined; // a drained gate is resolved; retaining it spins the wait loop
     record.status = "running";
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
@@ -1295,6 +1306,7 @@ export class AgentManager {
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
       if (occupiesPoolSlot(record)) this.runningBackground--;
+      record.runSettled = true;
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
@@ -1316,7 +1328,7 @@ export class AgentManager {
       },
       signal: abortController.signal,
     })
-      .then(({ text, failure }) => {
+      .then(({ text, failure, structuredJson, structuredRetried }) => {
         // Don't overwrite status if externally stopped via abort().
         if (record.status !== "stopped") {
           // Same contract as the spawn path (#144): a failed final turn is an
@@ -1325,6 +1337,8 @@ export class AgentManager {
           if (failure) record.error = failure;
         }
         record.result = text;
+        record.structuredJson = structuredJson;
+        record.structuredRetried = structuredRetried;
         record.completedAt ??= Date.now();
         settle();
         return text;
@@ -1449,6 +1463,7 @@ export class AgentManager {
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      record.runSettled = true;
       return true;
     }
 

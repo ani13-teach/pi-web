@@ -1,13 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { DefaultPackageManager, getAgentDir, type AgentSession, type InlineExtension, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentSession, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../builtin/pi-subagents/src/agent-manager";
 import type { AgentRecord } from "../builtin/pi-subagents/src/types";
-import type { DesktopChildInfo, DesktopHost, DefaultResourceLoaderOptions } from "../builtin/pi-subagents/src/desktop-host";
+import type { DesktopChildInfo, DesktopHost } from "../builtin/pi-subagents/src/desktop-host";
 import { createBuiltinAutomodeExtension, preferBuiltinAutomode } from "./automode-builtin";
 import { createBuiltinRpivTodoExtension, preferBuiltinRpivTodo } from "./rpiv-todo-builtin";
-import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
+import { projectTrustReloadOptions } from "./project-trust";
+import { filteredSubagentLoaderOptions } from "./extension-loader-options";
+export { filteredSubagentLoaderOptions, isSubagentsSource } from "./extension-loader-options";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveSubagentRuntimeMaxConcurrent } from "./subagent-runtime-settings";
 import { registerSessionLivenessProvider } from "./session-liveness";
@@ -25,52 +27,8 @@ export interface SubagentToolDetails {
   status: SubagentRunInfo["status"];
 }
 
-/** Exclude another installation BEFORE its extension factory can execute. */
-export function isSubagentsSource(path: string, source = ""): boolean {
-  if (/(?:^|[/\\])pi-subagents(?:[/\\]|$)/i.test(path) || /(?:^|[/@])pi-subagents(?:@|$)/i.test(source.replace(/^npm:/, ""))) return true;
-  let dir = dirname(path);
-  while (dir !== dirname(dir)) {
-    const manifest = join(dir, "package.json");
-    if (existsSync(manifest)) {
-      try {
-        const pkg = JSON.parse(readFileSync(manifest, "utf8"));
-        return typeof pkg.name === "string" && pkg.name.split("/").at(-1) === "pi-subagents";
-      } catch { return false; }
-    }
-    dir = dirname(dir);
-  }
-  return false;
-}
-
-/** The SDK's noExtensions mode still loads explicit paths and inline factories.
- * Resolve without importing, filter duplicate packages and untrusted project
- * paths, then hand only the allowed paths to that public SDK mode.
- */
-export async function filteredSubagentLoaderOptions(
-  options: DefaultResourceLoaderOptions,
-  settingsManager: SettingsManager,
-): Promise<DefaultResourceLoaderOptions> {
-  const manager = new DefaultPackageManager({ cwd: options.cwd, agentDir: options.agentDir, settingsManager });
-  const trusted = getProjectTrustStatus(options.cwd, options.agentDir).trusted;
-  const discovered = options.noExtensions ? [] : (await manager.resolve(async () => "skip")).extensions;
-  const explicit = options.additionalExtensionPaths?.length
-    ? (await manager.resolveExtensionSources(options.additionalExtensionPaths, { temporary: true })).extensions
-    : [];
-  const insideProject = (path: string) => {
-    const local = relative(options.cwd, resolve(path));
-    return local === "" || (!local.startsWith("..") && !isAbsolute(local));
-  };
-  // Explicit paths are labelled "temporary" by the SDK, even when the
-  // project supplied them. Preserve their original source when gating trust.
-  const safeExplicit = trusted ? explicit : explicit.filter((entry) =>
-    ![entry.path, entry.metadata.source, entry.metadata.baseDir].some((path) => path && insideProject(path)));
-  const paths = [...discovered, ...safeExplicit].filter((entry) => entry.enabled
-    && (entry.metadata.scope !== "project" || trusted)
-    && !isSubagentsSource(entry.path, entry.metadata.source));
-  return { ...options, noExtensions: true, additionalExtensionPaths: [...new Set(paths.map((entry) => entry.path))] };
-}
-
 export interface SubagentHostDependencies {
+  getRootSession?(sessionId: string): AgentSession | undefined;
   bindChild(session: AgentSession, info: DesktopChildInfo): Promise<void>;
   shutdownChild(session: AgentSession): Promise<void>;
   invalidate(): void;
@@ -146,6 +104,8 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
       activations.add(activation);
       let releaseLiveness: (() => void) | undefined;
       const releases: (() => void)[] = [];
+      const gateAbort = new AbortController();
+      let gateInstalled = false;
       let shutdownPromise: Promise<void> | undefined;
       const cleanup = () => {
         releases.splice(0).forEach(release => release());
@@ -179,6 +139,75 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
         onManager(manager) {
           if (activation.closed) { void manager.dispose().catch(() => {}); return; }
           activation.manager = manager;
+        },
+        installRequestCoordinator(sessionId, coordinator) {
+          if (gateInstalled) return true;
+          const root = dependencies.getRootSession?.(sessionId);
+          if (activation.closed || !root?.agent) return false;
+          const previous = root.agent.prepareRequest;
+          let released = false;
+          const gate: NonNullable<typeof previous> = async (request, signal) => {
+            // Later extensions may retain this inner wrapper across reload.
+            // Cancel calls already waiting here, but forward future calls once released.
+            if (released) {
+              const forwarded = await previous?.(request, signal);
+              return forwarded ?? undefined;
+            }
+            const combined = signal ? AbortSignal.any([signal, gateAbort.signal]) : gateAbort.signal;
+            combined.throwIfAborted();
+            await coordinator.waitForRequest(combined);
+            combined.throwIfAborted();
+            // This boundary is after the tool batch, never between a call and its result.
+            // Persist before the SDK rebuilds its authoritative request projection.
+            for (const delivery of coordinator.deliveries()) {
+              root.sessionManager.appendCustomMessageEntry("subagent-notification", delivery.content, false, {
+                displayOrigin: "pi-subagents", agentId: delivery.record.id, assignment: { ...delivery.assignment, delivery: "consumed" },
+              });
+              coordinator.consume(delivery);
+            }
+            const prepared = await previous?.(request, combined);
+            combined.throwIfAborted();
+            const state = coordinator.snapshot();
+            const context = prepared?.context ?? request.context;
+            return {
+              ...prepared,
+              context: state ? { ...context, messages: [...context.messages, {
+                role: "custom" as const, customType: "subagent-task-state", content: state,
+                display: false, timestamp: Date.now(),
+              }] } : context,
+            };
+          };
+          root.agent.prepareRequest = gate;
+          const originalPrompt = root.prompt;
+          const originalSteer = root.steer;
+          const originalFollowUp = root.followUp;
+          const prompt: typeof root.prompt = (text, options) => released ? originalPrompt.call(root, text, options) : originalPrompt.call(root, text, {
+            ...options,
+            preflightResult(disposition) {
+              if (!released && disposition === "queued" && options?.source !== "extension") coordinator.acceptedInput();
+              options?.preflightResult?.(disposition);
+            },
+          });
+          const steer: typeof root.steer = async (text, images, options) => {
+            const disposition = await originalSteer.call(root, text, images, options);
+            if (!released && disposition === "queued" && options?.source !== "extension") coordinator.acceptedInput();
+            return disposition;
+          };
+          const followUp: typeof root.followUp = async (text, images, options) => {
+            const disposition = await originalFollowUp.call(root, text, images, options);
+            if (!released && disposition === "queued" && options?.source !== "extension") coordinator.acceptedInput();
+            return disposition;
+          };
+          root.prompt = prompt; root.steer = steer; root.followUp = followUp;
+          gateInstalled = true;
+          releases.push(() => {
+            released = true;
+            if (root.agent.prepareRequest === gate) root.agent.prepareRequest = previous;
+            if (root.prompt === prompt) root.prompt = originalPrompt;
+            if (root.steer === steer) root.steer = originalSteer;
+            if (root.followUp === followUp) root.followUp = originalFollowUp;
+          });
+          return true;
         },
         async resourceLoaderOptions(configCwd, options) {
           const base = await filteredSubagentLoaderOptions(options, options.settingsManager!);
@@ -215,7 +244,7 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
               session.sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
               // Capture the actual live extension-tool scope AFTER original
               // pi-subagents installed its allow/deny policy.
-              const tools = session.getActiveToolNames().filter((name) => !["Agent", "SubagentWorkflow", "get_subagent_result", "steer_subagent"].includes(name));
+              const tools = session.getActiveToolNames().filter((name) => !["Agent", "SubagentWorkflow", "get_subagent_result", "steer_subagent", "subagent_tasks"].includes(name));
               const entries = session.sessionManager.getEntries() as unknown as SessionEntry[];
               const meta = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
               if (meta?.type === "custom") session.sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, { ...meta.data as object, resourceSnapshot: { version: 1, appendSystemPrompt: [], tools, loadExtensions: info.loadExtensions, loadSkills: info.loadSkills, exactSystemPrompt: info.systemPrompt } });
@@ -255,6 +284,7 @@ export function createSubagentExtension(cwd: string, dependencies: SubagentHostD
       const shutdown = () => {
         if (shutdownPromise) return shutdownPromise;
         activation.closed = true;
+        gateAbort.abort(new Error("Parent subagent activation closed"));
         shutdownPromise = (async () => {
           const failures: unknown[] = [];
           try {

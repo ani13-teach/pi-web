@@ -1,6 +1,6 @@
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, createEventBus, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
@@ -47,6 +47,7 @@ import {
 import { resolveShellTools } from "./powershell-settings";
 import { applyCodemodeSelection, createDesktopCodemodeExtension } from "./codemode";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
+import { FilteredResourceLoader } from "./filtered-resource-loader";
 import {
   appendSessionToolSelection,
   readSessionToolSelection,
@@ -1799,6 +1800,9 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
 }
 
 const SUBAGENT_HOST_DEPENDENCIES = {
+  getRootSession(sessionId: string) {
+    return getRegistry().get(sessionId)?.inner as import("@earendil-works/pi-coding-agent").AgentSession | undefined;
+  },
   async bindChild(inner: import("@earendil-works/pi-coding-agent").AgentSession) {
     const wrapper = new AgentSessionWrapper(inner, {
       suppressCompletionNotifications: true,
@@ -1976,7 +1980,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
     const firstUserMessage = messages.find((entry) => entry.message.role === "user");
     const sessionFile = manager.getSessionFile() ?? session.sessionFile;
     const persisted = Boolean(sessionFile && existsSync(sessionFile));
-    const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "");
+    const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "", header?.parentSession ?? (persisted ? "" : undefined));
 
     // An ensure_session call creates an idle, empty runtime while the composer
     // loads commands. Do not leak it into history before a prompt is accepted.
@@ -2135,14 +2139,11 @@ export async function startRpcSession(
         ? undefined
         : projectTrustReloadOptions(sessionCwd, agentDir);
     const settingsManager = SettingsManager.create(sessionCwd, agentDir);
-    const services = await createAgentSessionServices({
-      cwd: sessionCwd,
-      agentDir,
-      settingsManager,
-      resourceLoaderOptions: await filteredSubagentLoaderOptions({
+    const resourceLoaderOptions: ConstructorParameters<typeof FilteredResourceLoader>[0] = {
         cwd: sessionCwd,
         agentDir,
         settingsManager,
+        eventBus: createEventBus(),
         ...(subagentResources
         ? {
             noExtensions: !subagentResources.loadExtensions,
@@ -2183,8 +2184,20 @@ export async function startRpcSession(
               preferUserBashExtension(base),
             )),
           }),
-      }, settingsManager),
+    };
+    const filteredLoaderOptions = await filteredSubagentLoaderOptions(resourceLoaderOptions, settingsManager);
+    const services = await createAgentSessionServices({
+      cwd: sessionCwd,
+      agentDir,
+      settingsManager,
+      resourceLoaderOptions: filteredLoaderOptions,
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
+    });
+    // The SDK reloads this stable wrapper for RPC and extension-command reloads.
+    // Re-resolve the original policy rather than replaying a frozen explicit list.
+    services.resourceLoader = new FilteredResourceLoader(resourceLoaderOptions, {
+      loader: services.resourceLoader,
+      extensionPaths: filteredLoaderOptions.additionalExtensionPaths!,
     });
     const scope = await resolveVisibleModels(
       services.modelRuntime,

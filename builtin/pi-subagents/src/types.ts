@@ -5,6 +5,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { LifetimeUsage } from "./usage.js";
+import type { TaskAssignment } from "./task-coordination.js";
 
 export type { ThinkingLevel };
 
@@ -156,6 +157,12 @@ export type MentionResolution =
   | { kind: "tombstone"; entry: AgentTombstone };
 
 export interface AgentRecord {
+  /** Optional Desktop request ownership; CLI/workflow paths remain unchanged. */
+  assignment?: TaskAssignment;
+  /** Terminal data is publishable only after cleanup/settlement, not a provisional status. */
+  runSettled?: boolean;
+  /** The session's injected output tool contract; resume inherits it. */
+  resultFormat?: "structured" | "text";
   id: string;
   type: SubagentType;
   /**

@@ -75,6 +75,8 @@ import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkf
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
+import { TaskCoordinator, validateAssignmentInput, type AssignmentInput } from "./task-coordination.js";
+import { compiledResultReport, renderAgentResult } from "./result-protocol.js";
 
 // ---- Shared helpers ----
 
@@ -416,6 +418,12 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Agent activity tracking + widget ----
   const agentActivity = new Map<string, AgentActivity>();
+  const coordinator = new TaskCoordinator();
+  let coordinationEnabled = false;
+  const assignmentInput = (params: { task_key?: string; scope?: string[]; deliverable?: string; input_version?: string; independent_work?: string[]; required?: boolean }): AssignmentInput => ({
+    taskKey: params.task_key, scope: params.scope, deliverable: params.deliverable,
+    inputVersion: params.input_version, independentWork: params.independent_work, required: params.required,
+  });
 
   // ---- Usage reporting (both off by default; see SubagentsSettings) ----
   /** Attach subagent spend to tool results, so the parent session counts it. */
@@ -484,6 +492,7 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Individual nudge helper (async join mode) ----
   function emitIndividualNudge(record: AgentRecord) {
+    if (record.assignment) return; // coordinated delivery never wakes an extra follow-up
     if (record.resultConsumed) return;  // re-check at send time
 
     const notification = formatTaskNotification(record, 500, showCost);
@@ -513,7 +522,7 @@ export default function (pi: ExtensionAPI) {
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
       scheduleNudge(groupKey, () => {
         // Re-check at send time
-        const unconsumed = records.filter(r => !r.resultConsumed);
+        const unconsumed = records.filter(r => !r.resultConsumed && !r.assignment);
         if (unconsumed.length === 0) { widget.update(); return; }
 
         const notifications = unconsumed.map(r => formatTaskNotification(r, 300, showCost)).join('\n\n');
@@ -599,7 +608,17 @@ export default function (pi: ExtensionAPI) {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
+      ...(record.assignment ? { assignment: { ...record.assignment } } : {}),
     });
+
+    if (record.assignment) {
+      coordinator.changed();
+      agentActivity.delete(record.id);
+      widget.markFinished(record.id);
+      fleet.onAgentFinished(record.id);
+      widget.update();
+      return;
+    }
 
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
@@ -808,6 +827,7 @@ export default function (pi: ExtensionAPI) {
     const maxConcurrent = host?.maxConcurrent;
     if (maxConcurrent !== undefined) manager.setMaxConcurrent(maxConcurrent);
     currentCtx = ctx;
+    coordinationEnabled = host?.installRequestCoordinator?.(ctx.sessionManager.getSessionId(), coordinator) === true;
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
@@ -869,6 +889,27 @@ export default function (pi: ExtensionAPI) {
     resolveWorkflowCollisions(ctx);
     runWorkflowFlag(ctx);
   });
+
+  // The host supersedes only AFTER SDK input admission (queued), never from
+  // the preflight input event: a later extension may still handle/refuse it.
+  pi.on("message_start", (event) => {
+    if (coordinationEnabled && event.message.role === "user") coordinator.begin();
+  });
+  pi.on("turn_end", (event) => {
+    if (!coordinationEnabled || event.outcome !== "completed") return;
+    if (event.message.role === "assistant" && !event.message.content.some(block => block.type === "toolCall") && coordinator.needsContinuation()) {
+      coordinator.requireWait();
+      // A terminal assistant message needs a new context entry before the SDK
+      // permits continuation; canContinue is false until this draft is applied.
+      return {
+        entries: [{ type: "custom_message" as const, customType: "subagent-task-state",
+          content: "Required delegated results are outstanding. Join them at the next request gate; do not repeat the investigation or finalize early.",
+          display: false, details: { displayOrigin: "pi-subagents" } }],
+        continue: true,
+      };
+    }
+  });
+  pi.on("agent_settled", () => { if (coordinationEnabled) coordinator.end(); });
 
   /** Agent types `@` can start, in the shape the roster wants. */
   const mentionTypes = (): TypeInfo[] =>
@@ -1108,6 +1149,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_switch", () => {
+    coordinator.end("superseded");
     manager.clearCompleted(true);
     scheduler.stop();
   });
@@ -1118,6 +1160,7 @@ export default function (pi: ExtensionAPI) {
   shutdownActivation = () => {
     if (shutdownPromise) return shutdownPromise;
     closed = true;
+    coordinator.dispose();
     shutdownPromise = (async () => {
       try {
         rpcHandle?.unsubSpawn();
@@ -1523,7 +1566,7 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
 - Parallel work: one message, multiple Agent calls — they run concurrently.
-- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
+- Desktop coordinated agents default to required: spawning returns immediately, then the next model request waits and adopts a bounded summary. Declare independent_work only for genuinely separate work (one parent request/tool batch), then wait again; subagent_tasks can authorize another batch. required:false is optional advisory work and never restarts a settled answer. Legacy hosts without the request gate keep completion notifications. Never invent pending results.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
 
@@ -1546,9 +1589,10 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently. If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
-- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
-- **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
+- Desktop coordinated background tasks are required by default. Agent returns immediately, but the next model request automatically waits and adopts a compact result in the current request; there is no extra completion follow-up. Do not repeat delegated investigation or poll for progress.
+- **Independent work**: declare \`independent_work\` only for genuinely separate parent work. It authorizes ONE model request/tool batch, then waits again. Use \`subagent_tasks\` to declare another independent batch or wait. Scope is ownership guidance, not a file lock or semantic deduplicator.
+- **Foreground vs background**: \`run_in_background: false\` still waits inside the tool call and returns full text for compatibility. Prefer coordinated background for bounded handoffs. Set \`required:false\` only for optional advisory work; late optional results are retained in Agents but never restart a finished answer. Legacy hosts without a coordinator retain completion notifications.
+- **Don't race**: never fabricate pending results. A declared independent batch is not permission to redo the child's investigation. Never finalize before required results are adopted. Summary is the default; get_subagent_result view:evidence supports targeted verification and view:full retrieves original output.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
@@ -1629,7 +1673,7 @@ Terse command-style prompts produce shallow, generic work.
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
       "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. scout). Otherwise use direct tools (read, grep, find) when the target is already known.",
-      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
+      "Desktop coordinated background tasks are required by default: the next model request waits and adopts their results without a follow-up. Declare independent_work only for genuinely separate work; it authorizes one parent request/tool batch, then the gate waits again. Use subagent_tasks to declare another independent batch or wait. Use required:false only for optional advisory work; late optional results do not restart a finished answer.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
     parameters: Type.Object({
@@ -1667,7 +1711,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       run_in_background: Type.Optional(
         Type.Boolean({
-          description: "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
+          description: "Defaults to true unless an agent profile specifies otherwise. Desktop coordinated tasks return an ID immediately, then gate the next model request until required results are adopted; declare independent_work to authorize a separate parent batch. False waits inside the tool call and returns full output. Legacy hosts use completion notifications.",
         }),
       ),
       resume: Type.Optional(
@@ -1685,6 +1729,13 @@ Terse command-style prompts produce shallow, generic work.
           description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
         }),
       ),
+      task_key: Type.Optional(Type.String({ minLength: 1, maxLength: 160, description: "Task identity for ownership (not an automatic deduplication key)." })),
+      scope: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 12, description: "Delegated files or investigation scope; parent must not repeat it." })),
+      deliverable: Type.Optional(Type.String({ minLength: 1, maxLength: 600, description: "Expected conclusion and evidence." })),
+      input_version: Type.Optional(Type.String({ minLength: 1, maxLength: 160, description: "Revision or input version to bind evidence to." })),
+      independent_work: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 8, description: "Genuinely independent parent work. Authorizes one parent model request/tool batch before waiting again." })),
+      required: Type.Optional(Type.Boolean({ description: "Desktop default true: adopt this result before finalizing. False is optional advisory work, never a reason to repeat its investigation." })),
+      result_format: Type.Optional(Type.Union([Type.Literal("structured"), Type.Literal("text")], { description: "New Desktop coordinated agents default to an evidence-aware StructuredOutput report. Text is a compatibility escape hatch. Resume inherits the session's format; explicit format switches are rejected." })),
       ...isolationParam(isWorktreeIsolationEnabled()),
       ...scheduleParam,
     }),
@@ -1808,6 +1859,7 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Execute ----
 
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      validateAssignmentInput(assignmentInput(params));
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -1967,6 +2019,11 @@ Terse command-style prompts produce shallow, generic work.
         };
       };
 
+      const delegatedPrompt = coordinationEnabled
+        ? params.prompt + "\n\nDelegation contract (data, not evidence): " + JSON.stringify(assignmentInput(params))
+          + "\nReport only evidence you actually checked. Do not invent a line, input version, test result, or certainty. Preserve unresolved issues in uncertainties; the report is the handoff, not a human-facing answer."
+        : params.prompt;
+
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
@@ -2019,6 +2076,16 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
+        const inheritedFormat = existing.resultFormat ?? (existing.structuredJson ? "structured" : "text");
+        if (params.result_format && params.result_format !== inheritedFormat) {
+          throw new Error(`Cannot switch result_format on resume (${inheritedFormat} to ${params.result_format}). Start a new agent to change its output contract.`);
+        }
+        if (existing.status === "running" || existing.status === "queued") {
+          return textResult(`Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\nUse steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`);
+        }
+        if (existing.runSettled === false) {
+          throw new Error(`Agent "${params.resume}" is still running, queued, or settling. Resume only after the previous run and cleanup have fully settled.`);
+        }
 
         // Background resume: detached run that notifies on completion, mirroring
         // a background spawn. Previously run_in_background was silently ignored
@@ -2026,19 +2093,7 @@ Terse command-style prompts produce shallow, generic work.
         // so a resumed agent always blocked the main loop until it finished.
         if (runInBackground) {
           const id = existing.id;
-          // A detached resume hands control back while the record stays
-          // "running", so nothing stops the model from resuming the same agent
-          // again mid-run. manager.resume() refuses that (it would orphan the
-          // live run's abort controller); say why here, where the model can act
-          // on it, instead of letting it read as a generic failure.
-          if (existing.status === "running" || existing.status === "queued") {
-            return textResult(
-              `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
-              `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
-            );
-          }
-
-          const record = await startBackgroundResume(ctx, existing, params.prompt, {
+          const record = await startBackgroundResume(ctx, existing, delegatedPrompt, {
             outputTranscript,
             maxTurns: effectiveMaxTurns,
             toolCallId,
@@ -2047,6 +2102,7 @@ Terse command-style prompts produce shallow, generic work.
             return textResult(`Failed to resume agent "${params.resume}".`);
           }
 
+          if (coordinationEnabled) coordinator.register(record, assignmentInput(params));
           const isQueued = record.status === "queued";
           return textResult(
             `Agent ${isQueued ? "queued" : "resumed"} in background.\n` +
@@ -2054,8 +2110,10 @@ Terse command-style prompts produce shallow, generic work.
             `Type: ${existing.type}\n` +
             (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
             (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
-            `\nYou will be notified when this agent completes.\n` +
-            `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
+            (record.assignment
+              ? `\nResumed task registered (run=${record.assignment.runVersion}, required=${record.assignment.required}); next request waits unless independent_work was declared. No extra completion follow-up.\n`
+              : `\nYou will be notified when this agent completes.\n`) +
+            `Use get_subagent_result for a summary, view:evidence for references, or view:full for original output.`,
             { ...detailBaseFor(record), toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
           );
         }
@@ -2067,10 +2125,10 @@ Terse command-style prompts produce shallow, generic work.
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record));
+          return textResult(record.structuredJson ? renderAgentResult(record, "full") : `Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record));
         }
         return textResult(
-          record.result?.trim() || "No output.",
+          record.structuredJson ? renderAgentResult(record, "full") : record.result?.trim() || "No output.",
           buildDetails(detailBaseFor(record), record),
         );
       }
@@ -2095,7 +2153,7 @@ Terse command-style prompts produce shallow, generic work.
         // A throw here means the agent never started. Let it out: pi marks a
         // tool call failed only when execute throws, and a returned message
         // reads to the model as a subagent that ran and reported this (#179).
-        id = manager.spawn(pi, ctx, subagentType, params.prompt, {
+        id = manager.spawn(pi, ctx, subagentType, delegatedPrompt, {
           description: params.description,
           name: params.name as string | undefined,
           model,
@@ -2104,6 +2162,7 @@ Terse command-style prompts produce shallow, generic work.
           inheritContext,
           thinkingLevel: thinking,
           isBackground: true,
+          structuredOutput: coordinationEnabled && params.result_format !== "text" ? compiledResultReport : undefined,
           isolation,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
@@ -2114,6 +2173,7 @@ Terse command-style prompts produce shallow, generic work.
         // event loop yields — onSessionCreated is async so this is safe.
         const joinMode = resolveJoinMode(defaultJoinMode, true);
         const record = manager.getRecord(id);
+        if (record && coordinationEnabled) coordinator.register(record, assignmentInput(params));
         if (record && joinMode) {
           record.joinMode = joinMode;
           record.toolCallId = toolCallId;
@@ -2124,9 +2184,13 @@ Terse command-style prompts produce shallow, generic work.
         // copy is an awaited git call. Wait for it here, after the synchronous
         // wiring above, so a strict-isolation failure still fails THIS tool
         // call instead of being reported as a subagent that ran (#179).
-        await manager.awaitStartup(id);
+        try { await manager.awaitStartup(id); }
+        catch (error) {
+          if (record?.assignment) coordinator.consumeRecord(record); // failed tool result already carries this error
+          throw error;
+        }
 
-        if (joinMode == null || joinMode === 'async') {
+        if (record?.assignment || joinMode == null || joinMode === 'async') {
           // Foreground/no join mode or explicit async — not part of any batch
         } else {
           // smart or group — add to current batch
@@ -2159,8 +2223,10 @@ Terse command-style prompts produce shallow, generic work.
           `Description: ${params.description}\n` +
           (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
-          `\nYou will be notified when this agent completes.\n` +
-          `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+          (record?.assignment
+            ? `\nTask registered (${record.assignment.taskKey}, required=${record.assignment.required}). ${params.independent_work?.length ? "One independent parent batch authorized; then wait." : "The next model request waits for required results and adopts them."} No extra completion follow-up.\n`
+            : `\nYou will be notified when this agent completes.\n`) +
+          `Use get_subagent_result for results, subagent_tasks for coordination, or steer_subagent for messages.\n` +
           `Do not duplicate this agent's work.`,
           { ...detailBaseFor(record), toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
@@ -2788,7 +2854,7 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
-      "Check status and retrieve a background agent's full result — its completion notification carries only a preview. Use the agent ID returned by Agent.",
+      "Retrieve a background agent result. Default view summary contains conclusion and uncertainties, not its whole investigation. Use view:evidence for file/line/input-version references, view:full for original output, or verbose:true for the full transcript. Shape validation does not verify the facts.",
     promptSnippet: "Check status and retrieve results from a background agent",
     parameters: Type.Object({
       agent_id: Type.String({
@@ -2801,9 +2867,10 @@ Terse command-style prompts produce shallow, generic work.
       ),
       verbose: Type.Optional(
         Type.Boolean({
-          description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
+          description: "If true, include the agent's full conversation (messages + tool calls) and full result. Default: false.",
         }),
       ),
+      view: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("evidence"), Type.Literal("full")], { description: "Default summary; evidence for targeted verification; full for original result." })),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = resolveAgentRef(params.agent_id);
@@ -2816,7 +2883,7 @@ Terse command-style prompts produce shallow, generic work.
       // completion notification can still be delivered.
       // Queued agents have no promise yet (it's created when the queue starts
       // them), so poll until they leave the queue, then await like a running one.
-      if (params.wait && (record.status === "running" || record.status === "queued")) {
+      if (params.wait && (record.status === "running" || record.status === "queued" || record.runSettled === false)) {
         while (record.status === "queued") {
           await abortable(
             new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
@@ -2845,29 +2912,49 @@ Terse command-style prompts produce shallow, generic work.
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
-        output += "Agent is still running. Use wait: true or check back later.";
-      } else if (record.status === "error") {
-        output += `Error: ${record.error}${partialOutputSuffix(record)}`;
+      const view = params.verbose ? "full" : params.view ?? "summary";
+      if (!["summary", "evidence", "full"].includes(view)) throw new Error("Invalid result view");
+      if (record.status === "running" || record.status === "queued" || record.runSettled === false && record.status !== "stopped") {
+        output += "Agent is still running, queued, or settling. Use wait: true.";
       } else {
-        output += record.result?.trim() || "No output.";
+        output += renderAgentResult(record, view);
+        if (record.assignment) output += `\nTask: ${record.assignment.taskKey}; run: ${record.assignment.runVersion}; input version: ${record.assignment.inputVersion ?? "unspecified"}; delivery: ${record.assignment.delivery}.`;
       }
 
-      // Mark result as consumed — suppresses the completion notification
-      if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
-        cancelNudge(params.agent_id);
-      }
+      if (record.runSettled === false && record.status === "stopped") output += "\nStopped, but provider/cleanup is still settling. wait:true is required before resume.";
 
       // Verbose: include full conversation
       if (params.verbose && record.session) {
-        const conversation = getAgentConversation(record.session);
+        const conversation = getAgentConversation(record.session, { full: true });
         if (conversation) {
           output += `\n\n--- Agent Conversation ---\n${conversation}`;
         }
       }
 
+      // Claim only after successful formatting, including full transcript serialization.
+      if (record.status !== "running" && record.status !== "queued" && (record.runSettled !== false || record.status === "stopped")) {
+        coordinator.consumeRecord(record);
+        cancelNudge(record.id);
+      }
       return textResult(output);
+    },
+  }));
+
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.TASKS,
+    label: "Subagent Tasks",
+    description: "Control Desktop delegated work: independent authorizes one genuinely independent parent request/tool batch; wait revokes that allowance; finish explicitly closes a task only after required results were adopted. Does not stop children or clear user queues.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("independent"), Type.Literal("wait"), Type.Literal("finish")]),
+      work: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { minItems: 1, maxItems: 8 })),
+    }),
+    execute: async (_id, params) => {
+      if (!coordinationEnabled) throw new Error("Request coordination is unavailable in this host; use get_subagent_result with wait:true.");
+      if (params.action === "independent") coordinator.allowIndependent(params.work ?? []);
+      else if (params.action === "wait") coordinator.requireWait();
+      else if (params.action === "finish") coordinator.finish();
+      else throw new Error("Unknown coordination action");
+      return textResult(coordinator.snapshot() || "No outstanding delegated tasks.");
     },
   }));
 

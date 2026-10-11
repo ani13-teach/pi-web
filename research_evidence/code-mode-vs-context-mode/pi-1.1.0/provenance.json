@@ -1,0 +1,42 @@
+[
+  {
+    "path": "package.json",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\package.json",
+    "sha256": "6c74f40328320233e3e170b2e1addb24d2a7bd768b8714bf785529d46b80f4b5"
+  },
+  {
+    "path": "docs/codemode.md",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\docs\\codemode.md",
+    "sha256": "40ac8e539d365599f47f4372d1eb61b918879625cc5541e5a841f48758538798"
+  },
+  {
+    "path": "docs/mcp.md",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\docs\\mcp.md",
+    "sha256": "a635d721e58b0cbf43f7443a29fd43b8201b62602c62763c1f5fdb3910d7d938"
+  },
+  {
+    "path": "docs/compaction.md",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\docs\\compaction.md",
+    "sha256": "190b8c651148504613aea98b0637807c536ed0362948fda1bcd1ae137d75ff4a"
+  },
+  {
+    "path": "docs/sessions.md",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\docs\\sessions.md",
+    "sha256": "5ad5bda19caaa0794bb44f86c85c8e66be6f493c52bb5e6a4d127b58cd8c2c1e"
+  },
+  {
+    "path": "dist/extensions/codemode/execute.js",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\extensions\\codemode\\execute.js",
+    "sha256": "503de1c907882c0ee032ad83a30966f3edc095acf611f569bea573aec9730381"
+  },
+  {
+    "path": "dist/extensions/tool-search/tool.js",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\extensions\\tool-search\\tool.js",
+    "sha256": "452956aa3bf67e8cdba4cabdb17431e12c958156eb77dbb7cbe8158cfcfa18d8"
+  },
+  {
+    "path": "dist/core/agent-session.js",
+    "source": "C:\\Users\\jch\\AppData\\Local\\Programs\\Pi Desktop\\resources\\app.asar.unpacked\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\core\\agent-session.js",
+    "sha256": "0ba5c847b4fd2fd838f71ea84885b9f3a4f15d9bf4b5493e2e88a41d1507e20b"
+  }
+]

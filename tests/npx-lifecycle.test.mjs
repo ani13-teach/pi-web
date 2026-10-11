@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import vm from "node:vm";
 import test from "node:test";
 import { build } from "esbuild";
@@ -65,6 +65,8 @@ async function sandbox(t) {
   const env = { ...process.env, npm_config_userconfig: userconfig, npm_config_globalconfig: globalconfig,
     npm_config_cache: join(dir, "cache"), npm_config_offline: "true", npm_config_update_notifier: "false",
     npm_config_audit: "false", npm_config_fund: "false" };
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === "path") ?? "PATH";
+  env[pathKey] = dirname(process.execPath) + delimiter + (env[pathKey] ?? "");
   const script = join(dir, "task.cjs");
   await writeFile(script, `
     const { spawn } = require("node:child_process");
@@ -82,10 +84,18 @@ async function sandbox(t) {
   return { dir, script, opts: { cwd: dir, env } };
 }
 
+// npm exec builds its own shell command, with fragile Program Files quoting.
+// --call avoids package-name inference; this sandbox's PATH selects the SAME
+// installed runtime by basename, and cwd resolves the owned fixture task.
+// runNpx itself still uses execFile without a shell; no production code changes.
+function taskArgs(box, mode = "") {
+  return ["--offline", "--call", `${basename(process.execPath)} ${basename(box.script)}${mode ? ` ${mode}` : ""}`];
+}
+
 async function runningTree(t, fixture, { timeout } = {}) {
   const box = await sandbox(t);
   const controller = new AbortController();
-  const result = fixture.runNpx(["--offline", "--", process.execPath, box.script], {
+  const result = fixture.runNpx(taskArgs(box), {
     ...box.opts, signal: controller.signal, timeout,
   });
   // Handle rejection immediately, even when startup itself fails.
@@ -128,7 +138,7 @@ test("real offline npx preserves stdout/stderr and removes abort listeners on su
   const remove = controller.signal.removeEventListener.bind(controller.signal);
   controller.signal.addEventListener = (...args) => { listeners++; return add(...args); };
   controller.signal.removeEventListener = (...args) => { listeners--; return remove(...args); };
-  const result = await fixture.runNpx(["--offline", "--", process.execPath, box.script, "output"], {
+  const result = await fixture.runNpx(taskArgs(box, "output"), {
     ...box.opts, signal: controller.signal, timeout: 10_000,
   });
   assert.equal(result.stdout, "local stdout");

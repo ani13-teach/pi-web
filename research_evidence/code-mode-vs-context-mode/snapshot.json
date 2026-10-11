@@ -1,0 +1,6 @@
+{
+  "commit": "f33a26e3a40a3dcb3586378879d04cfd2eb808f7",
+  "retrieved_utc": "2026-10-11",
+  "github_stars": 26327,
+  "note": "GitHub API rate limited after successful star search; commit resolved via git ls-remote"
+}

@@ -2,7 +2,7 @@ import {
   SessionManager,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { closeSync, type Dirent, fstatSync, openSync, readSync } from "fs";
+import { closeSync, type Dirent, openSync, readSync } from "fs";
 import { readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -12,7 +12,7 @@ import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
-import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
+import { readSubagentRun } from "./subagents";
 import { listSessionsIncremental } from "./session-list-scanner";
 import { nativeSubagentRelation } from "./native-subagent-relation";
 import { SUBAGENT_DISPLAY_META_TYPE, SUBAGENT_DISPLAY_ORIGIN, SUBAGENT_DISPLAY_TOOLS } from "./subagent-display";
@@ -20,9 +20,6 @@ import { SUBAGENT_DISPLAY_META_TYPE, SUBAGENT_DISPLAY_ORIGIN, SUBAGENT_DISPLAY_T
 export { getAgentDir };
 
 const SESSION_HEADER_MAX_BYTES = 64 * 1024;
-const SESSION_RELATION_MAX_BYTES = 256 * 1024;
-const SESSION_RELATION_MAX_LINES = 2;
-const SESSION_RESULT_MAX_BYTES = 256 * 1024;
 
 function readBoundedLines(filePath: string, maxBytes: number, maxLines: number): string[] {
   const fd = openSync(filePath, "r");
@@ -63,54 +60,6 @@ function readBoundedLines(filePath: string, maxBytes: number, maxLines: number):
   }
 }
 
-function readBoundedTailLines(filePath: string, maxBytes: number): string[] {
-  const fd = openSync(filePath, "r");
-  try {
-    const fileSize = fstatSync(fd).size;
-    const start = Math.max(0, fileSize - maxBytes);
-    const buffer = Buffer.allocUnsafe(fileSize - start);
-    const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
-    if (bytesRead === 0) return [];
-
-    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
-    if (start > 0) {
-      const previousByte = Buffer.allocUnsafe(1);
-      readSync(fd, previousByte, 0, 1, start - 1);
-      if (previousByte[0] !== 0x0a) lines.shift();
-    }
-    if (lines.at(-1) === "") lines.pop();
-    return lines.map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function parseSessionEntries(lines: readonly string[]): SessionEntry[] {
-  return lines.flatMap((line) => {
-    try {
-      const entry = JSON.parse(line) as SessionEntry;
-      return [entry];
-    } catch {
-      return [];
-    }
-  });
-}
-
-function readSessionRelationEntries(filePath: string): SessionEntry[] {
-  const prefixEntries = parseSessionEntries(
-    readBoundedLines(filePath, SESSION_RELATION_MAX_BYTES, SESSION_RELATION_MAX_LINES).slice(1),
-  );
-  const isSubagent = prefixEntries.some((entry) => (
-    entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE
-  ));
-  if (!isSubagent) return prefixEntries;
-
-  return [
-    ...prefixEntries,
-    ...parseSessionEntries(readBoundedTailLines(filePath, SESSION_RESULT_MAX_BYTES)),
-  ];
-}
-
 export async function attachSessionProjectInfo(sessions: SessionInfo[]): Promise<SessionInfo[]> {
   const uniqueCwds = [...new Set(sessions.map((s) => s.cwd).filter(Boolean))];
   const projectByCwd = new Map<string, ProjectInfo>();
@@ -136,9 +85,18 @@ export function mergeSessionLists(
   supplementalSessions: SessionInfo[],
 ): SessionInfo[] {
   const byId = new Map(supplementalSessions.map((session) => [session.id, session]));
-  // A disk scan is authoritative once the JSONL exists. In particular, this
-  // replaces a transient registry snapshot without briefly rendering two rows.
-  for (const session of persistedSessions) byId.set(session.id, session);
+  // Disk owns display fields, but an alive RPC wrapper has the current child
+  // identity/status even while a write or catalogue scan is still in flight.
+  // Runtime relations have already been checked against their header's parent.
+  for (const session of persistedSessions) {
+    const runtime = byId.get(session.id);
+    const liveRelation = runtime?.relation?.kind === "subagent"
+      && sessionPathKey(runtime.path) === sessionPathKey(session.path)
+      ? runtime.relation : undefined;
+    byId.set(session.id, liveRelation
+      ? { ...session, parentSessionId: liveRelation.parentSessionId, relation: { ...liveRelation } }
+      : session);
+  }
   return [...byId.values()].sort((a, b) => b.modified.localeCompare(a.modified));
 }
 
@@ -151,12 +109,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
   const sessions = scanned.map((s) => {
     cacheSessionPath(s.id, s.path);
     const originSessionId = s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined;
-    let subagent = null;
-    if (s.parentSessionPath) {
-      try {
-        subagent = readSubagentRun(readSessionRelationEntries(s.path), s.id, s.path);
-      } catch { /* malformed or concurrently removed session */ }
-    }
+    const subagent = s.subagentRelation;
     const nativeRelation = !subagent && s.parentSessionPath
       ? nativeSubagentRelation(s.initialAgentName, originSessionId, byPath.get(sessionPathKey(s.parentSessionPath))?.agentRunIds)
       : undefined;
@@ -171,7 +124,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: originSessionId,
       ...(subagent
-        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
+        ? { relation: { ...subagent } }
         : nativeRelation
           ? { relation: nativeRelation }
         : s.parentSessionPath

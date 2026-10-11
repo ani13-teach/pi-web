@@ -1,5 +1,6 @@
 import type { AgentSession, DefaultResourceLoader, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "./agent-manager.js";
+import type { RequestCoordinator } from "./task-coordination.js";
 
 // The SDK does not re-export these option interfaces. Derive them from its
 // public class instead of depending on unexported SDK subpaths.
@@ -24,6 +25,8 @@ export interface DesktopHost {
   /** May be implemented by the host as a live getter. */
   readonly maxConcurrent?: number;
   onManager(manager: AgentManager): void;
+  /** Install the cancellable pre-provider gate on the owning root only. */
+  installRequestCoordinator?(sessionId: string, coordinator: RequestCoordinator): boolean;
   bindChild(session: AgentSession, info: DesktopChildInfo): Promise<void>;
   shutdownChild(session: AgentSession): Promise<void>;
   resourceLoaderOptions?(configCwd: string, options: DefaultResourceLoaderOptions): DefaultResourceLoaderOptions | Promise<DefaultResourceLoaderOptions>;

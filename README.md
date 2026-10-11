@@ -139,6 +139,10 @@ host/origin 校验只接受环回或显式配置的主机名。浏览器自己�
 备用模型界面/保存检查：`node --test components/AgentsConfig.test.mjs lib/subagents.test.mjs app/api/subagents/profiles/route.test.mjs`（路由测试使用与 Desktop 构建相同的 `next/server` 垫片）。
 其中子代理测试使用真实 SDK 会话和本地模拟 provider，不调用真实模型或修改用户会话。
 
+### 子代理协作调度与结果协议
+
+Desktop 普通顶层后台 Agent 现在登记任务归属，默认在下一次主模型请求前等待必需结果；明确声明 `independent_work` 才授权一批独立工作，之后重新汇合。协调结果直接进入当前请求，不无条件追加完成 follow-up；旧任务与结束后普通顾问结果保持静默。新增 `subagent_tasks` 控制等待/独立批次/明确收尾，结果默认摘要，可用 `get_subagent_result view:"evidence"` 定点核对或 `view:"full"` 获取原文。前台、嵌套、workflow 和旧宿主保持兼容路径，权限检查不变。行为、限制、取消语义及离线验收见 [子代理协作调度](docs/subagent-coordination.md)。
+
 ### 子代理运行设置与高级选项
 
 入口：**设置 → 子代理 → 左侧「运行设置」**，可选「所有项目」或「当前项目」。

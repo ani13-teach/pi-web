@@ -2,7 +2,7 @@ import type { AssistantContentBlock, ToolResultMessage } from "./types";
 
 export const SUBAGENT_DISPLAY_META_TYPE = "pi-web:subagent-display";
 export const SUBAGENT_DISPLAY_ORIGIN = "pi-subagents" as const;
-export const SUBAGENT_DISPLAY_TOOLS = new Set(["Agent", "SubagentWorkflow", "get_subagent_result", "steer_subagent"]);
+export const SUBAGENT_DISPLAY_TOOLS = new Set(["Agent", "SubagentWorkflow", "get_subagent_result", "steer_subagent", "subagent_tasks"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -41,9 +41,11 @@ export function isSubagentControlBlock(
 }
 
 export function isSubagentInternalMessage(message: { role?: string; customType?: string; details?: unknown }): boolean {
-  if (message.role !== "custom" || message.customType !== "subagent-notification" || !isRecord(message.details)) return false;
+  if (message.role !== "custom" || !isRecord(message.details)) return false;
   const details = message.details;
-  if (details.displayOrigin === SUBAGENT_DISPLAY_ORIGIN) return true;
+  if (details.displayOrigin === SUBAGENT_DISPLAY_ORIGIN
+    && (message.customType === "subagent-notification" || message.customType === "subagent-task-state")) return true;
+  if (message.customType !== "subagent-notification") return false;
   // Older native notifications had this structured payload, but no origin tag.
   // Never hide an arbitrary extension message just because its type matches.
   return typeof details.id === "string" && typeof details.description === "string"
