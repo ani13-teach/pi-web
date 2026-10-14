@@ -1,4 +1,6 @@
+import { authModelMessages } from "./auth-models";
 import { backupMessages } from "./backup";
+import { mcpMessages } from "./mcp";
 import type { LocalePlugin } from "../types";
 
 /** Pi Web 内置英语语言包。 */
@@ -6,6 +8,7 @@ export const enLocale: LocalePlugin = {
   id: "en",
   label: "English",
   messages: {
+    ...authModelMessages("en"),
     "common.ok": "OK",
     "common.language": "Language",
     "common.models": "Models",
@@ -48,6 +51,7 @@ export const enLocale: LocalePlugin = {
     "settings.codemodeDescription": "Let AI call tools in parallel and filter results with JavaScript. Existing tools and safety checks stay in place. Off by default and unavailable in chat-only mode. Switching reloads the current session; reload other sessions to apply.",
     "settings.projectRequired": "Open a project to configure this section",
     ...backupMessages("en"),
+    ...mcpMessages("en"),
     "auth.prompt": "Sign in to continue",
     "auth.password": "Password",
     "auth.logIn": "Log in",
@@ -837,6 +841,8 @@ export const enLocale: LocalePlugin = {
     "automode.testing": "Testing…",
     "automode.testOk": "Answered in {ms} ms ({text})",
     "automode.testFailed": "Failed: {error}",
+    "automode.advanced": "Advanced settings",
+    "automode.fallbackRules": "Fallback model rules",
     "automode.budget": "Time and token budget",
     "automode.reasoning": "Reasoning effort",
     "automode.reasoningServer": "Let the server choose",

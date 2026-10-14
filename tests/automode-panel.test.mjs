@@ -71,6 +71,21 @@ test("the model fields are a picker fed by models.json and the registry, not a f
   assert.match(config, /placement="auto"/);
 });
 
+test("the compact layout keeps advanced options editable and actions outside the scroll area", async () => {
+  const css = await read("renderer/automode-settings.css");
+  const desktop = await read("renderer/desktop.css");
+  assert.match(desktop, /@import "\.\/automode-settings\.css"/);
+  assert.match(config, /className="automode-content"/);
+  assert.match(config, /<footer className="automode-footer">/);
+  assert.match(config, /<details className="automode-advanced" open=\{advancedOpen\}/);
+  assert.match(config, /if \(errors\.length > 0\) \{\s*setAdvancedOpen\(true\)/);
+  assert.match(config, /<details className="automode-help">/);
+  assert.match(css, /\.automode-content \{[^}]*overflow-y: auto/s);
+  assert.match(css, /\.automode-footer \{[^}]*flex-shrink: 0/s);
+  assert.match(css, /@media \(max-width: 600px\)/);
+  assert.match(css, /\.automode-input:focus-visible/);
+});
+
 test("saving sends only the fields the user touched", () => {
   assert.match(draft, /export function buildPatch\(current: Draft, base: Draft\)/);
   assert.match(draft, /const dirty = new Set\(changedKeys\(current, base\)\)/);

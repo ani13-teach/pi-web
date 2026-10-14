@@ -6,11 +6,12 @@ import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { createDesktopSessionExtensions, applyDesktopSessionExtensionPolicy, createAgentExtensionPolicy } from "./desktop-session-extensions";
-import { createToolScopeGuard, installExtensionToolScope, parseExtSelectors, parseExtensionsSpec } from "../builtin/pi-subagents/src/resource-policy";
+import { createToolScopeGuard, installExtensionToolScope, isToolInSessionScope, parseExtSelectors, parseExtensionsSpec } from "../builtin/pi-subagents/src/resource-policy";
 import { BUILTIN_TOOL_NAMES } from "../builtin/pi-subagents/src/agent-types";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
+import { applyDesktopModelSelections, getDesktopModelSelections, isDesktopModelEnabled } from "./auth-model-settings";
 import {
   createProjectCommandBashOperations,
 } from "./project-command-env";
@@ -45,6 +46,10 @@ import {
 } from "./subagents";
 import { resolveShellTools } from "./powershell-settings";
 import { applyCodemodeSelection } from "./codemode";
+import { getDesktopMcpRuntime, getMcpSettingsRoots, loadMcpCoreConfigApi, mcpMayEnableCodemode } from "./mcp-runtime";
+import { getMcpConfigRevision, readMcpConfigView } from "./mcp-config-store";
+import type { McpSessionView } from "./mcp-types";
+import { watchMcpConfigFiles } from "./mcp-config-watch";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { FilteredResourceLoader } from "./filtered-resource-loader";
 import {
@@ -209,14 +214,20 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
 
   const codingToolNames = new Set(CODING_TOOL_NAMES);
   const selectedToolNames = resolveShellTools(toolNames, session.settingsManager.getDefaultTools());
-  const extensionToolNames = session
-    .getAllTools()
-    .map((t) => t.name)
-    .filter((name) => !codingToolNames.has(name));
-
+  // Indirect/hidden MCP tools must not be promoted into hundreds of model
+  // declarations when restoring a coding preset. Discovery stays independent.
+  const allTools = session.getAllTools() as Array<ToolInfo & { exposure?: string }>;
+  const active = new Set(session.getActiveToolNames());
+  const extensionToolNames = allTools.filter(tool => !codingToolNames.has(tool.name)
+    && tool.exposure !== "hidden"
+    && (!["codemode", "deferred"].includes(tool.exposure ?? "") || active.has(tool.name)))
+    .map(tool => tool.name);
+  const snapshot = getDesktopMcpRuntime(session.sessionId)?.snapshot();
+  const mcpNeedsCodemode = !!snapshot?.autoEnableCodemode && mcpMayEnableCodemode(session.settingsManager)
+    && snapshot.servers.some(server => server.enabled && (server.exposure === "codemode" || server.tools.some(tool => tool.exposure === "codemode")));
   return applyCodemodeSelection(
     [...selectedToolNames, ...extensionToolNames],
-    session.settingsManager.getDefaultTools(),
+    session.settingsManager.getDefaultTools(), mcpNeedsCodemode,
   );
 }
 
@@ -240,6 +251,12 @@ export class AgentSessionWrapper {
   private pendingPromptCount = 0;
   private activeMutatingCommands = 0;
   private sessionReplacement: "fork" | "clone" | null = null;
+  private resourceReloadPromise: Promise<void> | null = null;
+  private mcpRetryPromise: Promise<void> | null = null;
+  private mcpApplyState: McpSessionView["applyState"] = "idle";
+  private mcpApplyError: string | undefined;
+  private mcpApplyTimer: ReturnType<typeof setTimeout> | null = null;
+  private unwatchMcpConfig: (() => void) | null = null;
   private agentRunNeedsCompletion = false;
   private promptAdmissionTail: Promise<void> = Promise.resolve();
   private extensionsBound = false;
@@ -285,6 +302,8 @@ export class AgentSessionWrapper {
   get cwd(): string {
     return this.inner.sessionManager.getCwd();
   }
+
+  get configurationRoot(): string { return this.configurationCwd ?? this.cwd; }
 
   get streamingMessage() {
     return this.inner.agent.state?.streamingMessage;
@@ -430,6 +449,7 @@ export class AgentSessionWrapper {
       this.onExtensionBindingComplete?.();
       if (!this._alive) throw new Error("Session is closing");
       this.extensionsBound = true;
+      this.ensureMcpConfigWatcher();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       if (this._alive) this.extensionBindingError = err;
@@ -635,6 +655,9 @@ export class AgentSessionWrapper {
   async send(command: Record<string, unknown>): Promise<unknown> {
     const type = command.type as string;
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
+    if ((this.resourceReloadPromise || this.mcpRetryPromise) && !allowedDuringReplacement && type !== "reload") {
+      throw new Error("Session resources are being reloaded");
+    }
     if (this.sessionReplacement && !allowedDuringReplacement) {
       throw new Error("Session is being copied to a new session");
     }
@@ -651,6 +674,7 @@ export class AgentSessionWrapper {
       if (!["get_state", "get_tools", "get_commands"].includes(type)) this.resetIdleTimer();
       if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
       if (!this.isAlive()) throw new Error("Session is closing");
+      if ((this.resourceReloadPromise || this.mcpRetryPromise) && !allowedDuringReplacement && type !== "reload") throw new Error("Session resources are being reloaded");
       if (this.sessionReplacement && !allowedDuringReplacement) {
         throw new Error("Session is being copied to a new session");
       }
@@ -803,6 +827,16 @@ export class AgentSessionWrapper {
 
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
+        const selections = this.managedSubagent || this.suppressCompletionNotifications ? {} : getDesktopModelSelections();
+        // Normal desktop sessions must reload context-only overrides too, even
+        // when this provider has no explicit desktop model list. Internal child
+        // sessions retain their existing refresh and selection policy.
+        if (!this.managedSubagent && !this.suppressCompletionNotifications) {
+          await this.inner.modelRuntime.refresh({ allowNetwork: false });
+          if (!isDesktopModelEnabled(provider, modelId, selections)) {
+            throw new Error(`Model is hidden by desktop selection: ${provider}/${modelId}. Enable it in model settings first.`);
+          }
+        }
         let model = this.inner.modelRuntime.getModel(provider, modelId);
         if (!model) {
           await this.inner.modelRuntime.refresh({ allowNetwork: false });
@@ -1033,26 +1067,7 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
-        if (this.extensionUiAbortController.signal.aborted) {
-          this.extensionUiAbortController = new AbortController();
-        }
-        const activeToolNames = this.inner.getActiveToolNames();
-        await this.waitForExtensionsBound();
-        this.extensionStatuses.clear();
-        this.resetExtensionWidgetsForReload();
-        this.syncProjectTrust();
-        await this.inner.reload();
-        // An empty loadout is not necessarily Chat-only: a normal session can
-        // have had only codemode, then disabled it. Preserve actual Chat-only,
-        // but let newly enabled defaults recover a normal empty session.
-        this.setActiveToolSelection(activeToolNames.length === 0 && !this.chatOnly
-          ? this.inner.getActiveToolNames()
-          : activeToolNames);
-        if (typeof this.inner.bindExtensions !== "function") {
-          this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
-        }
-        this.onExtensionBindingComplete?.();
-        invalidateModelsCache();
+        await this.reloadResources();
         return { success: true };
       }
 
@@ -1117,6 +1132,11 @@ export class AgentSessionWrapper {
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
+    this.unwatchMcpConfig?.();
+    this.unwatchMcpConfig = null;
+    if (this.mcpApplyTimer) clearTimeout(this.mcpApplyTimer);
+    this.mcpApplyTimer = null;
+    this.mcpApplyState = "idle";
     this.emit({ type: "dormant", sessionId: this.sessionId });
     this.listeners = [];
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -1749,22 +1769,149 @@ export class AgentSessionWrapper {
         return { cancelled: result.cancelled };
       },
       switchSession: async () => ({ cancelled: true }),
-      reload: async () => {
-        this.extensionStatuses.clear();
-        this.resetExtensionWidgetsForReload();
-        this.syncProjectTrust();
-        await this.inner.reload({
-          beforeSessionStart: () => {
-            this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
-          },
-        });
-        this.onExtensionBindingComplete?.();
-      },
+      // A slash command is itself one admitted prompt, but is not an agent run.
+      reload: () => this.reloadResources(1, true),
     };
   }
 
+  private ensureMcpConfigWatcher(): void {
+    if (this.unwatchMcpConfig || !getDesktopMcpRuntime(this.sessionId)) return;
+    const roots = getMcpSettingsRoots(this.configurationRoot, this.inner.settingsManager);
+    this.unwatchMcpConfig = watchMcpConfigFiles(roots.agentDir, roots.cwd, () => {
+      if (!this.isAlive() || !getDesktopMcpRuntime(this.sessionId)) return;
+      const view = this.getMcpSessionView();
+      this.createExtensionUiContext().setStatus("desktop-mcp-config", view.pending ? "MCP 配置已更改，请在设置 → MCP 中应用。" : undefined);
+    });
+  }
+
+  private resourcesBusy(allowedCommands = 0, commandReload = false): boolean {
+    return this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning
+      || this.pendingPromptCount > (commandReload ? 1 : 0) || !!this.mcpRetryPromise || this.isBackgroundActive() || this.activeToolEvents.size > 0
+      || this.pendingUiRequests.size > 0 || this.activeCustomUis.size > 0
+      || this.activeMutatingCommands > allowedCommands || this.sessionReplacement !== null;
+  }
+
+  getMcpSessionView(): McpSessionView {
+    const runtime = getDesktopMcpRuntime(this.sessionId);
+    const snapshot = runtime?.snapshot() ?? null;
+    if (snapshot) {
+      const callable = new Set((this.inner.getCallableToolNames?.() ?? []).filter(name => isToolInSessionScope(this.inner, name)));
+      for (const server of snapshot.servers) {
+        server.tools = server.tools.map(tool => ({ ...tool, callable: !!tool.registeredName && callable.has(tool.registeredName) }));
+        server.resourcesCallable = callable.has("read_mcp_resource") || callable.has("list_mcp_resources");
+      }
+    }
+    const command = this.inner.extensionRunner.getRegisteredCommands().find(item => item.invocationName === "mcp");
+    const explicitlyDisabled = this.inner.settingsManager.getSettings().extensions?.includes("-builtin:mcp");
+    const provider = runtime ? "builtin" : command ? "external" : this.chatOnly || explicitlyDisabled ? "disabled" : "unloaded";
+    const roots = getMcpSettingsRoots(this.configurationRoot, this.inner.settingsManager);
+    // Trust changes outside this session make it pending too; do not apply them here.
+    const trusted = getProjectTrustStatus(roots.cwd, roots.agentDir).trusted;
+    let savedRevision: string | null = null;
+    try { savedRevision = getMcpConfigRevision({ ...roots, projectTrusted: trusted }); } catch { /* surfaced in config view */ }
+    return {
+      id: this.sessionId, runtimeActive: this.isAlive(), busy: this.resourcesBusy() || !!this.resourceReloadPromise,
+      provider, generation: runtime?.generation ?? 0,
+      appliedRevision: runtime?.configRevision ?? null,
+      pending: !runtime?.configRevision || runtime.configRevision !== savedRevision,
+      applyState: this.mcpApplyState, ...(this.mcpApplyError ? { error: this.mcpApplyError } : {}),
+      activeTools: this.inner.getActiveToolNames(), snapshot,
+    };
+  }
+
+  private async validateMcpFiles(): Promise<void> {
+    const roots = getMcpSettingsRoots(this.configurationRoot, this.inner.settingsManager);
+    const projectTrusted = getProjectTrustStatus(roots.cwd, roots.agentDir).trusted;
+    const context = { ...roots, projectTrusted };
+    const views = await Promise.all([readMcpConfigView({ ...context, scope: "global" }),
+      ...(projectTrusted ? [readMcpConfigView({ ...context, scope: "project" })] : [])]);
+    if (views.some(view => view.error)) throw new Error("MCP 配置文件无法读取或格式损坏，现有连接未被重载。");
+    const configApi = await loadMcpCoreConfigApi();
+    if (configApi.loadMcpConfig(context).errors.length) throw new Error("MCP 配置文件含无效的服务配置，现有连接未被重载。");
+  }
+
+  /** Explicitly queued by the user; never reload resources merely because a file changed. */
+  async requestMcpApply(): Promise<void> {
+    if (!this.isAlive()) throw new Error("Session is closing");
+    if (this.mcpApplyState === "queued" || this.mcpApplyState === "applying") return;
+    const provider = this.getMcpSessionView().provider;
+    if (provider === "external" || provider === "disabled") throw new Error("当前会话由外部模块提供 MCP 或已禁用扩展，请先检查扩展设置。");
+    await this.validateMcpFiles();
+    if (!this.isAlive()) throw new Error("Session is closing");
+    const latestApply = this.getMcpSessionView().applyState;
+    if (latestApply === "queued" || latestApply === "applying") return;
+    this.mcpApplyError = undefined;
+    if (!this.resourcesBusy() && !this.resourceReloadPromise) { await this.reloadResources(0); return; }
+    this.mcpApplyState = "queued";
+    this.scheduleMcpApply();
+  }
+
+  retryMcpServer(name: string): Promise<void> {
+    if (!this.isAlive() || this.resourcesBusy() || this.resourceReloadPromise) return Promise.reject(new Error("会话正忙，请稍后重连。"));
+    const runtime = getDesktopMcpRuntime(this.sessionId);
+    if (!runtime) return Promise.reject(new Error("MCP 尚未加载。"));
+    this.mcpRetryPromise = Promise.resolve().then(() => runtime.retry(name)).finally(() => { this.mcpRetryPromise = null; this.resetIdleTimer(); });
+    return this.mcpRetryPromise;
+  }
+
+  cancelMcpApply(): void {
+    if (this.mcpApplyState !== "queued") return;
+    if (this.mcpApplyTimer) clearTimeout(this.mcpApplyTimer);
+    this.mcpApplyTimer = null;
+    this.mcpApplyState = "idle";
+  }
+
+  private scheduleMcpApply(): void {
+    if (this.mcpApplyTimer || !this.isAlive()) return;
+    this.mcpApplyTimer = setTimeout(() => {
+      this.mcpApplyTimer = null;
+      if (!this.isAlive() || this.mcpApplyState !== "queued") return;
+      if (this.resourcesBusy() || this.resourceReloadPromise) { this.scheduleMcpApply(); return; }
+      void this.reloadResources(0).catch(() => { /* safe error retained for the settings page */ });
+    }, 250);
+    this.mcpApplyTimer.unref?.();
+  }
+
+  /** One lock for UI /reload, MCP Apply, and extension-command reloads. */
+  private reloadResources(allowedCommands = 1, commandReload = false): Promise<void> {
+    if (this.resourceReloadPromise) return this.resourceReloadPromise;
+    if (!this.isAlive()) return Promise.reject(new Error("Session is closing"));
+    if (this.resourcesBusy(allowedCommands, commandReload)) return Promise.reject(new Error("会话仍有任务运行，请在任务结束后重新加载。"));
+    this.mcpApplyState = "applying";
+    this.mcpApplyError = undefined;
+    // Set the lock synchronously, before any await, so prompts cannot race reload.
+    this.resourceReloadPromise = Promise.resolve().then(async () => {
+      await this.waitForExtensionsBound();
+      await this.validateMcpFiles();
+      if (!this.isAlive()) throw new Error("Session is closing");
+      if (this.resourcesBusy(allowedCommands, commandReload)) throw new Error("会话仍有任务运行，请稍后应用。");
+      if (this.extensionUiAbortController.signal.aborted) this.extensionUiAbortController = new AbortController();
+      const activeToolNames = this.inner.getActiveToolNames();
+      this.extensionStatuses.clear();
+      this.resetExtensionWidgetsForReload();
+      this.syncProjectTrust();
+      await this.inner.reload({ beforeSessionStart: () => {
+        this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
+      } });
+      if (!this.isAlive()) throw new Error("Session is closing");
+      this.setActiveToolSelection(activeToolNames.length === 0 && !this.chatOnly ? this.inner.getActiveToolNames() : activeToolNames);
+      this.onExtensionBindingComplete?.();
+      this.ensureMcpConfigWatcher();
+      invalidateModelsCache();
+      this.mcpApplyState = "idle";
+      const mcp = getDesktopMcpRuntime(this.sessionId);
+      this.createExtensionUiContext().setStatus("desktop-mcp-config", mcp && this.getMcpSessionView().pending ? "MCP 配置仍有更新，请重新应用。" : undefined);
+    }).catch((error: unknown) => {
+      this.mcpApplyState = "failed";
+      this.mcpApplyError = "应用配置失败，请检查配置与会话状态后重试。";
+      throw error;
+    }).finally(() => { this.resourceReloadPromise = null; this.resetIdleTimer(); });
+    return this.resourceReloadPromise;
+  }
+
   private syncProjectTrust(): void {
-    const status = getProjectTrustStatus(this.configurationCwd ?? this.cwd, getAgentDir());
+    const roots = getMcpSettingsRoots(this.configurationRoot, this.inner.settingsManager);
+    const status = getProjectTrustStatus(roots.cwd, roots.agentDir);
     this.inner.settingsManager.setProjectTrusted(status.trusted);
   }
 }
@@ -1882,6 +2029,11 @@ export function getStartingRpcSession(sessionId: string) {
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
   return getRegistry().get(sessionId);
+}
+
+/** Query existing runtimes only: never wake dormant sessions for MCP management. */
+export function getLiveRpcSessions(): AgentSessionWrapper[] {
+  return [...new Set(getRegistry().values())].filter(session => session.isAlive());
 }
 
 export interface SetRpcSessionToolsResult {
@@ -2207,10 +2359,13 @@ export async function startRpcSession(
       loader: services.resourceLoader,
       extensionPaths: filteredLoaderOptions.additionalExtensionPaths!,
     });
-    const scope = await resolveVisibleModels(
+    const selections = subagentResources ? {} : getDesktopModelSelections();
+    const legacyScope = await resolveVisibleModels(
       services.modelRuntime,
       services.settingsManager.getEnabledModels(),
     );
+    const scope = applyDesktopModelSelections(legacyScope, selections,
+      Object.keys(selections).length ? await services.modelRuntime.getAvailable() : legacyScope.visible);
     const effectiveInitialModel = initialModel && (
       !allowInitialModelFallback
       || scope.visible.some((model) => model.provider === initialModel.provider && model.id === initialModel.modelId)
@@ -2221,6 +2376,9 @@ export async function startRpcSession(
     const defaultModelId = services.settingsManager.getDefaultModel();
     const branch = sessionManager.getBranch();
     const hasExistingMessages = branch.some((entry) => entry.type === "message");
+    if (!hasExistingMessages && !subagentResources && scope.visible.length === 0) {
+      throw new Error("No enabled models are available. Enable a model in model settings and configure its credentials before starting a new session.");
+    }
     const savedModel = hasExistingMessages
       ? getLatestModelChange(branch as unknown as SessionEntry[])
       : null;

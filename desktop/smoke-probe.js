@@ -531,35 +531,65 @@
       throw new Error("the scope picker is missing");
     }
 
+    // The current form puts advanced fields inside a disclosure and keeps the
+    // footer outside the scroll area. Inspect that structure, not the old
+    // all-in-one scrolling .automode-settings wrapper.
+    const advanced = page.querySelector(".automode-advanced");
+    const scroll = page.querySelector(".automode-content");
+    const inner = page.querySelector(".automode-form");
+    const footer = page.querySelector(".automode-footer");
+    if (!advanced || !scroll || !inner || !footer || scroll.contains(footer)) {
+      throw new Error("the form needs advanced fields, a scroll area, and separate footer actions");
+    }
+    advanced.open = true;
+    await sleep(100);
     const host = page.parentElement;
     const measure = () => {
       const pane = host.getBoundingClientRect();
       const form = page.getBoundingClientRect();
-      const style = getComputedStyle(page);
+      const style = getComputedStyle(scroll);
       if (Math.abs(pane.left - form.left) > 1 || Math.abs(pane.right - form.right) > 1) {
-        throw new Error(`the scroll area does not fill the pane: ${Math.round(form.width)}/${Math.round(pane.width)} px`);
+        throw new Error(`the form does not fill the pane: ${Math.round(form.width)}/${Math.round(pane.width)} px`);
       }
       if (style.overflowY !== "auto") throw new Error("the form needs its own scroll area");
       if (style.paddingLeft !== style.paddingRight) throw new Error("the form insets are not equal");
-      if (page.scrollWidth > page.clientWidth + 1) throw new Error("the form overflows horizontally");
-      // clientWidth excludes the scrollbar, so this is the area a row may fill.
-      const right = form.left + page.clientWidth - parseFloat(style.paddingRight);
-      const content = page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-      const rows = [...page.querySelectorAll(".settings-chat-options")];
-      if (rows.length === 0) throw new Error("the form has no switch rows");
-      // A row that stops short of the right edge is the empty column the user reported.
+      if (page.scrollWidth > page.clientWidth + 1 || scroll.scrollWidth > scroll.clientWidth + 1) {
+        throw new Error("the form overflows horizontally");
+      }
+      const scrollRect = scroll.getBoundingClientRect();
+      const contentLeft = scrollRect.left + parseFloat(style.paddingLeft);
+      const contentRight = scrollRect.left + scroll.clientWidth - parseFloat(style.paddingRight);
+      const body = inner.getBoundingClientRect();
+      const expectedWidth = Math.min(920, contentRight - contentLeft);
+      if (Math.abs(body.width - expectedWidth) > 1 || Math.abs((body.left - contentLeft) - (contentRight - body.right)) > 1) {
+        throw new Error("the form must fill its available column up to the 920px reading-width limit");
+      }
+      const rows = [...inner.querySelectorAll(".automode-enabled, .settings-chat-options")];
+      if (rows.length < 2) throw new Error("the form has no switch rows");
       for (const row of rows) {
         const width = row.getBoundingClientRect().width;
-        if (Math.abs(width - content) > 1) {
-          throw new Error(`a switch row is ${Math.round(width)} px wide, the content area is ${Math.round(content)} px`);
+        if (Math.abs(width - body.width) > 1) {
+          throw new Error(`a switch row is ${Math.round(width)} px wide, the content area is ${Math.round(body.width)} px`);
         }
       }
       for (const control of page.querySelectorAll("input, select, textarea, button")) {
+        if (!control.getClientRects().length) continue;
         const rect = control.getBoundingClientRect();
-        if (rect.width <= 0 || rect.left < form.left || rect.right > right + 1) {
+        const bounds = inner.contains(control) ? body : footer.getBoundingClientRect();
+        if (rect.width <= 0 || rect.left < bounds.left - 1 || rect.right > bounds.right + 1) {
           throw new Error("a form control extends outside the content area");
         }
       }
+      const footerTop = footer.getBoundingClientRect().top;
+      const previousScroll = scroll.scrollTop;
+      scroll.scrollTop = scroll.scrollHeight;
+      if (scroll.scrollHeight > scroll.clientHeight + 1 && scroll.scrollTop <= 0) {
+        throw new Error("the overflowing advanced fields cannot be scrolled");
+      }
+      if (Math.abs(footer.getBoundingClientRect().top - footerTop) > 1) {
+        throw new Error("footer actions moved with the scroll content");
+      }
+      scroll.scrollTop = previousScroll;
       return Math.round(form.width);
     };
     const widths = [measure()];
@@ -700,7 +730,7 @@
     }
   });
 
-  await record("the complete backup page confirms export passwords and selects files before import passwords", async () => {
+  await record("MCP settings load through IPC without activating dormant services", async () => {
     const openButton = [...document.querySelectorAll("button[aria-label]")]
       .find((button) => ["设置", "Settings", "設定"].includes(button.getAttribute("aria-label")));
     if (!openButton) throw new Error("no settings button");
@@ -708,12 +738,61 @@
     const dialog = await waitFor(() => document.querySelector(".settings-dialog-surface"));
     if (!dialog) throw new Error("settings dialog did not open");
     const tab = [...dialog.querySelectorAll("button")]
-      .find((button) => ["完整备份", "Complete backup", "完整備份"].includes(button.textContent.trim()));
+      .find((button) => ["MCP 工具服务", "MCP tool servers"].includes(button.textContent.trim()));
+    if (!tab) throw new Error("no MCP tab");
+    tab.click();
+    const page = await waitFor(() => dialog.querySelector(".mcp-settings"));
+    if (!page) throw new Error("MCP page did not load");
+    const selected = new URLSearchParams(location.search).get("session");
+    const params = new URLSearchParams({ cwd: window.__piSmokeWorkspace });
+    if (selected) params.set("sessionId", selected);
+    const response = await fetch(`/api/mcp?${params}`);
+    if (!response.ok) throw new Error(`MCP status ${response.status}`);
+    const data = await response.json();
+    if (!data.config?.global?.editable || !Array.isArray(data.affectedSessions))
+      throw new Error("MCP overview did not expose safe configuration state");
+    if (data.session?.runtimeActive) throw new Error("reading MCP settings activated dormant history");
+    const findCheck = () => [...page.querySelectorAll("button")]
+      .find((button) => ["检查已有连接", "Check existing connections"].includes(button.textContent.trim()));
+    if (data.config.global.servers.length === 0) {
+      // An empty list has no detail header or check button. Open an unsaved
+      // blank draft to exercise the disabled action without writing config.
+      const add = await waitFor(() => {
+        const button = page.querySelector(".config-list-action-button");
+        return button && !button.disabled && page.querySelector(".config-empty-state button") ? button : null;
+      });
+      if (!add) throw new Error("the empty MCP list did not finish loading");
+      if (findCheck()) throw new Error("an empty MCP list unexpectedly offered a connection check");
+      add.click();
+    }
+    const check = await waitFor(findCheck);
+    if (!check?.disabled) throw new Error("a dormant session must not offer a connection check");
+    const afterResponse = await fetch(`/api/mcp?${params}`);
+    if (!afterResponse.ok) throw new Error(`MCP recheck status ${afterResponse.status}`);
+    const after = await afterResponse.json();
+    if (after.session?.runtimeActive || JSON.stringify(after.config) !== JSON.stringify(data.config)) {
+      throw new Error("opening MCP details activated a runtime or changed configuration");
+    }
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    if (!await waitFor(() => !document.querySelector(".settings-dialog-surface")))
+      throw new Error("settings dialog stayed open");
+    return "configuration loads over IPC; dormant session stays inactive; no configuration writes or business calls";
+  });
+
+  await record("the backup page confirms export passwords and selects files before import passwords", async () => {
+    const openButton = [...document.querySelectorAll("button[aria-label]")]
+      .find((button) => ["设置", "Settings", "設定"].includes(button.getAttribute("aria-label")));
+    if (!openButton) throw new Error("no settings button");
+    openButton.click();
+    const dialog = await waitFor(() => document.querySelector(".settings-dialog-surface"));
+    if (!dialog) throw new Error("settings dialog did not open");
+    const tab = [...dialog.querySelectorAll("button")]
+      .find((button) => ["备份", "Backup", "備份"].includes(button.textContent.trim()));
     if (!tab) throw new Error("no backup tab");
     tab.click();
     const page = await waitFor(() => {
       const heading = [...dialog.querySelectorAll("h2")]
-        .find((element) => ["完整备份", "Complete backup", "完整備份"].includes(element.textContent.trim()));
+        .find((element) => ["备份", "Backup", "備份"].includes(element.textContent.trim()));
       return heading?.parentElement ?? null;
     });
     if (!page) throw new Error("backup page did not load");
@@ -721,7 +800,7 @@
     if (page.querySelectorAll('input[type="password"]').length !== 2)
       throw new Error("export needs two passwords; import password must wait for file selection");
     const exportButton = [...page.querySelectorAll("button")].find((button) =>
-      ["选择保存位置并加密导出", "Choose location and export encrypted archive", "選擇儲存位置並加密匯出"].includes(button.textContent.trim()));
+      ["保存备份", "Save backup", "儲存備份"].includes(button.textContent.trim()));
     const importButton = [...page.querySelectorAll("button")].find((button) =>
       ["选择备份文件", "Select backup file", "選擇備份檔案"].includes(button.textContent.trim()));
     if (!exportButton?.disabled || !importButton || importButton.disabled)

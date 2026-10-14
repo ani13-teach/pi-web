@@ -14,9 +14,10 @@ export function createDesktopCodemodeExtension(): InlineExtension {
 export function applyCodemodeSelection(
   toolNames: readonly string[],
   defaultTools: readonly string[] | undefined,
+  mcpNeedsCodemode = false,
 ): string[] {
   if (toolNames.length === 0) return [];
   const selected = toolNames.filter((name) => name !== "codemode");
-  if (defaultTools?.includes("codemode")) selected.push("codemode");
+  if (defaultTools?.includes("codemode") || mcpNeedsCodemode) selected.push("codemode");
   return [...new Set(selected)];
 }

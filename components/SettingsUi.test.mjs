@@ -5,11 +5,12 @@ import test from "node:test";
 const templateSource = await readFile(new URL("./SettingsUi.tsx", import.meta.url), "utf8");
 const cssSource = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
 const globalCssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-const layoutSource = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
+const desktopSource = await readFile(new URL("../renderer/main.tsx", import.meta.url), "utf8");
+const desktopCssSource = await readFile(new URL("../renderer/desktop.css", import.meta.url), "utf8");
 const enSource = await readFile(new URL("../lib/i18n/messages/en.ts", import.meta.url), "utf8");
 const zhSource = await readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8");
 const configSources = await Promise.all(
-  ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"].map(async (name) => [
+  ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig", "McpConfig"].map(async (name) => [
     name,
     await readFile(new URL(`./${name}.tsx`, import.meta.url), "utf8"),
   ]),
@@ -49,14 +50,15 @@ test("provides one template for config layout and controls", () => {
 });
 
 test("loads settings presentation from its dedicated stylesheet", () => {
-  assert.match(layoutSource, /import "\.\/globals\.css";\s*import "\.\/settings\.css";/);
+  assert.match(desktopSource, /import "\.\/desktop\.css";/);
+  assert.match(desktopCssSource, /@import "\.\.\/app\/globals\.css";\s*@import "\.\.\/app\/settings\.css";/);
   assert.match(cssSource, /\.config-panel-root \{/);
   assert.match(cssSource, /\.settings-dialog-backdrop \{/);
   assert.doesNotMatch(globalCssSource, /\.config-panel-root \{/);
   assert.doesNotMatch(globalCssSource, /\.settings-dialog-backdrop \{/);
 });
 
-test("all four settings sections use the shared list-detail layout", () => {
+test("all configuration sections including MCP use the shared list-detail layout", () => {
   for (const [name, source] of configSources) {
     for (const primitive of ["ConfigPanelShell", "ConfigSplitView", "ConfigSidebar", "ConfigDetail", "ConfigFooter"]) {
       assert.match(source, new RegExp(`<${primitive}`), `${name} should use ${primitive}`);

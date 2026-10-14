@@ -8,6 +8,7 @@ import {
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getModelsConfigPath, readModelsConfig } from "./models-config-store";
 import { invalidateModelsCache } from "./models-cache";
+import { getDesktopModelSelections, isRecord } from "./auth-model-settings";
 
 /**
  * Keep `settings.json`'s `enabledModels` in step with `models.json`.
@@ -91,6 +92,8 @@ export interface PlanEnabledModelsSyncOptions {
    * settings page.
    */
   knownProviderIds: readonly string[];
+  /** Explicit desktop lists own these providers; never auto-add or auto-prune them. */
+  managedProviderIds?: readonly string[];
 }
 
 export interface SyncEnabledModelsOptions {
@@ -171,6 +174,7 @@ export async function planEnabledModelsSync(
     Object.entries(definedModels).map(([providerId, ids]) => [providerId, new Set(ids)]),
   );
   const known = new Set(knownProviderIds);
+  const managed = new Set(options.managedProviderIds ?? []);
   if (patterns.length === 0 || defined.size === 0) return plan;
 
   const snapshotRuntime = {
@@ -188,7 +192,7 @@ export async function planEnabledModelsSync(
   const isRemovable = (pattern: string): boolean => {
     if (!deadPatterns.has(pattern)) return false;
     const reference = patternReference(pattern);
-    if (reference === undefined) return false;
+    if (reference === undefined || managed.has(reference.provider)) return false;
     const declared = defined.get(reference.provider);
     // Not declared any more. A provider the runtime still knows is a built-in (or
     // an extension's) that the user curated by hand, so leave it alone; a
@@ -201,7 +205,7 @@ export async function planEnabledModelsSync(
   const kept = patterns.filter((pattern) => !isRemovable(pattern));
   const added = new Set<string>();
   for (const model of availableModels) {
-    if (!defined.has(model.provider)) continue;
+    if (!defined.has(model.provider) || managed.has(model.provider)) continue;
     const reference = `${model.provider}/${model.id}`;
     if (matched.has(reference) || kept.includes(reference)) continue;
     added.add(reference);
@@ -252,7 +256,16 @@ async function reconcileEnabledModels(
 ): Promise<EnabledModelsSyncOutcome> {
   const agentDir = options.agentDir ?? getAgentDir();
   const modelsPath = getModelsConfigPath(agentDir);
-  const definedModels = collectDefinedModels(readModelsConfig(modelsPath));
+  const config = readModelsConfig(modelsPath);
+  const definedModels = collectDefinedModels(config);
+  // A builtin provider carrying only per-model overrides is not a new custom
+  // model definition. Context-only edits must not automatically enable its
+  // entire catalog (or prune its legacy references).
+  const overrideOnlyProviderIds = isRecord(config.providers)
+    ? Object.entries(config.providers).filter(([, provider]) => isRecord(provider)
+      && isRecord(provider.modelOverrides) && (!Array.isArray(provider.models) || provider.models.length === 0)).map(([id]) => id)
+    : [];
+  const managedProviderIds = [...Object.keys(getDesktopModelSelections(config)), ...overrideOnlyProviderIds];
   if (Object.keys(definedModels).length === 0) {
     return skipped("models.json defines no providers");
   }
@@ -287,6 +300,7 @@ async function reconcileEnabledModels(
     availableModels,
     definedModels,
     knownProviderIds: modelRuntime.getProviders().map((provider) => provider.id),
+    managedProviderIds,
   });
   if (plan.added.length === 0 && plan.removed.length === 0) {
     return { status: "unchanged", added: [], removed: [] };

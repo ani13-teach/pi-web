@@ -182,9 +182,334 @@
   color: var(--text-dim);
 }
 
+/* Auth model management: one aligned list, not nested configuration cards. */
+.auth-model-manager {
+  min-width: 0;
+  padding-top: 22px;
+  border-top: 1px solid var(--border);
+  container-type: inline-size;
+}
+
+.auth-model-heading,
+.auth-model-toolbar,
+.auth-model-bulk {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-model-heading {
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.auth-model-heading h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.auth-model-heading p {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.auth-model-count {
+  flex-shrink: 0;
+  padding-top: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.auth-model-toolbar {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin: 16px 0 12px;
+  gap: 8px;
+}
+
+.auth-model-search {
+  display: flex;
+  flex: 1 1 180px;
+  align-items: center;
+  gap: 8px;
+  max-width: 340px;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+}
+
+.auth-model-search:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.auth-model-search svg {
+  flex-shrink: 0;
+}
+
+.auth-model-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.auth-model-search input::placeholder,
+.auth-model-context input::placeholder {
+  color: var(--text-dim);
+}
+
+.auth-model-bulk {
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.auth-model-table-head,
+.auth-model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 170px) 76px;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-model-table-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  min-height: 34px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.auth-model-table-head > :first-child {
+  padding-left: 28px;
+}
+
+.auth-model-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.auth-model-choice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 34px;
+  cursor: pointer;
+}
+
+.auth-model-choice input {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.auth-model-choice input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.auth-model-name {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.auth-model-name strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.auth-model-row[data-enabled="false"] .auth-model-name strong {
+  color: var(--text-muted);
+}
+
+.auth-model-name code {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.auth-model-context {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.auth-model-context input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.auth-model-context input:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.auth-model-context input[aria-invalid="true"] {
+  border-color: #dc2626;
+}
+
+.auth-model-current {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.auth-model-field-error,
+.auth-model-save-error {
+  color: #dc2626;
+}
+
+.auth-model-field-error {
+  font-size: 11px;
+}
+
+.auth-model-reset {
+  margin-bottom: 20px;
+}
+
+.auth-model-mobile-label {
+  display: none;
+}
+
+.auth-model-message {
+  margin: 16px 0;
+  color: var(--text-muted);
+}
+
+.auth-model-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  color: #dc2626;
+}
+
+.auth-model-warning {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid #d97706;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.auth-model-notes {
+  margin-top: 14px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.auth-model-notes p {
+  margin: 0;
+}
+
+.auth-model-notes details {
+  margin-top: 8px;
+}
+
+.auth-model-notes summary {
+  width: fit-content;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.auth-model-notes details p {
+  margin-top: 6px;
+}
+
+.auth-model-notes summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@container (max-width: 440px) {
+  .auth-model-search {
+    max-width: none;
+  }
+
+  .auth-model-table-head {
+    display: none;
+  }
+
+  .auth-model-row {
+    grid-template-columns: minmax(0, 1fr) 86px;
+    gap: 8px 12px;
+  }
+
+  .auth-model-choice {
+    grid-column: 1 / -1;
+  }
+
+  .auth-model-context {
+    padding-left: 28px;
+  }
+
+  .auth-model-mobile-label {
+    display: block;
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+
+  .auth-model-reset {
+    margin-top: 19px;
+  }
+}
+
 .models-sidebar-add-item:not(:disabled):hover,
 .models-sidebar-add-item:not(:disabled):focus-visible {
   color: var(--accent);
+}
+
+@media (max-width: 640px) {
+  .config-panel-root:has(.auth-model-manager) .config-sidebar {
+    height: auto;
+    max-height: 142px;
+  }
+
+  .config-panel-root:has(.auth-model-manager) .config-sidebar-list {
+    flex: 0 1 auto;
+    max-height: 96px;
+  }
 }
 
 .config-sidebar-text {
@@ -956,6 +1281,265 @@
   color: var(--text-dim);
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* Backup keeps the two workflows compact without changing other settings pages. */
+.backup-settings {
+  max-width: 760px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  container-type: inline-size;
+}
+
+.backup-settings .settings-general-description {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.backup-intro {
+  margin: 8px 0 4px;
+}
+
+.backup-details {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.backup-details summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.backup-details summary:hover {
+  color: var(--text);
+}
+
+.backup-details summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.backup-details p {
+  margin: 8px 0 0;
+}
+
+.backup-section {
+  margin-top: 24px;
+}
+
+.backup-section + .backup-section {
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.backup-section .settings-general-heading {
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.backup-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.backup-help {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.backup-settings p.backup-help {
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+
+.backup-projects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.backup-projects li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.backup-scan {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+
+.backup-scan-summary {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.backup-settings ul:not(.backup-projects) {
+  padding-left: 20px;
+}
+
+.backup-settings h4 {
+  margin: 12px 0 4px;
+  font-size: 12px;
+}
+
+.backup-passwords {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.backup-input,
+.backup-conflict select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.backup-input::placeholder {
+  color: var(--text-dim);
+}
+
+.backup-input:focus-visible,
+.backup-conflict select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.backup-input:disabled {
+  opacity: 0.55;
+}
+
+.backup-submit {
+  margin-top: 14px;
+}
+
+.backup-filename {
+  margin: 10px 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.backup-unlock {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.backup-unlock .config-field {
+  flex: 1 1 180px;
+  max-width: 320px;
+}
+
+.backup-preview {
+  margin-top: 20px;
+}
+
+.backup-preview > ul li .config-button {
+  margin: 4px 0 4px 8px;
+}
+
+.backup-resource {
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 12px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.backup-resource legend {
+  padding: 0 8px 0 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.backup-resource p {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+}
+
+.backup-conflict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.backup-conflict select {
+  width: auto;
+  max-width: 100%;
+}
+
+.backup-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.backup-check input {
+  flex-shrink: 0;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.backup-consent {
+  margin: 16px 0;
+}
+
+.backup-feedback {
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.backup-feedback p {
+  margin: 0 0 8px;
+}
+
+.backup-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.backup-progress p {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.backup-progress progress {
+  min-width: 0;
+  max-width: 100%;
+  accent-color: var(--accent);
+}
+
+@container (max-width: 400px) {
+  .backup-passwords {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .settings-theme-options {

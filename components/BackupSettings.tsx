@@ -13,12 +13,6 @@ type Inspection = { token: string; name: string; preview?: BackupRestorePreview;
 type Operation = { id: string; cancelled: boolean; committed?: boolean };
 type Busy = "projects" | "scan" | "export" | "select" | "unlock" | "mapping" | "restore";
 
-const passwordStyle = {
-  width: "100%", maxWidth: 420, minWidth: 0, height: 34, padding: "0 9px",
-  border: "1px solid var(--border)", borderRadius: 5,
-  background: "var(--bg)", color: "var(--text)", fontSize: 12,
-};
-
 function validPassword(password: string) {
   return password.length >= 8 && password.length <= 1024;
 }
@@ -266,51 +260,67 @@ export function BackupSettings() {
   const exportDisabled = busy !== null || !scan || scan.preview.blockers.length > 0 || !validPassword(exportPassword)
     || !validPassword(confirmPassword) || exportPassword !== confirmPassword || (scan.preview.warnings.length > 0 && !acknowledgeWarnings);
 
-  return <div className="settings-general">
+  return <div className="settings-general backup-settings">
     <h2 className="settings-general-title">{t("backup.title")}</h2>
     {!available ? <p role="status" className="settings-general-description">{t("backup.desktopOnly")}</p> : <>
-      <section className="settings-general-section">
-        <h3 className="settings-general-heading">{t("backup.export")}</h3>
-        <p className="settings-general-description">{t("backup.exportHint")}</p>
-        <ConfigButton disabled={busy !== null} onClick={() => void selectProjects()}>{t("backup.selectProjects")}</ConfigButton>
-        <ul>{projects.map((project) => <li key={project.token}>{project.label} <ConfigButton size="small" disabled={busy !== null} onClick={() => void removeProject(project)}>{t("backup.removeProject")}</ConfigButton></li>)}</ul>
-        <div className="settings-chat-options">
+      <p className="settings-general-description backup-intro">{t("backup.exportHint")}</p>
+      <details className="backup-details backup-scope">
+        <summary>{t("backup.scope")}</summary>
+        <p>{t("backup.scopeHint")}</p>
+      </details>
+      <section className="backup-section" aria-labelledby="backup-create-heading">
+        <h3 id="backup-create-heading" className="settings-general-heading">{t("backup.export")}</h3>
+        <div className="backup-toolbar">
+          <ConfigButton disabled={busy !== null} onClick={() => void selectProjects()}>{t("backup.selectProjects")}</ConfigButton>
           <ConfigButton disabled={busy !== null} onClick={() => void scanBackup()}>{busy === "scan" ? t("backup.scanning") : t("backup.scan")}</ConfigButton>
-          {scan && <div role="status" className="settings-general-description">
-            <p>{t("backup.scanSummary", { count: scan.preview.entries, bytes: scan.preview.bytes })}</p>
+        </div>
+        <p className="settings-general-description backup-help">{t("backup.projectsHint")}</p>
+        {projects.length > 0 && <ul className="backup-projects">{projects.map((project) => <li key={project.token}>
+          <span>{project.label}</span>
+          <ConfigButton variant="ghost" size="small" aria-label={`${t("backup.removeProject")} ${project.label}`} disabled={busy !== null} onClick={() => void removeProject(project)}>{t("backup.removeProject")}</ConfigButton>
+        </li>)}</ul>}
+        {scan && <div className="backup-scan">
+          <p role="status" className="backup-scan-summary">{t("backup.scanSummary", { count: scan.preview.entries, bytes: scan.preview.bytes })}</p>
+          <details className="backup-details">
+            <summary>{t("backup.resources")}</summary>
             <p>{t("backup.types")}: {Object.entries(scan.preview.kinds).map(([kind, count]) => `${kind} (${count})`).join(", ") || t("backup.empty")}</p>
             <h4>{t("backup.roots")}</h4><ul>{scan.preview.roots.map((root) => <li key={root.id}>{root.label} · {root.kind} · {root.originalPath}</li>)}</ul>
             <h4>{t("backup.resources")}</h4><ul>{scan.preview.resources.map((resource) => <li key={resource.id}>{resource.label} · {resource.kind} · {resource.relativePath} · {t(`backup.availability.${resource.availability}`)}</li>)}</ul>
-            {warnings(scan.preview.warnings)}
-            {scan.preview.blockers.length > 0 && <div role="alert"><strong>{t("backup.blockers")}</strong>{warnings(scan.preview.blockers)}</div>}
-            {scan.preview.warnings.length > 0 && <label><input type="checkbox" checked={acknowledgeWarnings} disabled={busy !== null} onChange={(event) => setAcknowledgeWarnings(event.target.checked)} />{t("backup.ackWarnings")}</label>}
-          </div>}
+          </details>
+          {warnings(scan.preview.warnings)}
+          {scan.preview.blockers.length > 0 && <div role="alert"><strong>{t("backup.blockers")}</strong>{warnings(scan.preview.blockers)}</div>}
+          {scan.preview.warnings.length > 0 && <label className="backup-check"><input type="checkbox" checked={acknowledgeWarnings} disabled={busy !== null} onChange={(event) => setAcknowledgeWarnings(event.target.checked)} />{t("backup.ackWarnings")}</label>}
+        </div>}
+        <div className="backup-passwords">
           <label className="config-field"><span className="config-field-label">{t("backup.password")}</span>
-            <input type="password" autoComplete="new-password" minLength={8} maxLength={1024} value={exportPassword} disabled={busy !== null} onChange={(event) => setExportPassword(event.target.value)} style={passwordStyle} /></label>
+            <input className="backup-input" type="password" autoComplete="new-password" minLength={8} maxLength={1024} placeholder={t("backup.passwordPlaceholder")} value={exportPassword} disabled={busy !== null} onChange={(event) => setExportPassword(event.target.value)} aria-describedby="backup-password-hint" /></label>
           <label className="config-field"><span className="config-field-label">{t("backup.confirmPassword")}</span>
-            <input type="password" autoComplete="new-password" minLength={8} maxLength={1024} value={confirmPassword} disabled={busy !== null} onChange={(event) => setConfirmPassword(event.target.value)} style={passwordStyle} /></label>
-          {exportPassword && !validPassword(exportPassword) && <p role="alert">{t("backup.passwordLength")}</p>}
-          {confirmPassword && exportPassword !== confirmPassword && <p role="alert">{t("backup.passwordMismatch")}</p>}
+            <input className="backup-input" type="password" autoComplete="new-password" minLength={8} maxLength={1024} value={confirmPassword} disabled={busy !== null} onChange={(event) => setConfirmPassword(event.target.value)} /></label>
+        </div>
+        <p id="backup-password-hint" className="settings-general-description backup-help">{t("backup.passwordHint")}</p>
+        {exportPassword && !validPassword(exportPassword) && <p className="settings-general-error" role="alert">{t("backup.passwordLength")}</p>}
+        {confirmPassword && exportPassword !== confirmPassword && <p className="settings-general-error" role="alert">{t("backup.passwordMismatch")}</p>}
+        <div className="backup-toolbar backup-submit">
           <ConfigButton variant="primary" disabled={exportDisabled} onClick={() => void exportBackup()}>{busy === "export" ? t("backup.exporting") : t("backup.saveFile")}</ConfigButton>
+          {!scan && <span className="backup-help">{t("backup.scanFirst")}</span>}
         </div>
       </section>
-      <section className="settings-general-section">
-        <h3 className="settings-general-heading">{t("backup.import")}</h3>
+      <section className="backup-section" aria-labelledby="backup-restore-heading">
+        <h3 id="backup-restore-heading" className="settings-general-heading">{t("backup.import")}</h3>
         <p className="settings-general-description">{t("backup.importHint")}</p>
         <ConfigButton disabled={busy !== null} onClick={() => void selectArchive()}>{t("backup.chooseFile")}</ConfigButton>
-        {inspection && <p className="settings-general-description">{inspection.name}</p>}
-        {inspection && !inspection.preview && <div className="settings-chat-options">
+        {inspection && <p className="backup-filename">{inspection.name}</p>}
+        {inspection && !inspection.preview && <div className="backup-unlock">
           <label className="config-field"><span className="config-field-label">{t("backup.password")}</span>
-            <input type="password" autoComplete="off" minLength={1} maxLength={1024} value={importPassword} disabled={busy !== null} onChange={(event) => setImportPassword(event.target.value)} style={passwordStyle} /></label>
+            <input className="backup-input" type="password" autoComplete="off" minLength={1} maxLength={1024} value={importPassword} disabled={busy !== null} onChange={(event) => setImportPassword(event.target.value)} /></label>
           <ConfigButton disabled={busy !== null || !importPassword || importPassword.length > 1024} onClick={() => void unlockArchive()}>{busy === "unlock" ? t("backup.inspecting") : t("backup.unlock")}</ConfigButton>
         </div>}
-        {inspection?.preview && <div className="settings-general-section">
+        {inspection?.preview && <div className="backup-preview">
           <h3 className="settings-general-heading">{t("backup.preview")}</h3>
           {inspection.legacy && <p>{t("backup.legacy")}</p>}
           {warnings(inspection.preview.warnings)}
           <h4>{t("backup.roots")}</h4>
           <ul>{inspection.preview.roots.map((root) => {
-            const unmapped = inspection.preview!.resources.some((resource) => resource.rootId === root.id && !resource.mapped);
             return <li key={root.id}>{root.label} · {root.kind} · {root.originalPath}
               {(root.kind === "project" || root.kind === "external" && inspection.preview!.resources.some(resource=>resource.rootId===root.id && resource.entries>0)) && <ConfigButton disabled={busy !== null} onClick={() => void mapRoot(root.id)}>{t("backup.mapRoot")}</ConfigButton>}
             </li>;
@@ -319,35 +329,35 @@ export function BackupSettings() {
           <p>{t("backup.decisionHint")}</p>
           {inspection.preview.resources.map((resource) => {
             const decision = decisions[resource.id] ?? defaultDecision(resource);
-            return <fieldset key={resource.id} disabled={busy !== null} style={{ marginBottom: 12 }}>
+            return <fieldset className="backup-resource" key={resource.id} disabled={busy !== null}>
               <legend>{resource.kind === "ui" ? t("backup.preferences") : resource.label}</legend>
               <p>{resource.kind} · {resource.relativePath} · {t(`backup.availability.${resource.availability}`)}</p>
               <p>{t("backup.resourceSummary", { count: resource.entries, existing: resource.existing })}</p>
               <p>{t(resource.mapped ? "backup.mapped" : "backup.unmapped")} · {t(resource.blocked ? "backup.blocked" : "backup.notBlocked")}</p>
               {warnings(resource.warnings)}
               {resource.extraFiles.length > 0 && <><p>{t("backup.extraFiles")}</p>{warnings(resource.extraFiles)}</>}
-              <label>{t("backup.conflict")} <select value={decision.conflict} onChange={(event) => changeDecision(resource, { conflict: event.target.value === "replace" ? "replace" : "keep" })}>
+              <label className="backup-conflict">{t("backup.conflict")} <select value={decision.conflict} onChange={(event) => changeDecision(resource, { conflict: event.target.value === "replace" ? "replace" : "keep" })}>
                 <option value="keep">{t("backup.keep")}</option><option value="replace">{t("backup.replace")}</option>
               </select></label>
-              <label style={{ display: "block" }}><input type="checkbox" checked={decision.activation === "enable"} onChange={(event) => changeDecision(resource, { activation: event.target.checked ? "enable" : "defer" })} />
+              <label className="backup-check"><input type="checkbox" checked={decision.activation === "enable"} onChange={(event) => changeDecision(resource, { activation: event.target.checked ? "enable" : "defer" })} />
                 {t(resource.executable || resource.securityPolicy ? "backup.enableRisky" : "backup.enableResource")}</label>
               <p>{t(decision.activation === "defer" ? "backup.deferredResource" : "backup.enabledResource")}</p>
             </fieldset>;
           })}
           <p>{t("backup.reinstallHint")}</p>
-          <label><input type="checkbox" checked={configurationConsent} disabled={busy !== null} onChange={(event) => setConfigurationConsent(event.target.checked)} />{t("backup.configurationConsent")}</label>
+          <label className="backup-check backup-consent"><input type="checkbox" checked={configurationConsent} disabled={busy !== null} onChange={(event) => setConfigurationConsent(event.target.checked)} />{t("backup.configurationConsent")}</label>
           {restoreBlocked(inspection.preview, decisions) && <p role="alert">{t("backup.restoreBlocked")}</p>}
           <ConfigButton variant="primary" disabled={busy !== null || !configurationConsent || restoreBlocked(inspection.preview, decisions)} onClick={() => void restoreBackup()}>{busy === "restore" ? t("backup.restoring") : t("backup.restore")}</ConfigButton>
         </div>}
       </section>
-      {busy && <div role="status">
+      {busy && <div className="backup-feedback backup-progress" role="status">
         <p>{progress ? t(`backup.phase.${progress.phase}`) : t("backup.working")}</p>
         {progress && <><progress max={Math.max(1, progress.total)} value={Math.max(0, Math.min(progress.completed, progress.total))} aria-label={t("backup.progress")} /><span>{progress.completed} / {progress.total}</span></>}
         <ConfigButton onClick={() => void cancel()}>{t("backup.cancel")}</ConfigButton>
       </div>}
-      {notice && <p role="status">{notice}</p>}
-      {error && <p role="alert" className="settings-general-error">{error}</p>}
-      {result && <div role="status"><p>{result.label}</p>{warnings(result.warnings)}
+      {notice && <p className="backup-feedback" role="status">{notice}</p>}
+      {error && <p role="alert" className="settings-general-error backup-feedback">{error}</p>}
+      {result && <div className="backup-feedback" role="status"><p>{result.label}</p>{warnings(result.warnings)}
         {result.restored && <><p>{t("backup.restartHint")}</p><p>{t("backup.reinstallHint")}</p></>}
       </div>}
     </>}

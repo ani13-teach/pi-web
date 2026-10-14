@@ -1,0 +1,37 @@
+const rows: Record<string, [string, string, string]> = {
+  title: ["模型管理", "模型管理", "Model management"],
+  description: ["勾选进入白名单的模型，在同一行调整上下文长度。", "勾選加入白名單的模型，在同一列調整上下文長度。", "Choose the models in your allowlist and adjust their context lengths."],
+  count: ["已选 {selected} / {total}", "已選 {selected} / {total}", "{selected} / {total} selected"],
+  loading: ["正在读取模型列表…", "正在讀取模型清單…", "Loading model catalog…"],
+  loadFailed: ["模型列表读取失败，现有设置未被更改。", "模型清單讀取失敗，現有設定未變更。", "Could not load the catalog. Existing settings are unchanged."],
+  retry: ["重试", "重試", "Retry"],
+  empty: ["当前未发现可管理的对话模型。", "目前未發現可管理的對話模型。", "No chat models are available to manage."],
+  search: ["搜索模型名称或 ID", "搜尋模型名稱或 ID", "Search by model name or ID"],
+  selectAll: ["全选", "全選", "Select all"],
+  clearAll: ["全不选", "全部取消", "Deselect all"],
+  selectResults: ["选中搜索结果", "選取搜尋結果", "Select results"],
+  clearResults: ["取消搜索结果", "取消搜尋結果", "Deselect results"],
+  whitelist: ["白名单 / 模型", "白名單 / 模型", "Allowlist / model"],
+  context: ["上下文长度 · tokens", "上下文長度 · tokens", "Context length · tokens"],
+  noResults: ["没有匹配的模型，试试其他关键词。", "沒有符合的模型，試試其他關鍵字。", "No matches. Try another search."],
+  include: ["将 {model} 加入白名单", "將 {model} 加入白名單", "Include {model} in allowlist"],
+  contextFor: ["{model} 的上下文长度", "{model} 的上下文長度", "Context length for {model}"],
+  followDefault: ["跟随默认", "跟隨預設", "Use default"],
+  invalidContext: ["请输入正整数或留空", "請輸入正整數或留空", "Enter a positive integer or leave blank"],
+  current: ["当前 {value}", "目前 {value}", "Current {value}"],
+  reset: ["恢复默认", "恢復預設", "Reset"],
+  resetFor: ["恢复 {model} 的默认上下文长度", "恢復 {model} 的預設上下文長度", "Reset context length for {model}"],
+  noneSelected: ["保存后，此账号的所有模型将从桌面选择列表隐藏；不会退出登录。", "儲存後，此帳號的所有模型將從桌面選擇清單隱藏；不會登出。", "After saving, all models for this account will be hidden from the desktop picker. You will stay signed in."],
+  contextHelp: ["留空使用默认值。tokens 是模型计量文本的单位；这里的设置用于本地上下文预算与压缩判断，不会提高服务商的实际容量。", "留空使用預設值。tokens 是模型計量文字的單位；此設定用於本機上下文預算與壓縮判斷，不會提高服務商的實際容量。", "Leave blank for the default. Tokens measure text length; this setting controls local context budgeting and compaction, not the provider’s actual capacity."],
+  scopeTitle: ["生效范围与已有对话", "生效範圍與既有對話", "Scope and existing conversations"],
+  scopeHelp: ["白名单管理桌面的可选模型，不是权限限制。保存后重新打开模型选择器即可查看；上下文设置用于新对话或重新加载后的会话。已有对话不会被强制切换，子代理策略保持不变。", "白名單管理桌面的可選模型，不是權限限制。儲存後重新開啟模型選擇器即可查看；上下文設定用於新對話或重新載入後的會話。既有對話不會被強制切換，子代理策略維持不變。", "The allowlist manages desktop model choices, not access permissions. Reopen the picker after saving. Context changes apply to new or reloaded sessions; existing conversations and subagent policies are not forcibly changed."],
+  pending: ["有修改待保存", "有修改待儲存", "Unsaved changes"],
+  saved: ["已保存；新对话或重新加载后使用新的上下文设置。", "已儲存；新對話或重新載入後使用新的上下文設定。", "Saved. New or reloaded sessions use the updated context settings."],
+  invalidSave: ["上下文长度需为正整数，或留空恢复默认。", "上下文長度須為正整數，或留空恢復預設。", "Context lengths must be positive integers, or blank for defaults."],
+  partialSave: ["模型配置已保存，但白名单同步失败。请重试保存，草稿已保留。", "模型設定已儲存，但白名單同步失敗。請重試儲存，草稿已保留。", "Model configuration was saved, but allowlist synchronization failed. Drafts are retained; please retry."],
+  saveFailed: ["保存失败，修改已保留，请重试。", "儲存失敗，修改已保留，請重試。", "Save failed. Your edits are retained; please retry."],
+};
+export function authModelMessages(locale: "zh-CN" | "zh-TW" | "en"): Record<string, string> {
+  const index = locale === "zh-CN" ? 0 : locale === "zh-TW" ? 1 : 2;
+  return Object.fromEntries(Object.entries(rows).map(([key, value]) => ["authModels." + key, value[index]]));
+}

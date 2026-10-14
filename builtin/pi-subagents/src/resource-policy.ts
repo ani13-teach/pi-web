@@ -243,10 +243,18 @@ export function installExtensionToolScope(
     return keep;
   };
 
+  // Status views must use the same live scope as execution, not merely the SDK registry.
+  (session as ScopeAwareSession)[TOOL_SCOPE_CHECK] = name => inScope().has(name);
+
   const renarrow = () => {
     const allowed = inScope();
-    const next = session.getAllTools().map((t) => t.name).filter((n) => allowed.has(n));
     const current = session.getActiveToolNames();
+    // Capability scope is not model exposure. Keep indirect tools callable through
+    // discovery without declaring all of them, and preserve explicit tool_search loads.
+    const active = new Set(current);
+    const next = session.getAllTools().filter(tool => allowed.has(tool.name) && tool.exposure !== "hidden"
+      && (!(tool.exposure === "codemode" || tool.exposure === "deferred") || active.has(tool.name) || toolNames.includes(tool.name)))
+      .map(tool => tool.name);
     // setActiveToolsByName unconditionally rebuilds the system prompt, so skip
     // the no-op that steady-state turns would otherwise pay for every turn.
     if (next.length !== current.length || next.some((n, i) => n !== current[i])) {
@@ -296,6 +304,12 @@ export function installExtensionToolScope(
   return renarrow;
 }
 
+
+const TOOL_SCOPE_CHECK = Symbol.for("pi-desktop:tool-scope-check");
+type ScopeAwareSession = AgentSession & { [TOOL_SCOPE_CHECK]?: (name: string) => boolean };
+export function isToolInSessionScope(session: object, name: string): boolean {
+  return (session as ScopeAwareSession)[TOOL_SCOPE_CHECK]?.(name) ?? true;
+}
 
 export interface ToolScopeGuard {
   extension: InlineExtension;

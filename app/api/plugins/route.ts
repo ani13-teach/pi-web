@@ -361,7 +361,29 @@ export async function POST(req: Request) {
       await packageManager.installAndPersist(source, { local });
     } else if (body.action === "remove") {
       if (!source) return NextResponse.json({ error: "source required" }, { status: 400 });
-      await packageManager.removeAndPersist(source, { local });
+      // Do not uninstall when this scope's settings could not be read.
+      // Loading errors in the other scope must not turn a successful save
+      // into a failure after the declaration has already been removed.
+      const loadError = settingsManager.drainErrors().find((error) => error.scope === scope);
+      if (loadError) throw loadError.error;
+      // The UI sends a configured source, not a CLI path relative to cwd.
+      // Match the declaration in its own scope so missing local paths can
+      // still be removed, without touching a same-named package elsewhere.
+      const current = local
+        ? settingsManager.getProjectSettings().packages ?? []
+        : settingsManager.getGlobalSettings().packages ?? [];
+      const next = current.filter((entry) => getPackageSource(entry) !== source);
+      if (next.length === current.length) {
+        return NextResponse.json({ error: "Configured package not found in this scope" }, { status: 404 });
+      }
+      // Keep the normal npm/git uninstall step; local sources are not deleted.
+      // Only remove the declaration after uninstall succeeds.
+      await packageManager.remove(source, { local });
+      if (local) settingsManager.setProjectPackages(next);
+      else settingsManager.setPackages(next);
+      await settingsManager.flush();
+      const settingsError = settingsManager.drainErrors()[0];
+      if (settingsError) throw settingsError.error;
     } else if (body.action === "update") {
       if (!source && !projectTrust.trusted && packageManager.listConfiguredPackages().some((pkg) => pkg.scope === "project")) {
         return NextResponse.json(

@@ -15,6 +15,7 @@ import { installDesktopFetch } from "./shims/desktop-fetch";
 import { installDesktopXhr } from "./shims/desktop-xhr";
 
 import "./desktop.css";
+import "./mcp-settings.css";
 
 /**
  * The same work lib/theme's THEME_INIT_SCRIPT does in the web build, without an

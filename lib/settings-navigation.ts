@@ -4,6 +4,7 @@ export const SETTINGS_SECTION_VALUES = [
   "skills",
   "agents",
   "plugins",
+  "mcp",
   "automode",
   "backup",
 ] as const;

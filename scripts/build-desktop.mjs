@@ -111,6 +111,11 @@ const todoOutput = join(root, "dist", "main", "rpiv-todo");
 await mkdir(todoOutput, { recursive: true });
 await copyFile(join(root, "builtin", "rpiv-todo", "LICENSE"), join(todoOutput, "LICENSE"));
 
+// Retain attribution for the locally observed core MCP factory.
+const mcpOutput = join(root, "dist", "main", "mcp");
+await mkdir(mcpOutput, { recursive: true });
+for (const name of ["LICENSE", "SOURCE.md"]) await copyFile(join(root, "builtin", "mcp", name), join(mcpOutput, name));
+
 // The renderer smoke probe is executed as-is inside the window, so it is copied
 // rather than bundled.
 for (const name of ["smoke-probe.js", "layout-probe.js", "chat-probe.js"]) {

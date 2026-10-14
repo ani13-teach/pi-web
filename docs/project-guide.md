@@ -1,7 +1,9 @@
 # Pi Desktop 项目入门与维护指南
 
 本指南描述当前仓库的实际实现，不把规划当成功能，也不把历史测试当成本次通过。
-功能细节见 [README](../README.md)，历次证据见 [REVIEW-FIXES](../REVIEW-FIXES.md)，备份说明见 [备份文档](backup-plan.md)。
+功能细节见 [README](../README.md)，历次证据见 [REVIEW-FIXES](../REVIEW-FIXES.md)，备份说明见 [备份文档](backup-plan.md)，授权模型说明见 [白名单与上下文管理](auth-model-management.md)。
+
+当前源码版本：`0.2.11`；Pi 内核保持 `1.1.0`。安装包版本与验证记录以 README 的「最新安装包」为准。
 
 ## 项目是什么
 
@@ -64,6 +66,14 @@ env -u ELECTRON_RUN_AS_NODE npm start
 4. 对项目扩展/技能的信任提示先审阅代码，再确认。配置保存后若提示重载，重载或新建会话。
 5. 关闭窗口会隐藏到托盘；要彻底退出，在托盘选择「完全退出」。
 
+### 授权模型白名单与上下文
+
+订阅登录或配置 API Key 后，点击左侧账号，在用量下方管理模型。勾选决定哪些模型进入桌面选择列表；搜索中的全选/全不选只改变匹配结果，不丢失其他选择。全不选隐藏该账号全部模型，不会注销登录。
+
+上下文长度填写正整数，留空或「恢复默认」沿用模型默认值；无效值会阻止保存。跨账号编辑保留草稿，底部保存统一提交；失败或部分保存后可重试。
+
+保存刷新桌面模型列表；新对话、重新加载或重新选择模型后读取新的上下文配置，已有对话不会被强制换模型。此设置不会提高服务商容量，也不是安全权限隔离。桌面显式名单优先于该账号的旧选择规则，子代理策略保持不变。配置字段与详细限制见 [授权模型管理](auth-model-management.md)。
+
 目前不能保证没有系统 Node/npm 的干净电脑能完成技能/插件安装；随包 npm 可运行不等于整条安装链路已验证。
 
 ## 源码地图与改动落点
@@ -100,10 +110,11 @@ SDK 与 `node-pty` 等运行依赖保持外部加载；打包时 `node_modules`�
 | 数据 | 路径/位置 | 注意事项 |
 |---|---|---|
 | 原始会话 | `A/sessions/**/*.jsonl` | 与 pi CLI/pi-web 共享；不要多客户端同时编辑同一会话 |
-| 全局设置/模型 | `A/settings.json`、`A/models.json` | 模型配置也可能包含 key、请求头或命令型值 |
+| 全局设置/模型 | `A/settings.json`、`A/models.json` | 模型配置也可能包含 key、请求头或命令型值；桌面显式名单在 `desktopModelSelections`，上下文在 `modelOverrides` |
 | 登录/API 凭据 | `A/auth.json` | 敏感；不能上传或放进调试报告 |
 | 项目信任 | SDK 在 `A` 下的信任存储（`trust.json`） | CLI 与 Desktop 共享；备份不继承此信任 |
 | 项目设置 | `P/.pi/settings.json` 等 | 部分项目值会覆盖全局值，如 `enabledModels` |
+| MCP 服务 | `A/mcp.json`、`P/.pi/mcp.json` | 设置 → MCP；保存不会启动服务，需明确应用到运行会话；项目配置受信任规则保护，凭据/参数仅以占位符显示 |
 | 用户 Agent | `A/agents/`、`P/.pi/agents/` | 扩展开关在 `A/agents/settings.json`；运行设置在 `A/subagents.json` 与 `P/.pi/subagents.json`，项目覆盖全局；旧显式并发仅兼容回退 |
 | 内置 Agent 的用户修改 | `A/desktop-agents/` | 删除记录在 `.deleted/`；不是修改安装包 |
 | Agent 记忆 | `A/agent-memory/`、`P/.pi/agent-memory/`、`P/.pi/agent-memory-local/` | 原生子代理按作用域使用；还兼容旧用户记忆目录 |
@@ -150,6 +161,8 @@ Electron profile 按运行时 `app.getPath("userData")` 及 `--user-data-dir` �
 | `npm test` | 真实后台 IPC 和路由 | 默认使用当前 `A`，创建/清理自身夹具；不作全目录隔离 |
 | `npm run test:smoke` | Node/原生依赖基础检查 | 不是 Electron 窗口验收 |
 | `npm run test:models-config` | 模型保存与 enabledModels 同步 | 自动使用临时 agent 配置，不写个人配置 |
+| `node tests/auth-model-settings-ipc.mjs` | 授权模型名单、上下文、组合保存与失败重试 | 先构建；临时配置与伪凭据，阻止出网 |
+| `node tests/auth-model-settings-browser.mjs` | 真实模型管理组件交互、浅/深色与窄屏 | 模拟 API、独立窗口数据，不使用真实账号 |
 | `npm run test:gate` | 测试统计门槛的反例检查 | 不证明应用全部功能正常 |
 | `npm run test:web` | 选取的业务/界面测试 | 不收集 `app/api`、`tests`；排除9文件、过滤5用例，名单见脚本 |
 | `npm run test:window` | 开发版窗口、IPC、布局及端口/退出采样 | 不发送真实聊天，但部分检查依赖可用模型列表；只清理自身夹具 |
@@ -174,7 +187,7 @@ PI_DESKTOP_SMOKE_USERDATA="$TEMP/pi-desktop-window-check" npm run test:window
 
 ## 备份与恢复的实际范围
 
-入口：「设置 → 完整备份」。备份可继续使用的用户环境，不代替项目 Git 备份。只有手动完整模式，不再有公共/隐私或分类开关。
+入口：「设置 → 备份」。备份可继续使用的用户环境，不代替项目 Git 备份。只有手动完整模式，不再有公共/隐私或分类开关。
 
 ### 使用步骤
 
@@ -208,7 +221,7 @@ npm run test:chat:packaged        # 有模型时补真实聊天
 npm run test:resilience:packaged  # 有模型时补刷新/崩溃恢复
 ```
 
-- 输出：`release/Pi Desktop Setup <版本>.exe` 与 `release/win-unpacked/`；`package:dir` 仅生成免安装目录。
+- 默认输出：`release/Pi Desktop Setup <版本>.exe` 与 `release/win-unpacked/`；`package:dir` 仅生成免安装目录。0.2.11 发布包使用独立输出目录 `release/github-0.2.11/`，保留旧包；测试时通过 `--binary` 指向其 `win-unpacked/Pi Desktop.exe`。
 - 不要在仓库内直接测打包目录，否则缺失依赖可能被仓库的 `node_modules` 补齐而假通过；隔离测试日志需有 `isolated copy:`。
 - 核对包版本、生成时间、大小及 SHA-256；记录测试真实退出码。`latest.yml`、blockmap 不代表已接自动更新。
 - 新源码需要重新出包时按项目约定只将 patch 加1，同步 package.json 和锁文件，重试同一源码不再升号；授权不扩大为提交/标签/安装/发布/推送。
@@ -224,7 +237,7 @@ npm run test:resilience:packaged  # 有模型时补刷新/崩溃恢复
 | 启动静默退出且退出码0 | 同 profile 的应用是否已在运行；测试用独立 user-data-dir |
 | Electron 协议 API 未定义/启动即崩 | GUI 是否继承 `ELECTRON_RUN_AS_NODE=1` |
 | `ERR_MODULE_NOT_FOUND`、界面面板全报错 | 顶层四个 Pi 包、运行依赖及 asar 解包路径；不能靠仓库内测包证明修复 |
-| 新模型保存后看不到 | 凭据是否有效、全局 enabledModels 同步结果、项目白名单覆盖；重载会话 |
+| 新模型保存后看不到 | 凭据是否有效、授权模型管理是否勾选、保存/同步是否成功；未管理账号再检查项目白名单；必要时重载会话 |
 | GPT/渠道连不上 | 环境变量代理优先级、系统代理、渠道可达性；SOCKS5 当前不支持 |
 | 技能搜索可用但安装失败 | 系统 Node/npm 是否可用、外部网络、权限和60秒安装路由超时 |
 | 备份提示失败/不可用 | 活动会话或终端是否关闭、令牌过期、源变化、密码/文件名/大小/文件系统限制 |
@@ -238,7 +251,7 @@ npm run test:resilience:packaged  # 有模型时补刷新/崩溃恢复
 - 窗口有 contextIsolation/sandbox、无 Node 集成，preload 白名单和 CSP；这不是对所有本机行为的沙箱。
 - 后台与扩展有文件/终端能力；项目信任和自动模式降低误操作风险，不保证恶意代码绝对无法影响机器。
 - 不加本地 HTTP/WebSocket 服务、不做自动更新，不为测试绿灯删断言或擅改权限设置。
-- 本维护工作区可写源码为 `C:/Users/jch/pi-desktop`；`C:/Users/jch/pi-web-main` 是只读上游参照，已安装目录和旧交付包默认只读。其他机器使用其实际工作区路径。
+- 在源码工作区进行维护；上游参照、已安装目录和旧交付包默认只读。
 - 保留已有未提交工作，不提交 release、dist、node_modules、vendor 和临时日志；它们已被 `.gitignore` 排除。行尾遵循 `.gitattributes` 的 LF 约定。
 - 内置组件的许可证/来源在 `builtin/` 内各自记录。当前根目录没有统一 LICENSE，不能推断整仓采用某一开源许可；对外再分发前需另外确认授权和依赖许可。
 - 大文件完整分块、无系统 Node 的完整安装、缩包、全面 IPC 参数校验、自动恢复草稿保护等仍是暂缓项；详见 README/REVIEW-FIXES，不在普通维护中顺手实施。

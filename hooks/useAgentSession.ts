@@ -2194,6 +2194,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
 
+  const [modelSettingsRevision, setModelSettingsRevision] = useState(0);
+  useEffect(() => {
+    const changed = () => setModelSettingsRevision(revision => revision + 1);
+    window.addEventListener("pi-model-settings-changed", changed);
+    return () => window.removeEventListener("pi-model-settings-changed", changed);
+  }, []);
+
   // Load the model list with bounded retries; loadModels exposes each failure.
   useEffect(() => {
     const controller = new AbortController();
@@ -2212,7 +2219,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     })();
     return () => controller.abort();
-  }, [loadModels, modelsRefreshKey]);
+  }, [loadModels, modelsRefreshKey, modelSettingsRevision]);
 
   useEffect(() => {
     if (!compactResult) return;

@@ -9,6 +9,7 @@ import {
   type ModelsData,
 } from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { applyDesktopModelSelections, getDesktopModelSelections } from "@/lib/auth-model-settings";
 import { resolveThinkingLevelMap } from "@/lib/thinking-level-map";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
@@ -47,10 +48,13 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   const settings: SettingsManager = services.settingsManager;
   // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
   // way the CLI does instead of comparing pattern strings literally (#307).
-  const scope = await resolveVisibleModels(
+  const selections = getDesktopModelSelections();
+  const legacyScope = await resolveVisibleModels(
     services.modelRuntime,
     settings.getEnabledModels(),
   );
+  const scope = applyDesktopModelSelections(legacyScope, selections,
+    Object.keys(selections).length ? await services.modelRuntime.getAvailable() : legacyScope.visible);
   const { visible, thinkingLevelPins, warnings } = scope;
   modelList = visible.map((m) => ({
     id: m.id,

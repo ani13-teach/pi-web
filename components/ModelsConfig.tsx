@@ -43,6 +43,9 @@ import {
 import { ModelLabel } from "./ModelLabel";
 import { ProviderIcon } from "./ProviderIcon";
 import { ProviderUsageSummary } from "./ProviderUsageSummary";
+import { AuthModelsManager } from "./AuthModelsManager";
+import { applyAuthContextDrafts, authContextValue, isValidAuthContext, type AuthContextDrafts } from "./auth-model-drafts";
+import type { AuthModelCatalog, AuthModelSelections } from "@/lib/auth-model-types";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -102,6 +105,7 @@ interface ProviderEntry {
 
 interface ModelsJson {
   providers?: Record<string, ProviderEntry>;
+  desktopModelSelections?: AuthModelSelections;
 }
 
 type ModelTestState =
@@ -1852,6 +1856,36 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [authCatalog, setAuthCatalog] = useState<AuthModelCatalog | null>(null);
+  const [authCatalogLoading, setAuthCatalogLoading] = useState(true);
+  const [authCatalogError, setAuthCatalogError] = useState<string | null>(null);
+  const [authSelections, setAuthSelections] = useState<AuthModelSelections>({});
+  const [contextDrafts, setContextDrafts] = useState<AuthContextDrafts>({});
+  const savedConfigRef = useRef<string>("");
+  const catalogRequestIdRef = useRef(0);
+
+  const refreshAuthCatalog = useCallback(async () => {
+    const requestId = ++catalogRequestIdRef.current;
+    setAuthCatalogLoading(true);
+    setAuthCatalogError(null);
+    try {
+      const response = await fetch("/api/models-config/auth-models");
+      const data = await response.json() as AuthModelCatalog & { error?: string };
+      if (!response.ok || data.error || !data.providers || typeof data.providers !== "object") {
+        throw new Error("Could not read model catalog");
+      }
+      if (requestId === catalogRequestIdRef.current) setAuthCatalog(data);
+    } catch {
+      if (requestId === catalogRequestIdRef.current) setAuthCatalogError("catalog-unavailable");
+    } finally {
+      if (requestId === catalogRequestIdRef.current) setAuthCatalogLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAuthCatalog();
+    return () => { catalogRequestIdRef.current += 1; };
+  }, [refreshAuthCatalog]);
 
   const refreshAuthProviders = useCallback(() => {
     fetch("/api/auth/providers")
@@ -1869,7 +1903,10 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
       .then((d: ModelsJson) => {
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
-        const keys = Object.keys(normalized.providers ?? {});
+        savedConfigRef.current = JSON.stringify(normalized);
+        const keys = Object.entries(normalized.providers ?? {})
+          .filter(([, provider]) => Object.keys(provider).some(key => key !== "modelOverrides"))
+          .map(([id]) => id);
         setSelection((current) => current && customSelectionExists(normalized, current)
           ? current
           : keys[0]
@@ -1972,27 +2009,78 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
     setSelection({ type: "provider", name: providerName });
   }, []);
 
+  const invalidAuthContext = Object.values(contextDrafts).some(models => Object.values(models).some(value => !isValidAuthContext(value)));
+  const hasPendingChanges = Object.keys(authSelections).length > 0 || Object.keys(contextDrafts).length > 0
+    || (savedConfigRef.current !== "" && JSON.stringify(config) !== savedConfigRef.current);
+
   const handleSave = useCallback(async () => {
+    if (invalidAuthContext) { setSaveError(t("authModels.invalidSave")); return; }
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);
     try {
+      const nextConfig = applyAuthContextDrafts(config, contextDrafts);
+      if (Object.keys(authSelections).length) {
+        nextConfig.desktopModelSelections = { ...nextConfig.desktopModelSelections, ...authSelections };
+      }
       const res = await fetch("/api/models-config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
+        body: JSON.stringify({ config: nextConfig, authModelSelections: authSelections }),
       });
-      const d = await res.json() as { success?: boolean; error?: string };
-      if (!res.ok || d.error) setSaveError(d.error ?? `HTTP ${res.status}`);
-      else { setSavedOk(true); setTimeout(() => setSavedOk(false), 2000); }
-    } catch (e) {
-      setSaveError(String(e));
+      const d = await res.json() as { success?: boolean; error?: string; partialSave?: boolean };
+      if (!res.ok || d.error || d.success !== true) {
+        setSaveError(t(d.partialSave ? "authModels.partialSave" : "authModels.saveFailed"));
+      } else {
+        setConfig(nextConfig);
+        savedConfigRef.current = JSON.stringify(nextConfig);
+        setAuthSelections({});
+        setContextDrafts({});
+        setSavedOk(true);
+        setTimeout(() => setSavedOk(false), 2000);
+        void refreshAuthCatalog();
+        window.dispatchEvent(new Event("pi-model-settings-changed"));
+      }
+    } catch {
+      setSaveError(t("authModels.saveFailed"));
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, contextDrafts, authSelections, invalidAuthContext, refreshAuthCatalog, t]);
 
-  const providers = Object.entries(config.providers ?? {});
+  const providers = Object.entries(config.providers ?? {}).filter(([, provider]) =>
+    Object.keys(provider).some(key => key !== "modelOverrides"));
+  const refreshManagedAuth = () => { refreshAuthProviders(); void refreshAuthCatalog(); };
+  const authModelManager = (providerId: string) => (
+    <AuthModelsManager key={`auth-models-${providerId}`} providerId={providerId}
+      catalog={authCatalog?.providers[providerId]} selectedIds={authSelections[providerId]}
+      overrides={config.providers?.[providerId]?.modelOverrides} contextDrafts={contextDrafts[providerId]}
+      loading={authCatalogLoading} error={authCatalogError} busy={saving} onRetry={() => void refreshAuthCatalog()}
+      onSelectionChange={ids => {
+        setSavedOk(false);
+        setSaveError(null);
+        setAuthSelections(previous => {
+          const next = { ...previous };
+          const baseline = authCatalog?.providers[providerId]?.selectedIds ?? [];
+          if (JSON.stringify([...ids].sort()) === JSON.stringify([...baseline].sort())) delete next[providerId];
+          else next[providerId] = ids;
+          return next;
+        });
+      }}
+      onContextChange={(id, value) => {
+        setSavedOk(false);
+        setSaveError(null);
+        setContextDrafts(previous => {
+          const models = { ...previous[providerId] };
+          if (value === authContextValue(config.providers?.[providerId]?.modelOverrides, id)) delete models[id];
+          else models[id] = value;
+          const next = { ...previous };
+          if (Object.keys(models).length) next[providerId] = models;
+          else delete next[providerId];
+          return next;
+        });
+      }} />
+  );
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
   const activeApiKey = apiKeyProviders.filter((p) => p.configured);
 
@@ -2002,12 +2090,12 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
     if (selection.type === "oauth") {
       const p = oauthProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
-      return <OAuthDetail key={p.id} provider={p} onRefresh={refreshAuthProviders} />;
+      return <><OAuthDetail key={p.id} provider={p} onRefresh={refreshManagedAuth} />{authModelManager(p.id)}</>;
     }
     if (selection.type === "apikey") {
       const p = apiKeyProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
-      return <ApiKeyDetail key={p.id} provider={p} onRefresh={refreshAuthProviders} />;
+      return <><ApiKeyDetail key={p.id} provider={p} onRefresh={refreshManagedAuth} />{authModelManager(p.id)}</>;
     }
     if (selection.type === "provider") {
       const provider = config.providers?.[selection.name];
@@ -2156,12 +2244,14 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
         </ConfigSplitView>
 
         {/* Footer */}
-        <ConfigFooter status={saveError && <span style={{ color: "#f87171" }}>{saveError}</span>}>
+        <ConfigFooter status={<span role={saveError ? "alert" : "status"} className={saveError ? "auth-model-save-error" : undefined}>
+          {saveError ?? (invalidAuthContext ? t("authModels.invalidSave") : hasPendingChanges ? t("authModels.pending") : savedOk ? t("authModels.saved") : "")}
+        </span>}>
           {!embedded && <ConfigButton onClick={onClose}>{t("i18n.cancel")}</ConfigButton>}
           <ConfigButton
             variant="primary"
             onClick={handleSave}
-            disabled={saving || savedOk}
+            disabled={loading || saving || savedOk || invalidAuthContext}
             className={savedOk ? "is-success" : undefined}
           >
             {savedOk && (

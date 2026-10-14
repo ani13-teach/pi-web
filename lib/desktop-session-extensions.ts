@@ -1,4 +1,5 @@
-import type { InlineExtension, LoadExtensionsResult, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createToolSearchExtension, type InlineExtension, type LoadExtensionsResult, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createDesktopMcpExtension } from "./mcp-runtime";
 import { createBuiltinAutomodeExtension, preferBuiltinAutomode, BUILTIN_AUTOMODE_PATH } from "./automode-builtin";
 import { createBuiltinRpivTodoExtension, preferBuiltinRpivTodo } from "./rpiv-todo-builtin";
 import { createDesktopCodemodeExtension } from "./codemode";
@@ -14,7 +15,10 @@ export function createDesktopSessionExtensions(
   loadExtensions = true,
 ): InlineExtension[] {
   return [
-    ...(loadExtensions ? [createDesktopCodemodeExtension(), createProjectCommandBashExtension({ cwd, settings: settingsManager }), createBuiltinRpivTodoExtension()] : []),
+    ...(loadExtensions ? [createDesktopCodemodeExtension(),
+      { name: "tool-search", builtin: true, replaceable: true, factory: createToolSearchExtension() },
+      createDesktopMcpExtension(cwd, settingsManager),
+      createProjectCommandBashExtension({ cwd, settings: settingsManager }), createBuiltinRpivTodoExtension()] : []),
     createBuiltinAutomodeExtension(),
   ];
 }

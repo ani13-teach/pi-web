@@ -1,6 +1,6 @@
 {
   "name": "pi-desktop",
-  "version": "0.2.9",
+  "version": "0.2.11",
   "private": true,
   "description": "Windows desktop host for the pi coding agent (no local HTTP port)",
   "type": "module",
@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node tests/backend-ipc.mjs",
     "test:smoke": "node tests/smoke.mjs",
+    "test:mcp": "npm run build && node --experimental-strip-types --test lib/mcp-config-store.test.mjs lib/mcp-runtime.test.mjs lib/mcp-config-watch.test.mjs lib/mcp-desktop-sdk.test.mjs components/McpConfig.test.mjs app/api/mcp/route.test.mjs lib/subagent-capabilities.test.mjs && node tests/mcp-backend-ipc.mjs",
     "test:navigation": "node --experimental-strip-types --test tests/navigation.test.mjs",
     "test:prompt": "node tests/backend-ipc.mjs --prompt",
     "test:models-config": "node tests/models-config-sync.mjs",

@@ -32,6 +32,7 @@ import { PluginsConfig } from "./PluginsConfig";
 import { AutomodeConfig } from "./AutomodeConfig";
 import { CodemodeSettings } from "./CodemodeSettings";
 import { BackupSettings } from "./BackupSettings";
+import { McpConfig } from "./McpConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 
 interface Props {
@@ -369,6 +370,7 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
     { id: "skills", label: t("common.skills"), requiresProject: true },
     { id: "agents", label: t("common.agents"), requiresProject: true },
     { id: "plugins", label: t("common.plugins"), requiresProject: true },
+    { id: "mcp", label: t("mcp.title"), requiresProject: false },
     { id: "automode", label: t("common.autoMode"), requiresProject: false },
     { id: "backup", label: t("backup.title"), requiresProject: false },
   ];
@@ -416,7 +418,7 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
       onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
       className="settings-dialog-backdrop"
     >
-      <div className="settings-dialog-surface">
+      <div className={`settings-dialog-surface${section === "mcp" ? " is-mcp" : ""}`}>
         <div className="settings-dialog-header">
           <strong className="settings-dialog-title">{t("settings.title")}</strong>
           <select
@@ -460,6 +462,7 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
           {cwd && sectionHost("skills", <SkillsConfig embedded key={cwd} cwd={cwd} onClose={onClose} />)}
           {cwd && sectionHost("agents", <AgentsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
           {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
+          {sectionHost("mcp", <McpConfig cwd={cwd} sessionId={sessionId} onReloaded={onSessionReloaded} active={section === "mcp"} />)}
           {sectionHost("automode", <AutomodeConfig cwd={cwd} sessionId={sessionId} onReloaded={onSessionReloaded} />)}
           {sectionHost("backup", section === "backup" ? <BackupSettings /> : null)}
         </main>

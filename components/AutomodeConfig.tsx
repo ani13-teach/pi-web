@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { formatModelSpecLabel } from "@/lib/model-label";
@@ -41,19 +41,6 @@ interface AutomodeResponse {
 type Scope = "global" | "project";
 type TestKey = "primary" | `fallback-${number}`;
 
-const inputStyle: CSSProperties = {
-  width: "100%",
-  minWidth: 0,
-  height: 34,
-  padding: "0 9px",
-  border: "1px solid var(--border)",
-  borderRadius: 5,
-  background: "var(--bg)",
-  color: "var(--text)",
-  fontSize: 12,
-  outline: "none",
-};
-
 interface Props {
   cwd: string | null;
   sessionId: string | null;
@@ -73,6 +60,7 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [testing, setTesting] = useState<TestKey | null>(null);
   const [results, setResults] = useState<Partial<Record<TestKey, { ok: boolean; text: string }>>>({});
 
@@ -133,6 +121,7 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
     if (!draft || !baseline || dirty.length === 0) return;
     const errors = numberErrors(draft, t);
     if (errors.length > 0) {
+      setAdvancedOpen(true);
       setSaveError(errors.join("；"));
       return;
     }
@@ -234,232 +223,253 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
 
   return (
     <div className="settings-general automode-settings">
-      <h2 className="settings-general-title">{t("common.autoMode")}</h2>
-      <p className="settings-general-description">{t("automode.description")}</p>
+      <div className="automode-content">
+        <div className="automode-form">
+          <header className="automode-header">
+            <div>
+              <h2 className="settings-general-title">{t("common.autoMode")}</h2>
+              <p className="settings-general-description">{t("automode.description")}</p>
+            </div>
+            {state && (
+              <label className="automode-scope">
+                <span>{t("automode.scope")}</span>
+                <select
+                  value={scope}
+                  onChange={(event) => setScope(event.target.value as Scope)}
+                  className="automode-input"
+                >
+                  <option value="global">{t("automode.scopeGlobal")}</option>
+                  <option value="project" disabled={!cwd || !state.trusted}>
+                    {t("automode.scopeProject")}
+                  </option>
+                </select>
+              </label>
+            )}
+          </header>
 
-      {loadError && <p role="alert" className="settings-general-error">{t("automode.loadFailed", { error: loadError })}</p>}
-      {!state && !loadError && <p className="settings-general-description">{t("i18n.loading")}</p>}
+          {loadError && <p role="alert" className="settings-general-error">{t("automode.loadFailed", { error: loadError })}</p>}
+          {!state && !loadError && <p className="settings-general-description">{t("i18n.loading")}</p>}
 
-      {state && effective && draft && baseline && (
-        <>
-          <label className="automode-scope">
-            <span>{t("automode.scope")}</span>
-            <select
-              value={scope}
-              onChange={(event) => setScope(event.target.value as Scope)}
-              style={{ ...inputStyle, width: "auto" }}
-            >
-              <option value="global">{t("automode.scopeGlobal")}</option>
-              <option value="project" disabled={!cwd || !state.trusted}>
-                {t("automode.scopeProject")}
-              </option>
-            </select>
-          </label>
-          {cwd && !state.trusted && <p className="settings-general-description">{t("automode.untrusted")}</p>}
-          {state.diagnostics.length > 0 && (
-            <ul className="settings-general-error">
-              {state.diagnostics.map((line) => <li key={line}>{line}</li>)}
-            </ul>
-          )}
+          {state && effective && draft && baseline && (
+            <>
+              {cwd && !state.trusted && <p className="settings-general-description">{t("automode.untrusted")}</p>}
+              {state.diagnostics.length > 0 && (
+                <ul className="settings-general-error">
+                  {state.diagnostics.map((line) => <li key={line}>{line}</li>)}
+                </ul>
+              )}
 
-          <section className="settings-general-section">
-            <h3 className="settings-general-heading">{t("automode.switch")}</h3>
-            <div className="settings-chat-options">
-              <div className="settings-chat-option settings-chat-switch-option">
-                <span>{t("automode.enabled")}</span>
+              <section className="automode-enabled">
+                <div>
+                  <h3 className="settings-general-heading">{t("automode.enabled")}</h3>
+                  <p className="settings-general-description">{t("automode.enabledHint")}</p>
+                </div>
                 <ConfigSwitch
                   checked={draft.enabled}
                   label={t("automode.enabled")}
                   onChange={(next) => update("enabled", next)}
                 />
-              </div>
-            </div>
-            <p className="settings-general-description">{t("automode.enabledHint")}</p>
-          </section>
+              </section>
 
-          <section className="settings-general-section">
-            <h3 className="settings-general-heading">{t("automode.models")}</h3>
-            <div style={{ display: "grid", gap: 10 }}>
-              <div style={{ display: "grid", gap: 5 }}>
-                <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("automode.primaryModel")}</span>
-                <div style={{ display: "flex", gap: 8, minWidth: 0 }}>
-                  <ModelSpecField
-                    label={t("automode.primaryModel")}
-                    value={draft.classifierModel}
-                    options={modelOptions}
-                    loading={modelsLoading}
-                    emptyLabel={t("automode.inherited")}
-                    onChange={(spec) => update("classifierModel", spec)}
-                  />
-                  <ConfigButton
-                    variant="secondary"
-                    size="small"
-                    disabled={!draft.classifierModel.trim() || testing !== null}
-                    onClick={() => void runTest("primary", draft.classifierModel)}
-                  >
-                    {testing === "primary" ? t("automode.testing") : t("automode.test")}
-                  </ConfigButton>
-                </div>
-                {!draft.classifierModel.trim() && effective.classifierModel && (
-                  <p className="settings-general-description">
-                    {t("automode.inheritedModel", { model: formatModelSpecLabel(effective.classifierModel) })}
-                  </p>
-                )}
-                <ResultLine result={results.primary} />
-              </div>
-
-              <div style={{ display: "grid", gap: 5 }}>
-                <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("automode.fallbackModels")}</span>
-                {draft.classifierFallbackModels.map((spec, index) => (
-                  <div key={`fallback-${index}`} style={{ display: "grid", gap: 3 }}>
-                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                      <span style={{ width: 18, color: "var(--text-dim)", fontSize: 11 }}>{index + 1}</span>
+              <section className="settings-general-section">
+                <h3 className="settings-general-heading">{t("automode.models")}</h3>
+                <div className="automode-models">
+                  <div className="automode-field">
+                    <span className="automode-label">{t("automode.primaryModel")}</span>
+                    <div className="automode-primary-row">
                       <ModelSpecField
-                        label={t("automode.fallbackModel", { index: index + 1 })}
-                        value={spec}
+                        label={t("automode.primaryModel")}
+                        value={draft.classifierModel}
                         options={modelOptions}
                         loading={modelsLoading}
-                        emptyLabel={t("automode.emptyFallback")}
-                        onChange={(next) => setFallback(index, next)}
+                        emptyLabel={t("automode.inherited")}
+                        onChange={(spec) => update("classifierModel", spec)}
                       />
-                      <ConfigButton variant="ghost" size="small" title={t("automode.moveUp")} aria-label={t("automode.moveUp")} disabled={index === 0} onClick={() => moveFallback(index, -1)}>↑</ConfigButton>
-                      <ConfigButton variant="ghost" size="small" title={t("automode.moveDown")} aria-label={t("automode.moveDown")} disabled={index === draft.classifierFallbackModels.length - 1} onClick={() => moveFallback(index, 1)}>↓</ConfigButton>
                       <ConfigButton
                         variant="secondary"
                         size="small"
-                        disabled={!spec.trim() || testing !== null}
-                        onClick={() => void runTest(`fallback-${index}`, spec)}
+                        disabled={!draft.classifierModel.trim() || testing !== null}
+                        onClick={() => void runTest("primary", draft.classifierModel)}
                       >
-                        {testing === `fallback-${index}` ? t("automode.testing") : t("automode.test")}
+                        {testing === "primary" ? t("automode.testing") : t("automode.test")}
                       </ConfigButton>
+                    </div>
+                    {!draft.classifierModel.trim() && effective.classifierModel && (
+                      <p className="settings-general-description">
+                        {t("automode.inheritedModel", { model: formatModelSpecLabel(effective.classifierModel) })}
+                      </p>
+                    )}
+                    <ResultLine result={results.primary} />
+                  </div>
+
+                  <div className="automode-field">
+                    <div className="automode-fallback-header">
+                      <span className="automode-label">{t("automode.fallbackModels")}</span>
                       <ConfigButton
                         variant="ghost"
                         size="small"
-                        title={t("automode.remove")}
-                        aria-label={t("automode.remove")}
-                        onClick={() => update("classifierFallbackModels", draft.classifierFallbackModels.filter((_, i) => i !== index))}
+                        onClick={() => update("classifierFallbackModels", [...draft.classifierFallbackModels, ""])}
                       >
-                        ✕
+                        <span aria-hidden="true">＋</span>{t("automode.addFallback")}
                       </ConfigButton>
                     </div>
-                    <div style={{ paddingLeft: 24 }}>
-                      <ResultLine result={results[`fallback-${index}`]} />
+                    {draft.classifierFallbackModels.map((spec, index) => (
+                      <div key={`fallback-${index}`} className="automode-fallback">
+                        <div className="automode-fallback-row">
+                          <span className="automode-order">{index + 1}</span>
+                          <ModelSpecField
+                            label={t("automode.fallbackModel", { index: index + 1 })}
+                            value={spec}
+                            options={modelOptions}
+                            loading={modelsLoading}
+                            emptyLabel={t("automode.emptyFallback")}
+                            onChange={(next) => setFallback(index, next)}
+                          />
+                          <div className="automode-row-actions">
+                            <ConfigButton className="automode-icon-button" variant="ghost" size="small" title={t("automode.moveUp")} aria-label={t("automode.moveUp")} disabled={index === 0} onClick={() => moveFallback(index, -1)}>↑</ConfigButton>
+                            <ConfigButton className="automode-icon-button" variant="ghost" size="small" title={t("automode.moveDown")} aria-label={t("automode.moveDown")} disabled={index === draft.classifierFallbackModels.length - 1} onClick={() => moveFallback(index, 1)}>↓</ConfigButton>
+                            <ConfigButton
+                              variant="secondary"
+                              size="small"
+                              disabled={!spec.trim() || testing !== null}
+                              onClick={() => void runTest(`fallback-${index}`, spec)}
+                            >
+                              {testing === `fallback-${index}` ? t("automode.testing") : t("automode.test")}
+                            </ConfigButton>
+                            <ConfigButton
+                              variant="ghost"
+                              size="small"
+                              className="automode-icon-button"
+                              title={t("automode.remove")}
+                              aria-label={t("automode.remove")}
+                              onClick={() => update("classifierFallbackModels", draft.classifierFallbackModels.filter((_, i) => i !== index))}
+                            >
+                              ✕
+                            </ConfigButton>
+                          </div>
+                        </div>
+                        <div className="automode-fallback-result">
+                          <ResultLine result={results[`fallback-${index}`]} />
+                        </div>
+                      </div>
+                    ))}
+                    <details className="automode-help">
+                      <summary>{t("automode.fallbackRules")}</summary>
+                      <p className="settings-general-description">{t("automode.fallbackHint")}</p>
+                    </details>
+                  </div>
+                </div>
+              </section>
+
+              <details className="automode-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+                <summary>{t("automode.advanced")}</summary>
+                <section className="settings-general-section">
+                  <h3 className="settings-general-heading">{t("automode.budget")}</h3>
+                  <div className="automode-budget-grid">
+                    <label className="automode-field">
+                      <span className="automode-label">{t("automode.reasoning")}</span>
+                      <select
+                        value={draft.classifierReasoningLevel}
+                        onChange={(event) => update("classifierReasoningLevel", event.target.value)}
+                        className="automode-input"
+                      >
+                        <option value="">{t("automode.reasoningServer")}</option>
+                        {REASONING_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                      </select>
+                    </label>
+
+                    <NumberField
+                      label={t("automode.timeout")}
+                      hint={t("automode.timeoutHint", { value: String(state.defaults.classifierTimeoutMs) })}
+                      value={draft.classifierTimeoutMs}
+                      inheritedValue={placeholder(effective.classifierTimeoutMs)}
+                      onChange={(value) => update("classifierTimeoutMs", value)}
+                    />
+                    <NumberField
+                      label={t("automode.maxTokens")}
+                      hint={t("automode.maxTokensHint", { value: String(state.defaults.fastClassifierMaxTokens) })}
+                      value={draft.fastClassifierMaxTokens}
+                      inheritedValue={placeholder(effective.fastClassifierMaxTokens)}
+                      onChange={(value) => update("fastClassifierMaxTokens", value)}
+                    />
+                    <NumberField
+                      label={t("automode.transcriptUser")}
+                      hint={t("automode.transcriptHint", { value: String(state.defaults.maxUserTranscriptTokens) })}
+                      value={draft.maxUserTranscriptTokens}
+                      inheritedValue={placeholder(effective.maxUserTranscriptTokens)}
+                      onChange={(value) => update("maxUserTranscriptTokens", value)}
+                    />
+                    <NumberField
+                      label={t("automode.transcriptTool")}
+                      hint={t("automode.transcriptHint", { value: String(state.defaults.maxToolTranscriptTokens) })}
+                      value={draft.maxToolTranscriptTokens}
+                      inheritedValue={placeholder(effective.maxToolTranscriptTokens)}
+                      onChange={(value) => update("maxToolTranscriptTokens", value)}
+                    />
+                  </div>
+                </section>
+
+                <section className="settings-general-section">
+                  <h3 className="settings-general-heading">{t("automode.behavior")}</h3>
+                  <div className="settings-chat-options">
+                    <div className="settings-chat-option settings-chat-switch-option">
+                      <span>{t("automode.classifyReadOnly")}</span>
+                      <ConfigSwitch
+                        checked={draft.classifyReadOnlyTools}
+                        label={t("automode.classifyReadOnly")}
+                        onChange={(next) => update("classifyReadOnlyTools", next)}
+                      />
+                    </div>
+                    <div className="settings-chat-option settings-chat-switch-option">
+                      <span>{t("automode.allowInside")}</span>
+                      <ConfigSwitch
+                        checked={draft.allowInsideWorkingDirectory}
+                        label={t("automode.allowInside")}
+                        onChange={(next) => update("allowInsideWorkingDirectory", next)}
+                      />
+                    </div>
+                    <div className="settings-chat-option settings-chat-switch-option">
+                      <span>{t("automode.logEnabled")}</span>
+                      <ConfigSwitch
+                        checked={draft.logEnabled}
+                        label={t("automode.logEnabled")}
+                        onChange={(next) => update("logEnabled", next)}
+                      />
+                    </div>
+                    <div className="settings-chat-option settings-chat-switch-option">
+                      <span>{t("automode.logIo")}</span>
+                      <ConfigSwitch
+                        checked={draft.logClassifierIo}
+                        disabled={!draft.logEnabled}
+                        label={t("automode.logIo")}
+                        onChange={(next) => update("logClassifierIo", next)}
+                      />
                     </div>
                   </div>
-                ))}
-                <div>
-                  <ConfigButton
-                    variant="secondary"
-                    size="small"
-                    onClick={() => update("classifierFallbackModels", [...draft.classifierFallbackModels, ""])}
-                  >
-                    {t("automode.addFallback")}
-                  </ConfigButton>
-                </div>
-                <p className="settings-general-description">{t("automode.fallbackHint")}</p>
-              </div>
-            </div>
-          </section>
+                  <p className="settings-general-description">{t("automode.behaviorHint")}</p>
+                  <div className="automode-field automode-paths">
+                    <span className="automode-label">{t("automode.deniedPaths")}</span>
+                    <textarea
+                      aria-label={t("automode.deniedPaths")}
+                      value={draft.deniedPaths}
+                      onChange={(event) => update("deniedPaths", event.target.value)}
+                      rows={4}
+                      className="automode-input automode-textarea"
+                    />
+                    <p className="settings-general-description">{t("automode.deniedPathsHint")}</p>
+                  </div>
+                </section>
 
-          <section className="settings-general-section">
-            <h3 className="settings-general-heading">{t("automode.budget")}</h3>
-            <div style={{ display: "grid", gap: 12 }}>
-              <label style={{ display: "grid", gap: 5 }}>
-                <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("automode.reasoning")}</span>
-                <select
-                  value={draft.classifierReasoningLevel}
-                  onChange={(event) => update("classifierReasoningLevel", event.target.value)}
-                  style={{ ...inputStyle, height: 34 }}
-                >
-                  <option value="">{t("automode.reasoningServer")}</option>
-                  {REASONING_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
-                </select>
-              </label>
+              </details>
+            </>
+          )}
+        </div>
+      </div>
 
-              <NumberField
-                label={t("automode.timeout")}
-                hint={t("automode.timeoutHint", { value: String(state.defaults.classifierTimeoutMs) })}
-                value={draft.classifierTimeoutMs}
-                inheritedValue={placeholder(effective.classifierTimeoutMs)}
-                onChange={(value) => update("classifierTimeoutMs", value)}
-              />
-              <NumberField
-                label={t("automode.maxTokens")}
-                hint={t("automode.maxTokensHint", { value: String(state.defaults.fastClassifierMaxTokens) })}
-                value={draft.fastClassifierMaxTokens}
-                inheritedValue={placeholder(effective.fastClassifierMaxTokens)}
-                onChange={(value) => update("fastClassifierMaxTokens", value)}
-              />
-              <NumberField
-                label={t("automode.transcriptUser")}
-                hint={t("automode.transcriptHint", { value: String(state.defaults.maxUserTranscriptTokens) })}
-                value={draft.maxUserTranscriptTokens}
-                inheritedValue={placeholder(effective.maxUserTranscriptTokens)}
-                onChange={(value) => update("maxUserTranscriptTokens", value)}
-              />
-              <NumberField
-                label={t("automode.transcriptTool")}
-                hint={t("automode.transcriptHint", { value: String(state.defaults.maxToolTranscriptTokens) })}
-                value={draft.maxToolTranscriptTokens}
-                inheritedValue={placeholder(effective.maxToolTranscriptTokens)}
-                onChange={(value) => update("maxToolTranscriptTokens", value)}
-              />
-            </div>
-          </section>
-
-          <section className="settings-general-section">
-            <h3 className="settings-general-heading">{t("automode.behavior")}</h3>
-            <div className="settings-chat-options">
-              <div className="settings-chat-option settings-chat-switch-option">
-                <span>{t("automode.classifyReadOnly")}</span>
-                <ConfigSwitch
-                  checked={draft.classifyReadOnlyTools}
-                  label={t("automode.classifyReadOnly")}
-                  onChange={(next) => update("classifyReadOnlyTools", next)}
-                />
-              </div>
-              <div className="settings-chat-option settings-chat-switch-option">
-                <span>{t("automode.allowInside")}</span>
-                <ConfigSwitch
-                  checked={draft.allowInsideWorkingDirectory}
-                  label={t("automode.allowInside")}
-                  onChange={(next) => update("allowInsideWorkingDirectory", next)}
-                />
-              </div>
-              <div className="settings-chat-option settings-chat-switch-option">
-                <span>{t("automode.logEnabled")}</span>
-                <ConfigSwitch
-                  checked={draft.logEnabled}
-                  label={t("automode.logEnabled")}
-                  onChange={(next) => update("logEnabled", next)}
-                />
-              </div>
-              <div className="settings-chat-option settings-chat-switch-option">
-                <span>{t("automode.logIo")}</span>
-                <ConfigSwitch
-                  checked={draft.logClassifierIo}
-                  disabled={!draft.logEnabled}
-                  label={t("automode.logIo")}
-                  onChange={(next) => update("logClassifierIo", next)}
-                />
-              </div>
-            </div>
-            <p className="settings-general-description">{t("automode.behaviorHint")}</p>
-            <div style={{ display: "grid", gap: 5, marginTop: 12 }}>
-              <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("automode.deniedPaths")}</span>
-              <textarea
-                aria-label={t("automode.deniedPaths")}
-                value={draft.deniedPaths}
-                onChange={(event) => update("deniedPaths", event.target.value)}
-                rows={4}
-                style={{ ...inputStyle, height: "auto", padding: 9, lineHeight: 1.5, fontFamily: "var(--font-mono)", resize: "vertical" }}
-              />
-              <p className="settings-general-description">{t("automode.deniedPathsHint")}</p>
-            </div>
-          </section>
-
-          <section className="settings-general-section">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      {state && effective && draft && baseline && (
+        <footer className="automode-footer">
+          <div className="automode-footer-inner">
+            <div className="automode-footer-actions">
               <ConfigButton variant="primary" disabled={dirty.length === 0 || saving} onClick={() => void save()}>
                 {saving ? t("automode.saving") : t("i18n.save")}
               </ConfigButton>
@@ -488,8 +498,8 @@ export function AutomodeConfig({ cwd, sessionId, onReloaded }: Props) {
                 {t("agents.reloadRequired")}
               </p>
             )}
-          </section>
-        </>
+          </div>
+        </footer>
       )}
     </div>
   );
@@ -525,7 +535,7 @@ function ModelSpecField({ label, value, options, loading, emptyLabel, onChange }
         value={value}
         placeholder={emptyLabel}
         onChange={(event) => onChange(event.target.value)}
-        style={inputStyle}
+        className="automode-input"
       />
     );
   }
@@ -560,7 +570,7 @@ async function getJson(url: string): Promise<unknown> {
 function ResultLine({ result }: { result?: { ok: boolean; text: string } }) {
   if (!result) return null;
   return (
-    <p role="status" style={{ margin: 0, fontSize: 11, color: result.ok ? "var(--text-muted)" : "var(--danger, #e88)" }}>
+    <p role="status" className={`automode-result${result.ok ? "" : " is-error"}`}>
       {result.text}
     </p>
   );
@@ -574,8 +584,8 @@ function NumberField({ label, hint, value, inheritedValue, onChange }: {
   onChange: (value: string) => void;
 }) {
   return (
-    <label style={{ display: "grid", gap: 4 }}>
-      <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+    <label className="automode-field">
+      <span className="automode-label">
         {label}
       </span>
       <input
@@ -584,9 +594,9 @@ function NumberField({ label, hint, value, inheritedValue, onChange }: {
         value={value}
         placeholder={inheritedValue}
         onChange={(event) => onChange(event.target.value)}
-        style={inputStyle}
+        className="automode-input"
       />
-      <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{hint}</span>
+      <span className="automode-hint">{hint}</span>
     </label>
   );
 }

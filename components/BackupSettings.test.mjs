@@ -10,4 +10,21 @@ test("restore includes per-resource decisions, consent and target fingerprint",(
 test("component cleanup releases owned operations and passwords",()=>{assert.match(source,/ownedTokens/);assert.match(source,/ownedOperation/);assert.match(source,/unsubscribe\?\.\(\)/);assert.match(source,/clearPasswords\(\)/);assert.doesNotMatch(source,/localStorage\.setItem|console\.log/);});
 test("all literal and dynamic backup keys exist in every built-in locale",()=>{const keys=new Set([...source.matchAll(/["'](backup\.[\w.]+)["']/g)].map(m=>m[1]).filter(k=>k!=="backup.phase."&&k!=="backup.availability."));for(const l of ["en","zh-CN","zh-TW"]){const messages=backupMessages(l);for(const k of keys)assert.ok(messages[k],l+": "+k);for(const k of ["scan","export","verify","stage","commit","rollback","done"])assert.ok(messages['backup.phase.'+k]);for(const k of ["offlineReady","requiresReinstall","unresolved"])assert.ok(messages['backup.availability.'+k]);assert.ok(!Object.keys(messages).some(k=>/private|publicHint/.test(k)));}});
 test("startup recovery precedes preference-owning UI module initialization",()=>{const renderer=readFileSync(new URL('../renderer/main.tsx',import.meta.url),'utf8');const startup=renderer.slice(renderer.indexOf('async function startRenderer'));const gate=startup.indexOf('await window.piDesktop?.backupBoot?.()');assert.ok(gate>=0);for(const module of ['../components/AppShell','../hooks/useI18n','./backend-recovery'])assert.ok(startup.indexOf('import("'+module+'")')>gate);assert.doesNotMatch(renderer,/^import.*(?:AppShell|I18nProvider|BackendRecoveryBar).*from/m);});
+test("backup uses concise names and keeps safety information outside collapsed resource details",()=>{
+  for(const [locale,title] of [["zh-CN","备份"],["zh-TW","備份"],["en","Backup"]]) assert.equal(backupMessages(locale)["backup.title"],title);
+  assert.match(source,/className="backup-passwords"/);
+  assert.match(source,/className="backup-input"/);
+  assert.doesNotMatch(source,/passwordStyle|style=\{\{ marginBottom/);
+  const scan=source.slice(source.indexOf('{scan && <div className="backup-scan">'),source.indexOf('<div className="backup-passwords">'));
+  assert.ok(scan.indexOf("</details>")<scan.indexOf("warnings(scan.preview.warnings)"));
+  assert.ok(scan.indexOf("</details>")<scan.indexOf("scan.preview.blockers"));
+  assert.ok(scan.indexOf("</details>")<scan.indexOf("checked={acknowledgeWarnings}"));
+  const css=readFileSync(new URL("../app/settings.css",import.meta.url),"utf8");
+  assert.match(css,/@container \(max-width: 400px\)/);
+  assert.match(css,/\.backup-passwords\s*\{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  for(const locale of ["en","zh-CN","zh-TW"]) {
+    const scope=backupMessages(locale)["backup.scopeHint"];
+    assert.ok(scope.length>0);
+  }
+});
 test("settings component bundles without Node filesystem or duplicate bridge",async()=>{await build({entryPoints:[new URL('./BackupSettings.tsx',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1')],bundle:true,platform:'browser',format:'esm',write:false,jsx:'automatic',logLevel:'silent'});});

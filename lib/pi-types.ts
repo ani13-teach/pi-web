@@ -199,6 +199,7 @@ export interface AgentSessionLike {
   clearQueue(): { steering: string[]; followUp: string[] };
   getAllTools(): ToolInfo[];
   getActiveToolNames(): string[];
+  getCallableToolNames?(): string[];
   setActiveToolsByName(names: string[]): void;
   abortCompaction(): void;
   getContextUsage(): ContextUsage | undefined;

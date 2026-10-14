@@ -1,4 +1,6 @@
+import { authModelMessages } from "./auth-models";
 import { backupMessages } from "./backup";
+import { mcpMessages } from "./mcp";
 import type { LocalePlugin } from "../types";
 
 /** Pi Web 內建繁體中文語系。 */
@@ -6,6 +8,7 @@ export const zhTWLocale: LocalePlugin = {
   id: "zh-TW",
   label: "繁體中文",
   messages: {
+    ...authModelMessages("zh-TW"),
     "common.ok": "確定",
     "common.language": "語言",
     "common.models": "模型",
@@ -48,6 +51,7 @@ export const zhTWLocale: LocalePlugin = {
     "settings.codemodeDescription": "讓 AI 用 JavaScript 並行呼叫工具、篩選結果，減少來回呼叫。保留原有工具和安全檢查；預設關閉，純聊天模式不啟用。切換後自動重新載入目前會話，其他會話需重新載入。",
     "settings.projectRequired": "開啟專案後才能設定此項",
     ...backupMessages("zh-TW"),
+    ...mcpMessages("zh-TW"),
     "auth.prompt": "登入後繼續使用",
     "auth.password": "密碼",
     "auth.logIn": "登入",
@@ -837,6 +841,8 @@ export const zhTWLocale: LocalePlugin = {
     "automode.testing": "正在試…",
     "automode.testOk": "{ms} 毫秒答上了（{text}）",
     "automode.testFailed": "沒通：{error}",
+    "automode.advanced": "進階設定",
+    "automode.fallbackRules": "備用模型使用規則",
     "automode.budget": "時間和用量",
     "automode.reasoning": "思考檔次",
     "automode.reasoningServer": "讓伺服器自己選",
